@@ -1,0 +1,235 @@
+{
+  "knowledge_pack": "FruitCropXL project knowledge",
+  "last_updated": "2026-08-05",
+  "location": "Model_documents/project_knowledge",
+  "entries": [
+    {
+      "file": "00_project_overview.md",
+      "title": "FruitCropXL project overview",
+      "source_files": [
+        "README.md",
+        "Scripts/main/readme.txt",
+        "AGENTS.md"
+      ],
+      "tags": [
+        "overview",
+        "fspm",
+        "species",
+        "scales"
+      ],
+      "description": "High-level model purpose, scales, and use cases.",
+      "content_sha256": "f84866446a603888dc6ac998cfe6ceb5e0f5f5d22e9b6ca55c4c9b8b06182e20",
+      "resolved_source_count": 3,
+      "source_snapshot_sha256": "5c8bb8bd791cef3e6be9664a204dc5abff9bbf9e85c7734212c596b4d158b3be"
+    },
+    {
+      "file": "01_repo_structure.md",
+      "title": "Repository structure map",
+      "source_files": [
+        "AGENTS.md",
+        "Scripts/AGENTS.md",
+        "Model_documents/README.md",
+        "tests/README.md"
+      ],
+      "tags": [
+        "repo",
+        "folders",
+        "navigation"
+      ],
+      "description": "Where core code, docs, scenarios, outputs, and tests live.",
+      "content_sha256": "3c634da5459b65235e8b403e8ea39dc15164bbb6d305d40af478ce7aae38b7e4",
+      "resolved_source_count": 4,
+      "source_snapshot_sha256": "448e323ebda7302ada9efc5fb39a4c3fb2d72f5b036933511967e392dc7ca743"
+    },
+    {
+      "file": "02_model_architecture.md",
+      "title": "Model architecture and execution flow",
+      "source_files": [
+        "Scripts/main/main.rgg",
+        "Scripts/main/developBase.rgg",
+        "Scripts/main/updatesBase.rgg",
+        "Scripts/organs/absOrgans/fruitBase.rgg",
+        "Scripts/alterModules/fruit/berrySimple.rgg"
+      ],
+      "tags": [
+        "architecture",
+        "execution",
+        "services"
+      ],
+      "description": "Init/update/develop flow and service-factory switching logic.",
+      "content_sha256": "e273d1de30be8e265642d15056962c81b420ea0af35f8ff33e637d46eb3731be",
+      "resolved_source_count": 5,
+      "source_snapshot_sha256": "b2cc33c6412e7048038c944cb6c3f1d2382ec2d4e503b263aae7698eaec9fe88"
+    },
+    {
+      "file": "03_groimp_xl_syntax_notes.md",
+      "title": "GroIMP / XL syntax notes",
+      "source_files": [
+        "Model_documents/softdoc/notes and diagram/GroIMP_XL_Tips.txt",
+        "Scripts/main/main.rgg"
+      ],
+      "tags": [
+        "groimp",
+        "xl",
+        "syntax",
+        "queries"
+      ],
+      "description": "Repo-relevant XL/RGG syntax and practical pitfalls.",
+      "content_sha256": "94336f0818fd71e913fc4d4da5fb9199420d24dbbcba007002c6152e6433407c",
+      "resolved_source_count": 2,
+      "source_snapshot_sha256": "759ef0f6a178382366fe6a142bda69bb265b042ecc3c4f36ad9293a9f1e6d91b"
+    },
+    {
+      "file": "04_physiology_modules.md",
+      "title": "Physiology modules summary",
+      "source_files": [
+        "README.md",
+        "Scripts/config/modelOptions.rgg",
+        "AGENTS.md",
+        "Scripts/organs/absOrgans/fruitBase.rgg",
+        "Scripts/alterModules/fruit/berrySimple.rgg"
+      ],
+      "tags": [
+        "physiology",
+        "light",
+        "water",
+        "carbon",
+        "fruit"
+      ],
+      "description": "Condensed process-module behavior and assumptions.",
+      "content_sha256": "e52d12b8ebe43d9b16f327badadc9f2db6628eed5c924a0d867073fe1c715c1c",
+      "resolved_source_count": 5,
+      "source_snapshot_sha256": "c4e0f22b079cbd95948ca2f0466d31abc55ca931dc14afcf3fc9d0531ab9dabd"
+    },
+    {
+      "file": "05_species_and_modularity.md",
+      "title": "Species and modularity switches",
+      "source_files": [
+        "Scripts/main/developBase.rgg",
+        "Scripts/main/updatesBase.rgg",
+        "Scripts/config/modelOptions.rgg",
+        "Model_scenarios/_templates/model.options.template.json"
+      ],
+      "tags": [
+        "species",
+        "modularity",
+        "switches"
+      ],
+      "description": "Apple/grapevine routing and major module toggles.",
+      "content_sha256": "fbfb3f93bec97c3389a94bb9418435fdb6f0e2ac23b70f53ff8d619956dfdd01",
+      "resolved_source_count": 4,
+      "source_snapshot_sha256": "015448fa98df945b6e0c47cc0479eb108c2ebef9f7b8d1780b60872d25d0dac5"
+    },
+    {
+      "file": "06_inputs_outputs_and_configs.md",
+      "title": "Inputs, outputs, and configs",
+      "source_files": [
+        "Model_documents/config-execution/model-options-guide.md",
+        "Model_documents/config-execution/plant-parameters-guide.md",
+        "Model_documents/config-execution/initial-conditions-guide.md",
+        "Scripts/main/outputTables.rgg",
+        "Scripts/main/diagnosticTables.rgg"
+      ],
+      "tags": [
+        "configuration",
+        "outputs",
+        "units"
+      ],
+      "description": "Scenario conventions, key switches, outputs, and fragile settings.",
+      "content_sha256": "b1c0eb217a12ddc05c62e8d9a52e3a844a1c863b02c899e1f3a7cf5b6c9691b8",
+      "resolved_source_count": 5,
+      "source_snapshot_sha256": "49a61e43c4b48a82ee3007b230d9fcac3d008a7648a6e73754b232505ff274b4"
+    },
+    {
+      "file": "07_testing_and_ci.md",
+      "title": "Testing and CI workflow",
+      "source_files": [
+        "tests/README.md",
+        "tests/validation/README.md",
+        "tests/smoke_test/README.md",
+        "tests/smoke_test/unitTest.sh",
+        "tests/diagnosis/README.md",
+        "tests/diagnosis/grep_compile_errors.sh",
+        "tests/gsz_test/README.md",
+        "tests/gsz_test/validate_gsz_structure.sh",
+        "tests/validation/run_multiple_scenarios.sh",
+        "tests/validation/run_groimp_tests.sh",
+        "AGENTS.md"
+      ],
+      "tags": [
+        "testing",
+        "ci",
+        "validation"
+      ],
+      "description": "Portable smoke tests, local acceptance, and script roles.",
+      "content_sha256": "168af2dbd52ae0f3a543f262b6964829eb3775050c28715162bf46a85e75f7fd",
+      "resolved_source_count": 11,
+      "source_snapshot_sha256": "b48755aa73d13efbac118584030ad7ce380daf2bb620948b1c566ad8587adb37"
+    },
+    {
+      "file": "08_coding_conventions.md",
+      "title": "Coding conventions",
+      "source_files": [
+        "AGENTS.md",
+        "Scripts/AGENTS.md"
+      ],
+      "tags": [
+        "style",
+        "compatibility",
+        "java15",
+        "groimp"
+      ],
+      "description": "Compatibility and safety conventions for edits.",
+      "content_sha256": "8f35a2fe4aaa6940366c5df92f773b512677b63aa5f377b24b785954261396b7",
+      "resolved_source_count": 2,
+      "source_snapshot_sha256": "f9b8eade01895048f8f0099fabe143a156d4dec7ff9a5533bc3772f082f196dd"
+    },
+    {
+      "file": "09_recent_project_decisions.md",
+      "title": "Recent project decisions",
+      "source_files": [
+        "AGENTS.md",
+        ".agents/skills/fruitcropxl/references/recent-stable-lessons.md",
+        "bash_scripts/update_project_knowledge.sh",
+        "Model_documents/project_knowledge/README.md"
+      ],
+      "tags": [
+        "decisions",
+        "lessons",
+        "validation",
+        "compatibility"
+      ],
+      "description": "Recent stable project rules to preserve behavior and workflows.",
+      "content_sha256": "4420bfa7d7229376fc123f89ad0f227fb1a6483666a461da737f794dbb0be401",
+      "resolved_source_count": 4,
+      "source_snapshot_sha256": "70b7dac55a42ef89d55a32327a0a81448c0611cb982f5fcab2f1a610734f460a"
+    },
+    {
+      "file": "10_key_references.md",
+      "title": "Annotated key references",
+      "source_files": [
+        "Model_documents/GrapevineXL/*.pdf",
+        "Model_documents/softdoc/**/*.pdf",
+        "README.md"
+      ],
+      "tags": [
+        "references",
+        "papers",
+        "literature"
+      ],
+      "description": "Annotated local-paper index and when to consult each reference.",
+      "content_sha256": "1c6df652f68db7ab913365a6883e3e3f44c94074d2780e0654e9dffffe97338a",
+      "resolved_source_count": 60,
+      "source_snapshot_sha256": "ab2c155ee27eb540eeec8d710020b9fe0975906c28f76e1152ca35a91764b007"
+    }
+  ],
+  "schema_version": 2,
+  "generated_by": "bash_scripts/update_project_knowledge.sh",
+  "generated_bundle": "generated_knowledge_bundle.md",
+  "source_snapshot_sha256": "7bfcb5aeed019ea7fbaeb7bddef0f2a3d54ac9ec9c6315e0018ff2db888cdf55",
+  "agent_knowledge": {
+    "skill": ".agents/skills/fruitcropxl/SKILL.md",
+    "curated_lessons": ".agents/skills/fruitcropxl/references/recent-stable-lessons.md",
+    "policy": "Focused notes and curated lessons are maintained sources; the shared bundle is generated and must not be edited directly."
+  }
+}

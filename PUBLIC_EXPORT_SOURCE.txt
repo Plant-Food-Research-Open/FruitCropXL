@@ -1,4 +1,0 @@
-Generated from the authoritative PFR FruitCropXL repository.
-Source commit: 82e5e455571de76eead8e458954bf9f606da96e4
-Source description: stable-2024-12-18-7067-g82e5e455571-dirty
-Exporter: bash_scripts/export-public-repo/export_public_repo.sh

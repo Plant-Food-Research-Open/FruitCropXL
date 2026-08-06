@@ -211,6 +211,14 @@ Customize start times, growth cycles, and harvest schedules to match specific re
 
 Following Java-style documentation, use an external tool such as **Doxygen** (van Heesch, 2008) to generate web-based documentation for the model’s code structure, classes, and methods.
 
+Generate the documentation locally from the repository root with:
+
+```bash
+bash Model_documents/FruitCropXL_doc_bash/module_replace.sh
+```
+
+The generated entry point is `Model_documents/FruitCropXL_doc/index.html`. In the public repository, the manually triggered `Build FruitCropXL Documentation` GitHub Actions workflow builds the same sources and deploys them to the `gh-pages` branch for later GitHub Pages publication.
+
 #### Defining Scenarios
 
 - Scenarios are outlined within an Excel file located in `Scenario_file_generation/1_scenario_and_parameters_excels`.

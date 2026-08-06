@@ -1,5 +1,0 @@
-<?xml version="1.0" encoding="UTF-8" ?>
-<testsuite errors="0" failures="0" hostname="MAR-X-486740" name="classes" tests="1" time="33.077" timestamp="2026-08-06T22:01:36">
-  <properties />
-  <testcase classname="validationTests$StormValidationUnitTest" name="allColumns_withinDiscrepancyThreshold" time="0.042" />
-</testsuite>

@@ -90,3 +90,8 @@ Scenario_file_generation/5_output_tables/.~lock.Heads of the output table.xlsx#
 /Model_visualization/*.tiff
 /Model_visualization/*.tif
 /Model_visualization/Model-cards_original_vectorized_high_detail.svg
+
+# Generated Doxygen output and temporary source copies
+/Model_documents/FruitCropXL_doc/
+/Model_documents/FruitCropXL_doc_bash/Scripts/
+/Model_documents/FruitCropXL_doc_bash/html/
