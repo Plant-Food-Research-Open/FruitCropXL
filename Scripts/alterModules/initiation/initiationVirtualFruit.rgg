@@ -1,0 +1,53 @@
+import static globalParameters.*;
+import static modelOptions.*;
+import static initialConditions.*;
+import static extraTools.*;
+import static plantBase.*;
+import static initiationBase.*;
+import static fruitBase.*;
+import static main.*;
+
+
+public class InitiationVirtualFruit extends InitiationService {
+    public void initiate() {
+    	[
+        {
+            continueRunning = true;
+            focalPlants = 0;
+        }
+        
+        Axiom ==> 
+        [
+            pi:PlantIdentifier pb:PlantBase 
+            {
+            	pi.initiate(1,1,1,1, species);
+            	pb.initiate(1, 1, 1, 1, pi);
+            	FruitService fruit = main.FRUIT_CREATOR.createFruit();
+            	fruit.initData();
+            }
+            for (int i=1; i<=100; i++) (
+			[ 
+				Translate(random(0, 2), random(0, 2), random(0, 2))                         
+
+				b: main.FRUIT_CREATOR.createFruit(FruitService.originalParametersFactory, FruitService.DELTA)
+				{
+					b.initiate_pi(pi, 0.05, 0.05);;
+					b.berryNum = 1;
+					b.ID = i; 
+					
+				}
+			]
+            
+            )
+        ];
+    ]
+    
+    if (Boolean.parseBoolean(ModelArgs.headless) == false && daytime) {
+		try {
+			repaintView3D();
+		} catch (NullPointerException e) {
+			println("No 3D view window open");// Ignore the NullPointerException and proceed.
+		}
+	}
+    }
+}

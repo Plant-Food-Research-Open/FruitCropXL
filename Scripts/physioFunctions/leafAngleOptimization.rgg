@@ -1,0 +1,463 @@
+import static globalParameters.*;
+import static modelOptions.*;
+import static initialConditions.*;
+import static environment.*;
+import static absOrgan.*;
+import static leaf.*;
+import static shoot.*;
+import static plantBase.*;
+import static carbonTransport.*;
+
+import de.grogra.ray.physics.Spectrum;
+import org.apache.commons.math3.geometry.euclidean.threed.Vector3D;
+import org.apache.commons.math3.geometry.euclidean.threed.Rotation;
+import org.apache.commons.math3.geometry.euclidean.threed.RotationOrder;
+import org.apache.commons.math3.geometry.euclidean.threed.RotationConvention;
+import org.apache.commons.math3.geometry.euclidean.threed.Plane;
+import java.util.Arrays;
+import java.time.LocalTime;
+import java.time.format.DateTimeFormatter;
+import java.io.File;
+import java.io.FileWriter;
+
+public static boolean hasBeenOptimized = false;				// True if leaf angles have been optimized
+public static LightModel optimizationLightModel;	// Light model used for computing absorbed light from each direction
+public static int optimizationStep;					// Number of step in optimization process
+public static int optimizationRank;					// Rank of leaves which are currently being optimized
+
+public static int numDiffuseLights = useTurtleRadiation ? 46 : 72;			// Number of diffuse lights
+public static 	Vector3D[] diffuseLightLocations = new Vector3D[numDiffuseLights];	// Location of each diffuse light 
+public static float[] diffuseLightXRotation = new float[numDiffuseLights];			// Rotation around x axis for placing each light
+public static float[] diffuseLightYRotation = new float[numDiffuseLights];			// Rotation around y axis for placing each light
+
+//example about how to run the leaf angle optimization
+void opt() {
+//	if(step > 2 && step < 5) opt(); */
+	/* if(step < 4) {initLeafAngleOptimization(); optimizationRank = 20; initOptimizationMarkers();}
+	if(step > 2) initLeafSensorHemisphere(); */	
+
+ 	initLeafAngleOptimization();
+ 	
+	int times = 60;
+	
+	for(apply(times)) 	angleOptimization();	
+
+	de.grogra.imp3d.View3D view = de.grogra.imp3d.View3D.getDefaultView(workbench());
+	view.repaint();
+
+}
+void angleOptimization() 
+{  
+ 	
+	hourOfDay = 12;
+	daytime = true; 
+	if (useLeafAngleOpt == true && hasBeenOptimized == false ) {
+		globalRadiation = 3000;
+		fdiff = 0.7;
+			updateSolarPosition(year, month, dayOfMonth, hourOfDay,
+						latitude, longitude, elevation, airPressure, Ta);
+		[
+			df:DiffuseLight ::> {df.update(); }
+			dr:DirectLight ::> {dr.update(); }
+		]
+		
+	    runLeafAngleOptimization();
+	    
+	}
+}
+
+/* ##################################################  Functions for set up of leaf angle optimization ###############################################*/
+
+// Initiate the parameters needed for finding radiation locations and calculating optimal leaf angle
+public static void initLeafAngleOptimization()
+{
+	optimizationLightModel = new LightModel(rayCount/10, depth);
+	optimizationStep = 1;
+	hasBeenOptimized = false;
+	optimizationRank = -1;
+	
+	
+	initRadiationLocations();
+}
+
+// Set the initial location for each diffuse light and store the location as a vector
+// in the diffuseLightLocations array
+public static void initRadiationLocations()
+{
+	numDiffuseLights = useTurtleRadiation ? 46 : 72;
+	diffuseLightLocations = new Vector3D[numDiffuseLights];
+	diffuseLightXRotation = new float[numDiffuseLights];
+	diffuseLightYRotation = new float[numDiffuseLights];
+	
+	if (useTurtleRadiation == true) {
+		initTurtleLightRotations();
+	} else {
+		initNonTurtleLightRotations();
+	}
+	for (int i : (0 : numDiffuseLights - 1)) {
+		// Find locatation of each diffuse light using its rotations and place that location in diffuseLightLocations array
+		Rotation r = new Rotation(RotationOrder.XYX, RotationConvention.VECTOR_OPERATOR, 0.5 * Math.PI, diffuseLightYRotation[i] / 180 * Math.PI, 
+		diffuseLightXRotation[i] / 180 * Math.PI); 
+		Vector3D vec = r.applyTo(new Vector3D(0, 0, HeightOfSun)); 
+		diffuseLightLocations[i] = vec; 
+	}
+}
+
+// For turtle light model, add x and y rotations needed to position each diffuse 
+// light node to diffuseLightXRotation and diffuseLightYRotation arrays
+private static void initTurtleLightRotations()
+{
+	int j = 0;
+	for (int i = 0; i<=0; i++) {
+		diffuseLightYRotation[j] = 0; 
+		diffuseLightXRotation[j] = -90;
+		j++;
+	}
+	for (int i = 0; i<=4; i++) {
+		diffuseLightYRotation[j] = i * 72;
+		diffuseLightXRotation[j] = -70.95;
+		j++;
+	}
+	for (int i = 0; i<=4; i++) {
+		diffuseLightYRotation[j] = i * 72 + 36;
+		diffuseLightXRotation[j] = -49.44;
+	j++;
+	}
+	for (int i = 0; i<=4; i++) {
+		diffuseLightYRotation[j] = i * 72;
+		diffuseLightXRotation[j] = -44.12;
+		j++;
+	}
+	for (int i = 0; i<=4; i++) {
+		diffuseLightYRotation[j] = i * 72 + 24;
+		diffuseLightXRotation[j] = -30.99;
+		j++;
+	}
+	for  (int i = 0; i<=4; i++) {
+		diffuseLightYRotation[j] = i * 72 + 48;
+		diffuseLightXRotation[j] = -30.99;
+		j++;
+	}
+	for (int i = 0; i<=4; i++) {
+		diffuseLightYRotation[j] = i + 72;
+		diffuseLightXRotation[j] = -25.07;
+		j++;
+	}
+	for (int i = 0; i<=14; i++) {
+		diffuseLightYRotation[j] = i * 24 + 12;
+		diffuseLightXRotation[j] = -13.42;
+		j++;
+	}
+	
+}
+
+// For non turtle light model, add x and y rotations needed to position each diffuse
+// light node to diffuseLightXRotation and diffuseLightYRotation arrays
+private static void initNonTurtleLightRotations()
+{
+	int j = 0;
+	for (int i = 0; i<12; i++) {
+		diffuseLightYRotation[j] = i*360/12; 
+		diffuseLightXRotation[j] = -11.7;
+		j++;
+	}
+	for (int i = 0; i<12; i++) {
+		diffuseLightYRotation[j] = 20 + i*360/12;
+		diffuseLightXRotation[j] = -34.2;
+		j++;
+	}
+	for (int i = 0; i<12; i++) {
+		diffuseLightYRotation[j] = 40 + i*360/12;
+		diffuseLightXRotation[j] = -54.9;
+	j++;
+	}
+	for (int i = 0; i<12; i++) {
+		diffuseLightYRotation[j] = 60 + i*360/12;
+		diffuseLightXRotation[j] = -71.1;
+		j++;
+	}
+	for (int i = 0; i<12; i++) {
+		diffuseLightYRotation[j] = 80 + i*360/12;
+		diffuseLightXRotation[j] = -82.8;
+		j++;
+	}
+	for  (int i = 0; i<12; i++) {
+		diffuseLightYRotation[j] = 80 + i*360/12;
+		diffuseLightXRotation[j] = -89.1;
+		j++;
+	}
+}
+
+/* ################################################## Functions for running of leaf angle optimization ##############################################*/
+
+// Calls functions to perform steps 1-4 of leaf angle optimization for each optimziaton rank
+public static void runLeafAngleOptimization()
+{
+	
+	if (optimizationRank == -1) {
+		optimizationRank = max((*Leaf*)[rank]);	
+	}
+	if (printFlag) { println(optimizationRank); }
+	
+	if (optimizationStep == 1) {
+		initOptimizationMarkers();
+		optimizationStep++;
+	} else if (optimizationStep == 2) {
+		initLeafSensorHemisphere();
+		optimizationStep++;
+	} else if (optimizationStep == 3) {
+		initLeafSensors();
+		removeLeaves();
+		optimizationStep++;
+	} else if (optimizationStep == 4) {
+		repositionLeaves();
+		optimizationStep = 1;
+		optimizationRank --;
+		if (optimizationRank == 0) {
+			hasBeenOptimized = true;
+		}
+	}
+}
+
+// At base of each leaf place optimization marker which can be used to calculate 
+// angle between local axes and global axis
+private static void initOptimizationMarkers()
+[pt:Petiole, (pt[rank] == optimizationRank) ==>
+	{Leaf lf = first((* l:Leaf, (l.plantNumber == pt.plantNumber &&
+								 l.rank == pt.rank &&
+								 l.nodeNumber == pt.nodeNumber &&
+								 l.cordonNumber == pt.cordonNumber) *));}
+	[RG() RU(90) RL(270) OptimizationMarker(lf)]
+	pt;
+]
+
+// At base of each leaf with current optimization rank rotate axes to align with 
+// global axes and place leaf sensor hemisphere
+private static void initLeafSensorHemisphere()
+[pt:Petiole, (pt[rank] == optimizationRank) ==>
+	{double[] resetAngles = getResetAngles(pt.plantNumber, pt.rank, pt.nodeNumber, pt.cordonNumber);}
+	
+	[RG()
+	Rotate(resetAngles[0], resetAngles[1], resetAngles[2])
+	ls:LeafSensorHemisphere]
+	{ls.initiate(pt);}
+	pt;
+]
+
+// Produce hemisphere of sensors for each leaf sensor hemisphere. This sensors will 
+// be used to calculate incoming light from the direction they point in
+private static void initLeafSensors()
+[lsh:LeafSensorHemisphere ==>
+	lsh
+	if (useTurtleRadiation == false)
+	(
+	RL(90)
+	[ for (int j = 0; j<72; j++) ([ RU(diffuseLightYRotation[j]) RL(diffuseLightXRotation[j]) M(lsh.radius) s:LeafSensor {s.initiate(lsh, j); lsh.sensors[j] = s;}] )]
+	)
+	
+	if(useTurtleRadiation == true)
+	(
+	RL(90)
+	[ for (int j = 0; j<46; j++) ([ RU(diffuseLightYRotation[j]) RL(diffuseLightXRotation[j]) M(lsh.radius) s:LeafSensor {s.initiate(lsh, j); lsh.sensors[j] = s;}] )]
+	)
+	;
+]
+
+// Remove leaf and petiole at current optimization rank so that they don't block
+// light absorbed by leafSensors
+private static void removeLeaves()
+[
+	pt:Petiole, (pt[rank] == optimizationRank) ==> ;	
+	l:Leaf, (l[rank] == optimizationRank) ==> ;
+	jm:JMidrib, (jm.rank == optimizationRank) ==> ;
+]
+
+// Calculate light recieved from each direction, find the direction from which the 
+// most light was recieved, place leaf so it faces that direction and remove sensors
+private static void repositionLeaves()
+{
+	calcAbsByDirection();
+	findMaxLightDirections();
+	anglePetioleTowardsLight();	
+	removeTemporaryOptimizationNodes();
+}
+
+// Calculate the light absorbed by the sensor node pointing in each direction and
+// store it in leafSensorHemisphere's absByDirection array
+private static void calcAbsByDirection()
+[
+	{optimizationLightModel.compute(true);}
+	
+	lsh:LeafSensorHemisphere ::>
+		for (int i = 0; i < numDiffuseLights; i++) {
+			Spectrum spec = optimizationLightModel.getSensedIrradiance(lsh.sensors[i]);
+			lsh.absByDirection[i] = spec.integrate();
+		}
+		
+]
+
+// For each leafSensorHemisphere, find the direction from which it absorbs the most light
+private static void findMaxLightDirections()
+[lsh:LeafSensorHemisphere ::>
+	{float maxAbsorbed = 0;
+	int maxDirection = -1;
+	for (int i : (0 : numDiffuseLights - 1)) {
+		if (lsh.absByDirection[i] > maxAbsorbed) {
+			maxAbsorbed = lsh.absByDirection[i];
+			maxDirection = i;
+		}
+	}
+	lsh.lightDirectionIndex = maxDirection;
+	//if (printFlag) { println("maxDirection " + maxDirection); }
+	}
+]
+
+// Add petiole and leaf with azimuth and elevation angle such that it point in the 
+// direction from which maximum light was recieved by the leafSensorHemisphere
+private static void anglePetioleTowardsLight()
+[
+	lsh:LeafSensorHemisphere RL ==> 
+	
+	{PlantBase pb = first((* p:PlantBase, (p.plantNumber == lsh.plantNumber) *));
+		if (printFlag) { println(pb.plantNumber); }
+	double[] resetAngles = getResetAngles(lsh.plantNumber, lsh.rank, lsh.nodeNumber, lsh.cordonNumber);
+	if (printFlag) { println(Arrays.toString(resetAngles)); }
+	double[] optimizationAngles = getOptimizationAngles(lsh);}
+		
+	Rotate(optimizationAngles[0], optimizationAngles[1], optimizationAngles[2])
+	pt:Petiole
+	{pt.initiate_pb(pb, lsh.rank, lsh.nodeNumber, lsh.cordonNumber);}
+	AdjustLU
+	jm:JMidrib(-90)
+	RU(180)
+	for (int i = 0; i < leafShape.polyleaf[0].length; i++) (
+		[l:Leaf]
+		{
+			l.initiate_pb(pb, lsh.rank, lsh.nodeNumber, lsh.cordonNumber);
+			jm.initiate(l);
+		}
+	)
+	
+	;
+]
+
+// Remove nodes from graph which are only used during leaf angle optimization
+private static void removeTemporaryOptimizationNodes()
+[
+	RG RU RL OptimizationMarker ==> ;
+	RU RL M LeafSensor ==> ;
+]
+
+// Returns array of three angles to set the local axes to the same orientation as
+// the global axes after an RG node is created
+private static double[] getResetAngles(int plantNumber, int rank, int nodeNumber, int cordonNumber)
+{
+	// Find the rotation needed so that the leafs local axes are aligned with the global coordinate axes (after an RG node)
+	OptimizationMarker om = first((* o:OptimizationMarker, (o.rank == rank && o.nodeNumber == nodeNumber && o.cordonNumber == cordonNumber && o.plantNumber == plantNumber) *));
+	double[] resetAngles = {0, 180, om.getLeafRotation()};
+	return resetAngles;
+}
+
+// Calculate rotation angles needed to rotate from oriention of global axes to 
+// direction from which most light is absorbed
+private static double[] getOptimizationAngles(LeafSensorHemisphere lsh)
+{
+	// Compute rotation from base of leaf to optimal direction
+	Vector3D leafLocationVec = new Vector3D(location(lsh).x, location(lsh).y, location(lsh).z);
+	Vector3D optimalDirection = diffuseLightLocations[lsh.lightDirectionIndex].subtract(leafLocationVec);
+	Vector3D globalAxes = new Vector3D(0, 0, 1);
+	Rotation optimizationRotation = new Rotation(globalAxes, optimalDirection);
+	
+	// Convert rotation into array of angles in degrees
+	double[] optimizationAnglesRadians = optimizationRotation.getAngles(RotationOrder.XYZ, RotationConvention.VECTOR_OPERATOR);
+	double[] optimizationAnglesDegrees = new double[optimizationAnglesRadians.length];
+	for (int i : (0 : optimizationAnglesRadians.length - 1)) {
+		optimizationAnglesDegrees[i] = optimizationAnglesRadians[i] * 180 / Math.PI;
+	}
+	return optimizationAnglesDegrees;
+}
+
+/*#################################### Modules used for finding direction from which maximum light is recieved ######################################*/
+
+// Used for finding position of leaf for rotation during optimization.
+// Direction of optimization marker gives orientation of y axis of leaf
+module OptimizationMarker extends Null 
+{
+	int rank;
+	int nodeNumber;
+	int cordonNumber;
+	int plantNumber;
+	
+	OptimizationMarker(Leaf lf)
+	{
+		rank = lf.rank;
+		nodeNumber = lf.nodeNumber;
+		cordonNumber = lf.cordonNumber;
+		plantNumber = lf.plantNumber;
+	}
+	
+	// Get angle for how much leaf must be rotated around z axis so that it is in same orientation as global axis
+	float getLeafRotation()
+	{
+		Vector3d dir = direction(this);
+		float xDir = dir.x;
+		float yDir = dir.y;
+		float angle;
+		if (xDir > 0 && yDir > 0) {
+			angle = Math.atan(xDir/yDir) * 180 / Math.PI;
+		} else if (xDir > 0) {
+			angle = 180 - (Math.atan(Math.abs(xDir/yDir)) * 180 / Math.PI);
+		} else if (yDir > 0) {
+			angle = 360 - (Math.atan(Math.abs(xDir/yDir)) * 180 / Math.PI);
+		} else {
+			angle = 180 + (Math.atan(xDir/yDir) * 180 / Math.PI);
+		}
+		return angle;
+	}
+}
+
+// Senses light absorbed from direction in which it points
+module LeafSensor extends SensorNode
+{
+	int plantNumber;
+	int rank;
+	int nodeNumber;
+	int cordonNumber;
+	int directionIndex;
+	
+	void initiate(LeafSensorHemisphere lsh, int d) {
+		plantNumber = lsh.plantNumber;
+		rank = lsh.rank;
+		nodeNumber = lsh.nodeNumber;
+		cordonNumber = lsh.cordonNumber;
+		radius = lsh.radius / 5;
+		directionIndex = d;
+		exponent = 2;
+		twoSided = false;
+	}
+}
+
+// Produces hemisphere of sensors orientated with same directions as diffuse lights
+// These sensors can be used to identify direction from which most light is absorbed
+module LeafSensorHemisphere
+{
+	int plantNumber;
+	int rank;
+	int nodeNumber;
+	int cordonNumber;
+	float radius;
+	SensorNode[] sensors;
+	float[] absByDirection;
+	int lightDirectionIndex;
+	
+	void initiate(Petiole petiole) {
+		plantNumber = petiole.plantNumber;
+		rank = petiole.rank;
+		nodeNumber = petiole.nodeNumber;
+		cordonNumber = petiole.cordonNumber;
+		radius = petiole.length;
+		sensors = new SensorNode[numDiffuseLights];
+		absByDirection = new float[numDiffuseLights];
+		lightDirectionIndex = -1;
+	}
+}

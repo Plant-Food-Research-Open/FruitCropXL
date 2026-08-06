@@ -1,0 +1,1498 @@
+import static absOrgan.*;
+import static plantBase.*;
+import static java.lang.Math.*;
+import static globalParameters.*;
+import static plantParameters.*;
+import static modelOptions.*;
+import static initialConditions.*;
+import static extraTools.*;
+import static carbonTransport.*;
+import static berryYield.*;
+import static archReader.*;
+import static rootSystem.*;
+import static shoot.*;
+import static budBase.*;
+import static fruitBase.*;
+import java.io.Serializable;
+import io.github.fruitcropxl.config.params.groups.*;
+import io.github.fruitcropxl.config.params.structures.*;
+
+import de.grogra.numeric.CVodeAdapter;
+import interfaces.*;
+// Utils
+import java.util.Arrays;
+import java.util.List;
+import java.util.ArrayList;
+// Jackson Writer
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.databind.JsonNode;
+// JFruit2
+import org.inra.psh.jfruit2.config.ParametersFactory;
+// module for the reproductive organ
+// biomass of fruit was expressed in mg, but during calculation the unit of gram was used as in zhanwu's fruit model
+// so at last, the unit need to be reversed into mg
+
+/** COMPLEX grapevine BERRY module 
+* 	this module uses mg as the unit
+*   for fruit calculation, all water potential parts needs to converted from MPa to bar (1 bar = 0.1 MPa; needs * 10);
+*/
+public module BerryComplex extends FruitService implements Configurable,Serializable 
+{
+	@Override
+	void updateCarbonAllocation(double sugarConcentration) {
+		calcPTCTRAM(sugarConcentration);
+		calcLoading(sugarConcentration);
+		calcLeakage(sugarConcentration);
+		calcUnloading(sugarConcentration);
+	}
+	
+	/**
+	 * Parameters related to fruit growth calculation.
+	 */
+	double matureFreshSeedMass = 50; /**< Mass of mature fresh seed (g). */
+	double thermalTimeFruitsetToVeraison = 500; /**< Thermal time required from fruit set to veraison (degree days). */
+	
+	float  ageD_afver; //days after veraison
+	/**
+	 * Methods for fraction allocation into structural biomass, sugar, and acid.
+	 * Unique to the grape fruit model.
+	 */
+	float kss; /**< Fraction of sugar allocated to soluble sugar. */
+	float kst; /**< Fraction of sugar allocated to structural biomass. */
+	float koa; /**< Fraction of sugar allocated to organic acid. */
+	float kmalic; /**< Fraction of acids allocated to malic acid within organic acids. */
+	float ktartaric; /**< Fraction of acids allocated to tartaric acid. */
+	float kothers; /**< Fraction of acids allocated to other acids within organic acids. */
+	float DegradationRateMalic; /**< Rate of degradation of malic acids. */
+	
+	/**
+	 * Variables used in the grapevine fruit model but not exposed in the virtual fruit.
+	 */
+	double Lpmax; /**< Maximum conductivity for water transport (g.cm-2.h-1.bar-1). */
+	double Lpstar; /**< Proportional to the slope at the inflection point of Lp (g-1). */
+	double Lxmax; /**< Maximum conductivity for water transport in the xylem (g.cm-2.h-1.bar-1). */
+	double Lxstar; /**< Proportional to the slope at the inflection point of Lx (g-1). */
+	double sigmap = 0.9; /**< Reflection coefficient for sugar entering the phloem composite membrane (dimensionless), default value = 0.9. */
+	
+	/**
+	 * Localized plant parameters for growth and water transport.
+	 */
+	public float Cf_veraison; /**< Empirical coefficient for veraison stage, default value = 0.0135. */
+	float sigmax; /**< Reflection coefficient for sugar entering the xylem composite membrane (dimensionless), default value = 1. */
+	float sigmaP0; /**< Maximum value for the three-parameter logistic function. */
+	float ksip; /**< Scaling factor for the three-parameter logistic function. */
+	float coefSip; /**< Inflection point for the three-parameter logistic function. */
+	float permeability_sugar; /**< Permeability of the composite membrane for diffusion (cm h-1), default value = 0.0027. */
+	float acnst; /**< Coefficient to compute the area of the composite membrane (dimensionless), default value = 0.0045. */
+	float Lpmin; /**< Parameter for computing the hydraulic conductance of phloem. */
+	float Lpscale; /**< Scaling parameter for computing the hydraulic conductance of phloem. */
+	float Lxmin; /**< Parameter for computing the hydraulic conductance of xylem. */
+	float Lxscale; /**< Scaling parameter for computing the hydraulic conductance of xylem. */
+	float el0; /**< Default elasticity (bar), default value = 153.2. */
+	float kel; /**< Parameter to calculate elasticity based on turgor pressure and fruit size, default value = 32. */
+	float Hf; /**< Humidity of air space in fruit (dimensionless), default value = 0.996. */
+//this part has been added to the fruit base.
+	// 	public float roMax; /**< Maximum surface conductance for water vapor (cm/h), default value = 200 when using days after fruit set. */
+//	public float roMin; /**< Minimum surface conductance for water vapor (cm/h), default value = 34.65. */
+//	float kro; /**< Rate coefficient for water vapor conductance (g-1 or day-1), depends on the description function, default value = 0.06288. */
+//	float coefRo; /**< Coefficient related to the function describing water vapor conductance (g or day), default value = -21. */
+	
+ 	float rwtr; /**< Water production per unit of respiration (dimensionless), default value = 0.6. */
+	float phi0; /**< Initial osmotic potential coefficient (bar-1), default value = 0.01. */
+	float phiMax; /**< Maximum osmotic potential coefficient (bar-1), default value = 0.020. */
+	float phiMin; /**< Minimum osmotic potential coefficient (bar-1), default value = 0.010. */
+	float kPhi; /**< Rate coefficient for osmotic potential change (day-1), default value = 0.158. */
+	float coefPhi; /**< Coefficient for osmotic potential function (day), default value = 0. */
+	float YC; /**< Y threshold of turgor pressure for growth (bar). */
+	float Y0; /**< Minimum turgor pressure in the fruit (bar). */
+	float gamma; /**< Empirical parameter. */
+	float eta; /**< Empirical parameter for the relation of fruit surface area and fruit weight. */
+
+
+	/**
+	 * Parameters for calculating stone (pit) characteristics.
+	 */
+	float share1; /**< Empirical parameter to calculate stone dry weight, default value = 0.01721. */
+	float share2; /**< Empirical parameter to calculate stone dry weight, default value = 27.99. */
+	float noysf1; /**< Empirical parameter to calculate stone fresh weight (dimensionless), default value = 0.01772239. */
+	float noysf2; /**< Empirical parameter to calculate stone fresh weight (dimensionless), default value = 0.63535422. */
+	
+	/**
+	 * Carbon allocation parameters within the fruit, before and after veraison.
+	 * Includes allocation between structural biomass, sugars, and acids.
+	 */
+	// Before veraison
+	float kss_bv; /**< Fraction of sugar allocated to soluble sugar before veraison, default value = 0.13. */
+	float kst_bv; /**< Fraction of sugar allocated to structural biomass before veraison, default value = 0.68. */
+	float koa_bv; /**< Fraction of sugar allocated to organic acid before veraison, default value = 0.87. */
+	float kmalic_bv; /**< Fraction of acids allocated to malic acid within organic acids before veraison, default value = 0.5. */
+	float ktartaric_bv; /**< Fraction of acids allocated to tartaric acid before veraison, default value = 0.48. */
+	float kothers_bv; /**< Fraction of acids allocated to other acids within organic acids before veraison, default value = 0.02. */
+	float DegradationRateMalic_bv; /**< Rate of degradation of malic acids before veraison, default value = 0. */
+	
+	// After veraison
+	float kss_av; /**< Fraction of sugar allocated to soluble sugar after veraison, default value = 0.9. */
+	float kst_av; /**< Fraction of sugar allocated to structural biomass after veraison, default value = 0.1. */
+	float koa_av; /**< Fraction of sugar allocated to organic acid after veraison, default value = 0.1. */
+	float kmalic_av; /**< Fraction of acids allocated to malic acid within organic acids after veraison, default value = 0.8. */
+	float ktartaric_av; /**< Fraction of acids allocated to tartaric acid after veraison, default value = 0. */
+	float kothers_av; /**< Fraction of acids allocated to other acids within organic acids after veraison, default value = 0.2. */
+	public float DegradationRateMalic_av; /**< Rate of degradation of malic acids after veraison, default value = 0.004. */
+	
+	/**
+	 * Parameters for maximum uptake rates and scaling factors.
+	 */
+	public float Vmax_berry; /**< Maximum uptake rate of carbon per unit of dry mass (mgC/mgDM), default value = 2.5e-3. */
+	float Cscale; /**< Scaling factor for the function (unitless), default value = not applicable (na). */
+	public float Cstar; /**< Inflection point for sugar concentration describing the activity of an inhibitor. */
+	
+	/**
+	 * Grapevine yield estimation parameters.
+	 */
+	float potBerryMass = 2.1; /**< Predicted mass of a single fruit in grams. */
+	float totalYield; /**< Predicted yield from this shoot in grams. */
+
+   
+   /**
+   	* paramters for the visulization of fruit
+   */
+	double brRatio = 0.004/100;				// ratio biomass to radius (mm/mg), assuming max fruit width of 2 cm, then 0.007
+	double radius = 3e-3;  //0.003 m, 3 mm, the diameter of rachis
+	double radiusDyn;
+	int numberOfRachis = 6;  // number of rachis along the main stem of fruit
+	//static double numberOfRachis_u = 2.3678;   //mean for lognormal number of rachis on the main stem of fruit
+	//static double numberOfRachis_sigma = 0.2452;  //sigma for lognormal number of rachis on the main stem of fruit
+	int numberOfBranchtigs = 1; // number of branchtigs at each rachis
+	int numberOfBranchInternodes = 2; // number of internode at branchtigs
+	int numberOfSubtwigs = 1; // number of subtwigs at each internode
+	int numberOfPedicles = 4; // number of pedicles at each subtwigs
+	double lengthOfRachis_u = 3;   //2.8 sigma 0.5 previously length cm, length distribution of all componets
+	double lengthOfRachis_sigma = 0.5;  
+	double pNumberOfBranchtigs = 0.4;  //probability when random(0,1) larger than pNumberOfBranchtigs, then there is branchtigs
+	double pPedicle = 0.1;   ////probability for generating a pedicle
+	double [] rachiesLength = new double [numberOfRachis + berryNumPerBunch];
+	double [] rachiesLengthDynamic = new double [numberOfRachis + berryNumPerBunch];
+	double [] rpPedicle =  new double[]{1,1,1,1};	
+	double[] numberOfBranchtigs_goodExample = new double[]{
+	1,1,1,1,0.6704887,0.2031371,0.24177748,0.121178985,0.03517878,0.038621712,0.23442346,0.37088314,0.36877492,0.4186494,0.43038854,
+	0.31699267,0.5648944,0.2505249,0.7106981,0.7804214,0.6810359,0.6745155,0.28510287,0.621344,0.524148,0.5809536,0.89634776,
+	0.17691036,0.016015844,0.6331646,0.42435795,0.7331465,0.39570522,0.64454794,0.142528,0.3280777,0.17347452,0.21114504,0.037564106,0.014146245
+	};
+								   
+	double[] numberOfSubtwigs_goodExample = new double[]{
+	0.6810673,0.24453199,0.46613225,0.14914209,0.3120698,0.32706332,0.09359601,0.35034996,
+	0.007455236,0.021961248,0.059231628,0.015300131,0.04435153,0.092408575,0.055270504
+	};
+	
+	
+	
+	String outputFilePath;
+
+	@Override
+	public void loadParameters() {
+		CategoryStore config = ((DocumentCategoryNameGroup) CONFIG.getGroup(FILE_NAME_PLANT_PARAMETERS, 
+			DocumentCategoryNameGroup.class)).getCategoryStore();
+
+		config.setCategoryContext("fruit");
+		FRUIT_BEGIN        = FRUIT_AGE_AFTER_FULLBLOOM;
+		// Safeguard against undefined/null/NaN values of BERRY_AGE_AT_VERASION
+		
+		if (BERRY_AGE_AT_VERASION > 0 && FRUIT_AGE_AFTER_FULLBLOOM > 0) {
+			ageD_afver = (double) (FRUIT_AGE_AFTER_FULLBLOOM - BERRY_AGE_AT_VERASION);
+		} else {
+			ageD_afver = 10 - BERRY_AGE_AT_VERASION;  // or another safe default, 10 days after flowering
+			println("Warning: age is zero; t_afver defaulted to 10 - BERRY_AGE_AT_VERASION.");
+		}
+		//t_afver =  FRUIT_AGE_AFTER_FULLBLOOM - 
+		//common parameters
+		maintenanceCoff        = config.getDouble("MTNCE");
+		growthCoff             = config.getDouble("GROWTHRQ");
+		km_pri                 = config.getDouble("KM_PRI");
+		km_sec = km_pri; 
+		
+		Cf_veraison		 = config.getDouble("Cf_veraison");
+		sigmax		 = config.getDouble("sigmax");
+		sigmaP0		 = config.getDouble("sigmaP0");
+		ksip		 = config.getDouble("ksip");
+		coefSip		 = config.getDouble("coefSip");
+		permeability_sugar		 = config.getDouble("permeability_sugar");
+		acnst		 = config.getDouble("acnst");
+		Lpmin		 = config.getDouble("Lpmin");
+		Lpmax		 = config.getDouble("Lpmax");
+		Lpscale		 = config.getDouble("Lpscale");
+		Lpstar		 = config.getDouble("Lpstar");
+		Lxmin		 = config.getDouble("Lxmin");
+		Lxmax		 = config.getDouble("Lxmax");
+		Lxscale		 = config.getDouble("Lxscale");
+		Lxstar		 = config.getDouble("Lxstar");
+		el0		 = config.getDouble("el0");
+		kel		 = config.getDouble("kel");
+		Hf		 = config.getDouble("Hf");
+		roMin		 = config.getDouble("roMin");
+		roMax		 = config.getDouble("roMax");
+		kro		 = config.getDouble("kro");
+		coefRo		 = config.getDouble("coefRo");
+		rwtr		 = config.getDouble("rwtr");
+		phi0		 = config.getDouble("phi0");
+		phiMax		 = config.getDouble("phiMax");
+		phiMin		 = config.getDouble("phiMin");
+		kPhi		 = config.getDouble("kPhi");
+		coefPhi		 = config.getDouble("coefPhi");
+		YC		 = config.getDouble("YC");
+		Y0		 = config.getDouble("Y0");
+		gamma	 = config.getDouble("gamma");
+		eta		 = config.getDouble("eta");
+		//empirical parameter for seed weight
+		share1		 = config.getDouble("share1");
+		share2		 = config.getDouble("share2");
+		noysf1		 = config.getDouble("noysf1");
+		noysf2		 = config.getDouble("noysf2");
+
+		//carbon allocation within fruit		 
+		kst_bv		 = config.getDouble("kst_bv");
+		kss_bv		 = config.getDouble("kss_bv");
+		koa_bv		 = config.getDouble("koa_bv");
+		kmalic_bv		 = config.getDouble("kmalic_bv");
+		ktartaric_bv		 = config.getDouble("ktartaric_bv");
+		kothers_bv		 = config.getDouble("kothers_bv");
+		DegradationRateMalic_bv		 = config.getDouble("DegradationRateMalic_bv");
+		//after veraison		 
+		kst_av		 = config.getDouble("kst_av");
+		kss_av		 = config.getDouble("kss_av");
+		koa_av		 = config.getDouble("koa_av");
+		kmalic_av		 = config.getDouble("kmalic_av");
+		ktartaric_av		 = config.getDouble("ktartaric_av");
+		kothers_av		 = config.getDouble("kothers_av");
+		DegradationRateMalic_av		 = config.getDouble("DegradationRateMalic_av");
+		//parameters for growth and carbon allocation		 
+		Vmax_berry		 = config.getDouble("Vmax_berry");
+		Cscale		 = config.getDouble("Cscale");
+		Cstar		 = config.getDouble("Cstar");		
+		Nm_min  = config.getDouble("Nm_min",  0.005);  // 0.5% N
+		Nm_max  = config.getDouble("Nm_max",  0.060);  // 6.0% N
+		
+		//if (printFlag) { println("Vmax_berry:" + Vmax_berry); }
+			/** Set the context for file name parameters*/
+		CategoryStore config_Init = ((DocumentCategoryNameGroup) CONFIG.getGroup(FILE_NAME_INITIAL_CONDITIONS, 
+			DocumentCategoryNameGroup.class)).getCategoryStore();
+			
+		config_Init.setCategoryContext("fruit");
+		this.Nm 			   = config_Init.getDouble("Nm",  0.020);  // 2.0% N
+
+		
+	}
+	@Override
+	void initData() {}
+	
+	@Override
+	FruitService initiate_pi(PlantIdentifier pi, float length_, float diameter_)
+	{
+		loadParameters();
+		//IDENTIFIERS
+		if(plantBaseID <= 0) {
+			PlantBase pb = first((* this (<--)+ PlantBase*));
+			if(pb != null) {
+				this.plantBaseID = pb.getId();
+			}
+		}
+		plantNumber = pi.plantNumber;
+		border = pi.border;
+		length = length_;
+		diameter = diameter_;
+		//need a more specific input from the data
+		ageD = FRUIT_AGE_AFTER_FULLBLOOM;
+		ageGdd = FRUIT_AGE_AFTER_FULLBLOOM * (REFTMP - baseT);
+		//assume that the mean daily temperature is 0.6 of a optimal day. Not used in current calculation.
+		age =  FRUIT_AGE_AFTER_FULLBLOOM * 0.6; 
+		ageHour = (int) ageD *24;
+		
+		this.organType = "Fruit";
+		FruitService.veraison = true;
+		berryNum = berryNumPerBunch;
+			
+	/* 	Lpmax = coefLpmax * FRUIT_FRESH_WEIGHT;
+		Lpstar= coefLpstar * FRUIT_FRESH_WEIGHT;
+		
+		Lxmax = coefLxmax * FRUIT_FRESH_WEIGHT;
+		Lxstar= coefLxstar* FRUIT_FRESH_WEIGHT; */
+		//SPECIFIC PARAMETERS TO COMMON PARAMETERS
+		//STATE VARIABLES
+		//CARBON
+		seedDryWeight = SEED_FRESH_MASS * 0.5;
+		biomass = FRUIT_DRY_WEIGHT; // - seedDryWeight;  //HERE the dry mass of the fruit does not include the seed, so it is just the mass of the pulp  
+		sugarConcentration_fruit = CONENTRATION_SOLUBLE_SUGAR;
+		waterMass = FRUIT_FRESH_WEIGHT - biomass;// - SEED_FRESH_MASS;  
+		freshWeight = waterMass + biomass; 
+		
+		//Acid concentration
+		malicConcentration_fruit = CONENTRATION_MALIC_INITIAL;  //0.016 #0.0048  # fruit set ~0.0048 g/gh20  veraison ~0.02 g/gh20
+		tartaricConcentration_fruit = CONENTRATION_TARTARIC_INITIAL; //0.01 #0.015  # fruit set ~0.015 g/gh20  veraison ~0.017 g/gh20
+	
+		solubleSugar = sugarConcentration_fruit * freshWeight;
+		malicAcid    = malicConcentration_fruit * freshWeight;
+		tartaricAcid = tartaricConcentration_fruit * freshWeight;
+		structuralBiomass = biomass - solubleSugar - malicAcid - tartaricAcid + seedDryWeight;
+  		freshWeight = waterMass + biomass; 
+		carbon_total = biomass * CARBON_FRACTION_GLUCOSE;
+		waterContent = waterMass/freshWeight; //WATER_CONTENT_BERRY;  //pulp
+	
+	  	//NITROGEN		
+		nitrogen_total = biomass * Nm;
+		nitrogen_structure = biomass * Nm_min; 
+		nitrogen_nonStructure = nitrogen_total - nitrogen_structure;
+		nitrogen_mobile = nitrogen_total * N_CONTENT_MOBILE;
+		//UPDATE STATE VARIABLES
+		calcAllocationAmongHexoseAcids();
+		calcSurfaceArea();
+		calcCellWallExtensibility();
+		calcPhloemHydraulicConductance();
+		calcOsmoticPotential_furit();
+		Ka = 1;
+		length = 1;
+		//GENERATE RANDOM RACHIS LENGTH
+		for(int i:(0:berryNumPerBunch-1)) {
+		rachiesLength[i] = lognormal(lengthOfRachis_u, lengthOfRachis_sigma);
+		}
+		
+		calcDimensions();
+		
+		elasticModulus = el0;
+		turgorPressure_fruit = YC;
+		initialized = true;
+		
+		//if (printFlag) { println("Vmax_berry" + Vmax_berry + " freshWeight " + freshWeight + " biomass " + biomass ); }
+
+		initOutputFilePath();
+		initOutputHeaders();
+		return this;
+	}
+	
+	// bunch initiation at veraison
+	@Override
+	void initiate_pb(PlantBase pb, int Rank_, int NodeNumber_, int CordonNumber_)
+	{
+		
+		loadParameters();
+		//IDENTIFIERS
+		plantBaseID = pb.nodeID;
+		plantNumber = pb.plantNumber;
+		rank = Rank_;
+		cpn = rank;
+		nodeNumber = NodeNumber_; 
+		cordonNumber = CordonNumber_;
+		border = pb.border;
+			//need a more specific input from the data
+		ageD = FRUIT_BEGIN;
+		ageGdd = (ageD + hourOfDay/24) * ((Tmax+Tmin)/2 - baseT);
+		//assume that the mean daily temperature is 0.6 of a optimal day. Not used in current calculation.
+		age =  (ageD + hourOfDay/24) * (Tmax+Tmin)/2/OPT_TEMP; 
+		ageHour = (int) ageD *24 + hourOfDay;
+		
+		FruitService.veraison = true;
+		this.organType = "Fruit";
+		
+		berryNum = berryNumPerBunch;
+		
+		//SPECIFIC PARAMETERS TO COMMON PARAMETERS
+		//STATE VARIABLES
+		//CARBON
+		seedDryWeight = SEED_FRESH_MASS * 0.5;
+		biomass = FRUIT_DRY_WEIGHT - seedDryWeight;  //HERE the dry mass of the fruit does not include the seed, so it is just the mass of the pulp  
+		sugarConcentration_fruit = CONENTRATION_SOLUBLE_SUGAR;
+		waterMass = FRUIT_FRESH_WEIGHT - biomass - SEED_FRESH_MASS;
+		 
+		freshWeight = waterMass + biomass;
+		
+		//Acid concentration
+		malicConcentration_fruit = CONENTRATION_MALIC_INITIAL;  //0.016 #0.0048  # fruit set ~0.0048 g/gh20  veraison ~0.02 g/gh20
+		tartaricConcentration_fruit = CONENTRATION_TARTARIC_INITIAL; //0.01 #0.015  # fruit set ~0.015 g/gh20  veraison ~0.017 g/gh20
+	
+		solubleSugar = sugarConcentration_fruit * waterMass;
+		malicAcid    = malicConcentration_fruit * waterMass;
+		tartaricAcid = tartaricConcentration_fruit * waterMass;
+		structuralBiomass = biomass - solubleSugar - malicAcid - tartaricAcid + seedDryWeight;
+  		freshWeight = waterMass + biomass; 
+		carbon_total = biomass * CARBON_FRACTION_GLUCOSE;
+		waterContent = waterMass/freshWeight; //WATER_CONTENT_BERRY;  //pulp
+		
+		if (printFlag) { 
+			println("Berries per bunch = "+ berryNum);
+			/* println("freshWeight = "+ freshWeight); */
+			println("fruit biomass = "+ biomass);
+			println("solubleSugar = "+ solubleSugar); 
+		
+		}
+		/* println("sugarConcentration_fruit " + sugarConcentration_fruit + 
+				" solubleSugar " + solubleSugar/freshWeight ); */
+				
+		//NITROGEN		
+		nitrogen_total = biomass * Nm;
+		nitrogen_structure = biomass * Nm_min; 
+		nitrogen_nonStructure = nitrogen_total - nitrogen_structure;
+		nitrogen_mobile = nitrogen_total * N_CONTENT_MOBILE;
+		//UPDATE STATE VARIABLES
+		calcAllocationAmongHexoseAcids();
+		calcSurfaceArea();
+		calcCellWallExtensibility();
+		calcPhloemHydraulicConductance();
+		calcOsmoticPotential_furit();
+		calcBerryGrowthStage();
+		Ka = 1;
+		length = 0.005;
+		diameter = 0.005;
+		//GENERATE RANDOM RACHIS LENGTH
+		for(int i:(0:berryNumPerBunch-1)) {
+		rachiesLength[i] = lognormal(lengthOfRachis_u, lengthOfRachis_sigma);
+		}
+		
+		calcDimensions();
+		
+		elasticModulus = el0;
+		turgorPressure_fruit = YC;
+		initialized = true;
+		
+		//if (printFlag) { println("Vmax_berry" + Vmax_berry + " freshWeight " + freshWeight + " biomass " + biomass ); }
+
+		initOutputFilePath();
+		initOutputHeaders();
+	}
+	
+	// bunch initiation at flowering/fruitset
+	@Override
+	void initiate_pb_fruitset(PlantBase pb, int j, int k, int l)
+	{
+		loadParameters();
+		//IDENTIFIERS
+		plantBaseID = pb.nodeID;
+		plantNumber = pb.plantNumber;
+		rank = j;
+		cpn = rank;
+		nodeNumber = k; 
+		cordonNumber = l;
+		border = pb.border;
+		
+		FruitService.veraison = false;
+		this.organType = "Fruit";
+		ageD = 7; 
+		age =  ageD * 0.6; //assume the effective day is 0.6 
+		ageHour = (int) ageD *24;
+		ageGdd = age; 
+		length = 1e-2;
+		berryNum = berryNumPerBunch;
+	
+		//STATE VARIABLES
+		//CARBON
+		seedDryWeight =  0.017/2;
+		SEED_FRESH_MASS = noysf1 + noysf2 * seedDryWeight;
+		biomass = 20.6/2;  //HERE the dry mass of the fruit does not include the seed, so it is just the mass of the pulp  
+		sugarConcentration_fruit =  0.0045;
+		waterMass = 180/2 - biomass;
+		sugarConcentration_fruit = 0.0045; // 0.0365 #0.0045 # fruit set  ~0.0045 g/gh20  veraison ~0.0135 g/gh20
+		malicConcentration_fruit = 0.0048;  //0.016 #0.0048  # fruit set ~0.0048 g/gh20  veraison ~0.02 g/gh20
+		tartaricConcentration_fruit = 0.015; //0.01 #0.015  # fruit set ~0.015 g/gh20  veraison ~0.017 g/gh20
+		
+		solubleSugar = sugarConcentration_fruit * waterMass;
+		malicAcid    = malicConcentration_fruit * waterMass;
+		tartaricAcid = tartaricConcentration_fruit * waterMass;
+		structuralBiomass = biomass - solubleSugar - malicAcid - tartaricAcid + seedDryWeight;
+  		freshWeight = waterMass + biomass; 
+		carbon_total = biomass * CARBON_FRACTION_GLUCOSE;
+		waterContent = waterMass/freshWeight; //WATER_CONTENT_BERRY;  //pulp
+		
+		//NITROGEN		
+		nitrogen_total = biomass * Nm;
+		nitrogen_structure = biomass * Nm_min; 
+		nitrogen_nonStructure = nitrogen_total - nitrogen_structure;
+		nitrogen_mobile = nitrogen_total * N_CONTENT_MOBILE;
+		//UPDATE STATE VARIABLES
+		calcAllocationAmongHexoseAcids();
+		calcSurfaceArea();
+		calcCellWallExtensibility();
+		calcPhloemHydraulicConductance();
+		calcOsmoticPotential_furit();
+		Ka = 1; //add a fake ka
+		length = 0.005;
+		//GENERATE RANDOM RACHIS LENGTH
+		for(int i:(0:berryNumPerBunch-1)) {
+		rachiesLength[i] = lognormal(lengthOfRachis_u, lengthOfRachis_sigma);
+		}
+		calcDimensions();
+		elasticModulus = el0;
+		turgorPressure_fruit = YC;
+		initialized = true;
+		//if (printFlag) { println("Vmax_berry" + Vmax_berry + " freshWeight " + freshWeight + " biomass " + biomass ); }
+
+		initOutputFilePath();
+		initOutputHeaders();
+	}
+	
+	
+	@Override
+	void initiate_apex(ApexService a)
+	{
+		loadParameters();
+		//IDENTIFIERS
+		if(plantBaseID <= 0) {
+			PlantBase pb = first((* this (<--)+ PlantBase*));
+			if(pb != null) {
+				this.plantBaseID = pb.getId();
+			}
+		}
+		plantNumber = a.plantNumber;
+		border = a.border;
+		rank = a.rank;
+		nodeNumber = a.nodeNumber; 
+		cordonNumber = a.cordonNumber;
+		cpn = a.cpn + 1;
+		order = a.order;
+		
+		FruitService.veraison = false;
+		age = -thermalDay_BB_FS;   //use a negative age. It will start grow when flowering happens.  
+		ageHour = 120;
+		ageGdd = 5; 
+		length = 1e-3;
+		
+		//CARBON
+		seedDryWeight =  0.017/2;
+		SEED_FRESH_MASS = noysf1 + noysf2 * seedDryWeight;
+		biomass = 20.6/2;  //HERE the dry mass of the fruit does not include the seed, so it is just the mass of the pulp  
+		sugarConcentration_fruit =  0.0045;
+		waterMass = 180/2 - biomass;
+		sugarConcentration_fruit = 0.0045; // 0.0365 #0.0045 # fruit set  ~0.0045 g/gh20  veraison ~0.0135 g/gh20
+		malicConcentration_fruit = 0.0048;  //0.016 #0.0048  # fruit set ~0.0048 g/gh20  veraison ~0.02 g/gh20
+		tartaricConcentration_fruit = 0.015; //0.01 #0.015  # fruit set ~0.015 g/gh20  veraison ~0.017 g/gh20
+		
+		solubleSugar = sugarConcentration_fruit * waterMass;
+		malicAcid    = malicConcentration_fruit * waterMass;
+		tartaricAcid = tartaricConcentration_fruit * waterMass;
+		structuralBiomass = biomass - solubleSugar - malicAcid - tartaricAcid + seedDryWeight;
+  		freshWeight = waterMass + biomass; 
+		carbon_total = biomass * CARBON_FRACTION_GLUCOSE;
+		waterContent = waterMass/freshWeight; //WATER_CONTENT_BERRY;  //pulp
+		
+		//NITROGEN		
+		nitrogen_total = biomass * Nm;
+		nitrogen_structure = biomass * Nm_min; 
+		nitrogen_nonStructure = nitrogen_total - nitrogen_structure;
+		nitrogen_mobile = nitrogen_total * N_CONTENT_MOBILE;
+		
+		elasticModulus = el0;
+		
+		turgorPressure_fruit = YC;
+		initialized = false;
+		
+		if (usePhenology == true) {
+			phenologyStage = 1;
+			double bunchesPerShoot = a.bunchesPerShoot;
+			float berriesPerBunch = getBerriesPerBunch(a);
+			//because sometimes for saving running time, we start at budburst
+			//thus the berryYield module is not completed executed
+			if(Double.isNaN(bunchesPerShoot) || Double.isNaN(berriesPerBunch))
+			{	
+				//for convinence the direct input of fruit number already consider how to deal with
+				//bunches per shoot and fruit number per bunch by taking an integer of it
+				berryNum = berryNumPerBunch;	
+			} else {			
+				berryNum = (int) Math.round(berriesPerBunch * bunchesPerShoot);
+			}
+			tmaxBM_apex = a.accumulatedTmaxBM / a.tmaxDaysBM;
+			rainfallBM_apex = a.accumulatedRainfallBM;
+			radBM_apex = a.accumulatedRadBM / a.radHoursBM;
+			carbonBM_apex = a.accumulatedCarbonBM / a.carbonHoursBM;
+			
+			if (printFlag) { println("Bunches per shoot = "+ bunchesPerShoot); }
+			if (printFlag) { println("Berries per bunch = "+ berryNum); }
+		}
+			
+		//UPDATE STATE VARIABLES
+		calcAllocationAmongHexoseAcids();
+		calcSurfaceArea();
+		calcCellWallExtensibility();
+		calcPhloemHydraulicConductance();
+		calcOsmoticPotential_furit();
+		Ka = 1; //add a fake ka
+		//GENERATE RANDOM RACHIS LENGTH
+		for(int i:(0:berryNumPerBunch-1)) {
+		rachiesLength[i] = lognormal(lengthOfRachis_u, lengthOfRachis_sigma);
+		}
+		calcDimensions();
+
+		initOutputFilePath();
+		initOutputHeaders();
+	}
+	 
+	
+	
+	
+	void calcDimensions()
+	{
+	   if(age > 0) {
+		for(int i:(0:berryNumPerBunch-1)) {
+		   rachiesLengthDynamic[i] = rachiesLength[i]*betaGrowthFunction(age, 0.5 * phenology.VERAISON_TARGET, phenology.VERAISON_TARGET);		
+		}
+		 radiusDyn  = Math.max(1e-3, radius*betaGrowthFunction(age, 0.5 * phenology.VERAISON_TARGET, phenology.VERAISON_TARGET));
+	}
+	}
+	
+	// calculate organ age
+   @Override
+	void calcAge() 
+	{
+		//confounded by the original fruit model, here ageD is using in some calculation
+		age_pre = age;
+		age = age + DT * wangEngelTempFunction(Ta, MIN_TEMP, OPT_TEMP, MAX_TEMP,REFTMP);
+		
+		if(age > 0) {
+			ageHour++;
+			ageD =ageD + DT;
+			ageD_afver = ageD_afver + DT; 
+			//agePrevious = age;	
+			ageGdd += (Ta-baseT)*DT;
+			//devAge += specificGrowthRate(TAU, Ta)*DT;
+		}
+	}
+	
+	
+	//update input for the fruit module
+	//Input is considered separately from load parameters
+@Override
+void updateInput() 
+{
+	if(inputVesselConditions == true) 
+	{
+		this.ageD = berryModelInput[step][0];
+		this.ageHour = (int)(this.ageD)*24 + (int) berryModelInput[step][1];
+		Ta = berryModelInput[step][2];  //This is a global parameters
+		rh = berryModelInput[step][3];  //This is a global parameters
+		this.sugarConcentration_phloem = berryModelInput[step][4];  
+		this.waterPotential_xylem = berryModelInput[step][5] * 10;  //convert from MPa to bar
+		age = ageD * 0.8;
+	}
+	
+	if(inputVesselConditions == false) 
+	{
+		
+		
+		if(plantBaseID <= 0) {
+			PlantBase pb = first((* this (<--)+ PlantBase*));
+			if(pb != null) {
+				this.plantBaseID = pb.getId();
+			}
+	   }
+	
+	  if (parentID <= 0) {  // Assuming 0 is an uninitialized ID
+		GrowingOrgan parentOrgan = (GrowingOrgan) first((* this (<--)+ Internode*));
+		if (parentOrgan != null) {
+			storeParentId(parentOrgan);
+			//this is based on the organ type of the current organ
+			parentOrgan.addChildFruitId(this.nodeID);
+			
+		}
+	}
+	
+		//FineRoot rt = first((*fr:FineRoot, (fr.plantNumber == this.plantNumber)*));
+		waterPotential_xylem =  parentID > 0 ? getParent().waterPotential * 10 : -1.0; //convert from MPa to bar 
+		//waterPotential_xylem = rt.xylemWaterPotential* 10; //in the fruit part, we use bar
+		
+		if(useCTRAM == false) {
+			sugarConcentration_phloem = getPlantBase().sugarConcentration_phloem;			
+		} else if(useCTRAM == true) {
+			sugarConcentration_phloem = sugarFromCp(this.cpt);
+		} else {
+			sugarConcentration_phloem = 1e-4;
+			// optional debug
+		}
+	} 
+		
+}
+	
+	
+	
+
+	  /* OVERALL FUNCTIONS TO CALCULATE CARBON DEMNAD */
+	@Override
+	void calcPTCTRAM(double sugarConcentration_phloem_input) 
+	{   
+		//need to fix this, the int[0] should be replaced by findinternode id
+		
+		
+		updateInput();
+		this.sugarConcentration_phloem = sugarConcentration_phloem_input;
+		//assign active as primary, mass flow as secondary
+		//growth stage and seed, and allocation parameters
+		calcBerryGrowthStage();
+        calcAllocationAmongHexoseAcids();
+		//surface transpiration
+		calcSurfaceArea();
+        calcRo(this.ageD);
+        calcTranspiration();
+	    //xylem and phloem hydraulic conductance and water potential
+		calcWaterPotential_xylem();
+		calcXylemHydraulicConductance();
+		calcPhloemHydraulicConductance(); 
+		calcOsmoticPotential_phloem(sugarConcentration_phloem_input);
+		calcOsmoticPotential_furit();
+		//membrane and cell wall 
+	    calcSigmap();
+	    calcCellWallExtensibility();
+	    calcVol();
+		caclSugarUptake_active(sugarConcentration_phloem_input);
+		
+		//calcElasticity();
+		//water uptake from xylem and phloem, sugar uptake from phloem
+		caclWaterUptake_xylem();
+		caclWaterUptake_phloem();
+				
+		structureDM_PRI_PT = berryNum * caclSugarUptake_active_CTRAM() * CARBON_FRACTION_SUCROSE/mgTogram;  //potential uptake without km limitation
+		structureDM_SEC_PT = berryNum * max(0, (1.0-sigmap) * waterUptake_phloem *(sugarConcentration_phloem_input))* CARBON_FRACTION_SUCROSE/mgTogram; 
+		
+		//assume after veraison all maintenanceDM is satisfied by malic acid degradation 
+		if(FruitService.veraison == false) {    
+			maintenanceDM_PT = berryNum*calcMaintanceRespiration(0.3);
+		} else
+		{	maintenanceDM_PT = 0;}
+		
+		reserveDM_PT = 0;
+		
+		loading_PT =  0; 
+		//if (printFlag) { println("sugarUptake_active " + structureDM_PRI_PT); }
+		//if (printFlag) { println(structureDM_PRI_PT+structureDM_SEC_PT+maintenanceDM_PT); }
+	}
+	
+	@Override
+	void calcLeakage(double sugarConcentration_phloem_input) 
+	{ //leakage only calculates for shoot, leaf is zero
+		leakage = 0;
+	}	
+	@Override
+	void calcLoading(double sugarConcentration_phloem_input)
+	{
+		loading =  0;
+	}
+	
+	@Override
+	  double caclSugarUptake_active_CTRAM() {
+		 //unit is gram
+		//g sucrose/h
+		sugarUptake_active = biomass * mgTogram * Vmax_berry / (
+								1+ Math.exp((ageHour-Cstar)/Cscale));
+		 // if (printFlag) { println("sugarUptake_active " + sugarUptake_active); }
+		 return(sugarUptake_active);
+	   }
+ 
+   // three pathway of sucrose uptake
+   void caclSugarUptake_active(double sugarConcentration_phloem_input) {
+	//sugarUptake_active = biomass * mgTogram * Vmax_berry_zhanwu * sugarConcentration_phloem / ((km_pri + sugarConcentration_phloem)*(1+exp((ageHour - tstar)/tau)));
+	//g sucrose/h
+	//for consistent with all other KM values, KM_BERRY was refer to carbon concentration
+	/* float Cstar = 1700;
+	float Cscale = 150; */
+	double constrains_age = 1/(1+ Math.exp((ageHour-Cstar)/Cscale)); 
+	//println("constrains:" + constrains);
+	//double constrains_sugar = 1/((1+ Math.exp((sugarConcentration_fruit - Cstar)*Cscale)));
+	//double constrains = Math.min(constrains_age, constrains_sugar);
+	
+	sugarUptake_active = sinkUnloading(sugarConcentration_phloem_input, km_pri) * 
+						 biomass * mgTogram * Vmax_berry * constrains_age;
+						
+	//1/(1+exp((t-tStar)/tauA))						
+	//if (printFlag) { println("sugarUptake_active " + sugarUptake_active + "sugarConcentration_phloem " + sugarConcentration_phloem ); }
+	  
+	}
+ 
+    void caclSugarUptake_passive() {
+		sugarUptake_passive = 0; //min(0, Axylem * permeability_sugar * (sugarConcentration_phloem - sugarConcentration_fruit)); //g sucrose/h
+	}
+	
+	void caclSugarUptake_massflow(double sugarConcentration_phloem_input) {
+		//sugarConcentration_phloem = sugarConcentration_phloem / CARBON_FRACTION_SUCROSE;
+		//sugarUptake_massflow = (1.0-sigma) * waterUptake_phloem * (sugarConcentration_fruit + sugarConcentration_phloem)*0.5;
+		sugarUptake_massflow = max(0, (1.0-sigmap) * waterUptake_phloem * (sugarConcentration_fruit + sugarConcentration_phloem_input)*0.5); // as phloem carbon concentration is far less than fruit
+																							// when adding the furit sugar concentration, sometimes it causes unblances in carbon
+		//println("sugarUptake_massflow " + sugarUptake_massflow);																						//as mysterious carbon comes;
+	}
+	
+	
+	
+	@Override	
+	void calcUnloading(double sugarConcentration_phloem_input) {
+		 this.sugarConcentration_phloem = sugarConcentration_phloem_input;
+		 caclSugarUptake_active(sugarConcentration_phloem_input); //unit is gram
+		 caclSugarUptake_passive(); //unit is gram
+		 caclSugarUptake_massflow(sugarConcentration_phloem_input); //unit is gram
+		 //assume after veraison all maintenanceDM is satisfied by malic acid degradation 
+		if(FruitService.veraison == false) {    
+		   maintenanceDM = calcMaintanceRespiration(sugarConcentration_fruit) * 
+         				sinkUnloading(sugarConcentration_phloem_input, KM_MTNCE);
+		} else { 
+			maintenanceDM = 0;
+		}
+		
+		 //converted to mg c, in agree with other parts
+		 //unloading needs to be expressed in mg carbon in fruit as we need to link with other components in order to calculate phloem
+		 //CARBON concentration, we can not completely change the unit into carbon, as sucrose concentration needed in the osmotic calculation
+		 unloadingPerFruit = maintenanceDM + CARBON_FRACTION_SUCROSE * 
+		 (sugarUptake_active + sugarUptake_passive + sugarUptake_massflow)/mgTogram; 
+		 unloading  = unloadingPerFruit * berryNum;  //unloading per bunch
+		 structureDM = (1 - kss)*unloading;  //just add this to make the growth cost calculation easier. 
+		 //return unloading;
+		 //if (printFlag) { println("sugarUptake_active " + sugarUptake_active + " sugarUptake_massflow " + sugarUptake_massflow ); }
+		 //if (printFlag) { println("unloading " + unloading +  " unloadingPerFruit " + unloadingPerFruit + " sugarConcentration_phloem " + sugarConcentration_phloem); }
+	 }
+	
+  //******************************************************************************/
+  // growth stage update
+  //******************************************************************************/
+   void calcBerryGrowthStage() 
+  {
+   //based on Bobeica and Rob Agnew's data Brix = 5 or soluble sugar around 0.0135 is veraison on individual fruit
+    if(FruitService.veraison == false && (sugarConcentration_fruit >= Cf_veraison | age >=  phenology.VERAISON_TARGET )) 
+		FruitService.veraison = true;    
+  }
+  
+ 
+  
+  //need to be updated, has been included in parameter reading, but later we can use this function to include the temperature effect
+  void calcAllocationAmongHexoseAcids() 
+  {
+   if(FruitService.veraison == false) { //later add the effects of age and temperature on the allocation based on the kliewer data
+     kst = kst_bv;
+	 koa = koa_bv;
+     kss = 1- koa_bv;
+     kmalic = koa_bv * kmalic_bv;
+     ktartaric = koa_bv * ktartaric_bv;
+     kothers = koa_bv * kothers_bv;
+     DegradationRateMalic = DegradationRateMalic_bv;
+    }
+    if(FruitService.veraison == true) { //later add the effects of age and temperature on the allocation based on the kliewer data
+     kst = kst_av;
+	 koa = koa_av;
+     kss = 1- koa_av;
+     kmalic = koa_av * kmalic_av;
+     ktartaric = koa_av * ktartaric_av;
+     kothers = koa_av * kothers_av;
+     DegradationRateMalic = DegradationRateMalic_av;
+    
+     
+    }
+    //if (printFlag) { println("DegradationRateMalic " + "" + DegradationRateMalic); }
+  }
+	
+  //******************************************************************************/
+  // surface conductance and transpiration
+  //******************************************************************************/
+	void calcSurfaceArea() {
+		double TotalWeight = waterMass + biomass + SEED_FRESH_MASS;
+		
+		Afruit = gamma*(TotalWeight * mgTogram)**eta;
+		Axylem = Afruit * acnst;
+		Aphloem = Axylem;
+	}
+	 
+  //calculate skin conductance
+  @Override
+  void calcRo(double ageD) {
+  	   //based on fruit age
+       ro = Math.max(roMin, roMax/(1+exp(kro *(ageD_afver - coefRo))) + roMin);
+      // if (printFlag) { println("ro" + ro); }
+  	  //calculate with fresh weight, need to change the parameters kro = -1.67 coefRo = 34.2
+  	  //ro = Math.max(roMin, roMin + roMax * exp(kro*(freshWeight + SEED_FRESH_MASS)*mgTogram));
+  	  // return(roMax/(1+exp(kRo*(FFW-coefRo)))+roMin)     #3 [cm.h-1]  Conductance Fruit
+      //ro = roMax/(1+exp(kro *(ageD - coefRo))) + roMin; 
+  }
+  
+  
+  void calcTranspiration() {
+	  double Pstar = 0.00804817*exp(0.0546961*(Ta)); // partial pressure of water in fruit
+	  double alfa = MOL_H2O * Pstar /(Rberry * (Ta+273.15)); 
+	  	   
+     if(berrySkinTranspiration == true) { transpirationMass = ro * alfa * Afruit * (Hf - rh);}
+	 //if (printFlag) { println("transpirationMass" + transpirationMass); }
+	 if(berrySkinTranspiration == false) { transpirationMass = 0;}
+	  
+	}
+	
+  //******************************************************************************/
+  // xylem phloem conductance, water and osmotic potential, and fruit osmotic potential
+  //******************************************************************************/
+	void calcWaterPotential_xylem() 
+	{
+		
+		turgorPressure_xylem = waterPotential_xylem; 
+	    waterPotential_phloem = waterPotential_xylem;
+	}
+   void calcXylemHydraulicConductance()
+   {
+     /* calculate xylem conductivity by water mass */
+    /* Lxylem  = Lxmin+(Lxmax-Lxmin)/(1+ Math.exp(Lxscale*(
+				(waterMass + biomass + SEED_FRESH_MASS)*mgTogram - Lxstar))); */
+	 
+	 Lxylem = Lxmin + (Lxmax - Lxmin)/(1 + Math.exp(Lxscale*(ageD_afver -Lxstar)));				
+	/* println("Lxmax " + Lxmax + " Lxylem " + Lxylem + 
+			"weight" + (waterMass + biomass + SEED_FRESH_MASS)*mgTogram+
+			" Lxscale " + Lxscale +
+			" Lxstar" + Lxstar); */
+	
+  }
+  void calcPhloemHydraulicConductance() {
+		/* calculate phloem conductivity based on agehour after veraison */
+		//Lphloem  = Lpmin+(Lpmax-Lpmin)/(1+exp(Lk*(ageHour - Lh)));	
+		/* calculate phloem conductivity by water mass */
+		//float constrains = (1+Math.exp(Lpscale*((waterMass + biomass + SEED_FRESH_MASS)*mgTogram - Lpstar)));
+		/* Lpscale = 0.09;
+		Lpstar = -4; 
+		float constrains = (1+exp(Lpscale * (ageHour/24 -Lpstar))); */
+		
+		Lphloem  = Lpmin+(Lpmax-Lpmin)/(1 + Math.exp(Lpscale*(ageD_afver - Lpstar)));
+				     
+				     
+				     
+	}
+	void calcOsmoticPotential_phloem(double sugarConcentration_phloem_input) {
+		sugarConcentrationMole_phloem = sugarConcentration_phloem_input/MOL_SURCROSE / 
+					(sugarConcentration_phloem_input/MOL_SURCROSE + (1-sugarConcentration_phloem_input)/MOL_H2O);   //#### sucrose is the major sugar in phloem!!!
+		osmoticWaterPotential_phloem = 12.53 + Rberry * (273.15 + Ta )* sugarConcentrationMole_phloem / SpVw;
+		turgorPressure_phloem = waterPotential_phloem + osmoticWaterPotential_phloem;
+	}
+	
+  void calcOsmoticPotential_furit() 
+  {
+	 sugarConcentrationMole_fruit = sugarConcentration_fruit/MOL_HEXOSE /
+      		(sugarConcentration_fruit/MOL_HEXOSE + (1-sugarConcentration_fruit)/MOL_H2O);
+    
+    //the mole concentration of acids in fruit
+    malicConcentrationMole_fruit = malicConcentration_fruit/MOL_MALIC /
+      		(malicConcentration_fruit/MOL_MALIC + (1-malicConcentration_fruit)/MOL_H2O);
+    
+    tartaricConcentrationMole_fruit = tartaricConcentration_fruit/MOL_TARTARIC /
+      		(tartaricConcentration_fruit/MOL_TARTARIC + (1-tartaricConcentration_fruit)/MOL_H2O);
+    
+    //calculate the partial pressure of amino acids in osmotic pressure
+    //osmoticWaterPotential_partialContribution <<- 0.4 + 3.2 * Math.exp(-194.23 * sugarConcentrationMole_fruit);
+    //this needs to be updated, as we have organic acids now, so the partial pressure of other compounds
+    osmoticWaterPotential_partialContribution = veraison == false? 0.1 : 0.15;
+    
+    osmoticWaterPotential_fruit = (1 + osmoticWaterPotential_partialContribution) * (Rberry * (273.15 + Ta ) * 
+         (sugarConcentrationMole_fruit + malicConcentrationMole_fruit + tartaricConcentrationMole_fruit)/SpVw);	
+  }
+
+  //******************************************************************************/
+  // membrane reflection coefficient and cell wall extensibility
+  //******************************************************************************/
+  void calcSigmap() 
+  {
+    sigmap = max(0, sigmaP0/(1+exp(-ksip*(ageD - coefSip))));
+  }
+  
+  void calcCellWallExtensibility() 
+  {
+    cellWallExtensibility = phi0;
+   
+	cellWallExtensibility = phiMin + ( phiMax - phiMin )/( 1 + exp( kPhi *(ageD-coefPhi))); 
+	
+  }
+  
+  // Calculate fruit volume  -----------------------------
+  void calcVol() 
+  {
+    vol = waterMass*mgTogram/Dw + biomass*mgTogram/Ds;		  // [cm3]  fruit volume
+  }
+   
+
+
+	
+  void calcTurgorPressure_fruit() {	
+	//Turgor regulation biomass unit should be converted into gram, 
+    double prod1 =  (Axylem * Lxylem + Aphloem * Lphloem); 
+    double prod2 =  (Axylem * Lxylem + Aphloem * Lphloem * sigmap);
+    double prod3 =  sugarUptake_active + (Aphloem * permeability_sugar * 
+                                    (sugarConcentration_phloem - sugarConcentration_fruit));
+    double prod4 =  (1 - sigmap) * Aphloem * Lphloem * 0.5 * (sugarConcentration_phloem + sugarConcentration_fruit);
+    // calculate aCoef
+    double div1 = (rwtr * (maintenanceCoff*biomass*mgTogram  + (growthCoff-1) * prod3) - transpirationMass * growthCoff)/Dw;
+    double div2 = (prod3 - maintenanceCoff*biomass*mgTogram)/Ds;
+    double aCoef = (div1 + div2)/growthCoff;
+    // calculate bCoef
+    double div3 = (rwtr * (growthCoff-1) * prod4 + prod1 * growthCoff)/Dw;
+    double div4 = prod4/Ds;
+    double bCoef = (div3 + div4)/growthCoff;
+    // calculate cCoef
+    double prod5 = prod4 *sigmap;
+    double div5 = (rwtr * (growthCoff-1) * prod5 +prod2 * growthCoff)/Dw;
+    double div6 = prod5/Ds;
+    double cCoef = (div5 + div6)/growthCoff;
+    
+    // calculate fruit turgor 
+    double pF1 = ( aCoef + bCoef * turgorPressure_phloem - cCoef * 
+                (osmoticWaterPotential_phloem - osmoticWaterPotential_fruit) + 
+                vol * cellWallExtensibility*YC )/(bCoef + vol * cellWallExtensibility);
+    double pF2 = (turgorPressure_phloem + ( aCoef - cCoef * (osmoticWaterPotential_phloem - osmoticWaterPotential_fruit))/ bCoef) > 0 ?
+                      turgorPressure_phloem + ( aCoef - cCoef * (osmoticWaterPotential_phloem - osmoticWaterPotential_fruit))/ bCoef : 0;
+					  
+    turgorPressure_fruit = (pF1-YC)>0 ? pF1 : pF2;
+   
+	waterPotential_fruit = turgorPressure_fruit - osmoticWaterPotential_fruit;	
+	}
+	
+  //******************************************************************************/
+  // water uptake from xylem and phloem
+  //******************************************************************************/
+	double caclWaterUptake_xylem() {
+		waterUptake_xylem = Axylem * Lxylem * (turgorPressure_xylem - turgorPressure_fruit - 
+							sigmax*(osmoticWaterPotential_xylem- osmoticWaterPotential_fruit));
+		return waterUptake_xylem;
+	}
+	double caclWaterUptake_phloem() {
+	    waterUptake_phloem = Axylem * Lphloem * (turgorPressure_phloem - turgorPressure_fruit - sigmap*(osmoticWaterPotential_phloem- osmoticWaterPotential_fruit));
+	    //println("turgorPressure_phloem " + turgorPressure_phloem);	
+		//println("turgorPressure_fruit " + turgorPressure_fruit);	
+	    return waterUptake_phloem;
+	}
+	
+
+  
+
+	//******************************************************************************/
+  // update the maintenance and growth carbon cost
+  //******************************************************************************/
+	void updateStateVariables() {
+		//dry mass
+		double growth = unloadingPerFruit - growthCost/berryNum - maintenanceDM - carbonMobilizationCost;  //growth cost calculated in all growing organ in relation to unloading 
+		
+		double deltaBiomass = growth/CARBON_FRACTION_SUCROSE;   //mg
+		
+		double Stot = biomass + seedDryWeight;
+		double dSstone = share1 * share2 * Math.exp(-share2 * Stot)/(1-share1 * share2 * Math.exp(-share2 * Stot))*deltaBiomass;
+		seedDryWeight += dSstone; 
+		SEED_FRESH_MASS = noysf1 + noysf2 * seedDryWeight;
+			
+		
+		deltaBiomass = deltaBiomass - dSstone;
+		//biomass exclude the stone/seed biomass
+		
+		biomass += deltaBiomass;
+			
+		structuralBiomass = structuralBiomass + kst * deltaBiomass;
+		
+		double deltaNonStructural = (1-kst) * deltaBiomass;
+        solubleSugar = solubleSugar + kss * deltaNonStructural;  //the increase of soluble sugar is in proportion to dry mass
+        malicAcid    = malicAcid + kmalic * deltaNonStructural - DegradationRateMalic * malicAcid * ((Ta-baseT)*DT); 
+        tartaricAcid = tartaricAcid + ktartaric * deltaNonStructural;
+		
+        carbon_total = (biomass + seedDryWeight) * CARBON_FRACTION_GLUCOSE;
+
+		//water
+		respirationWater = rwtr * (growthCost + maintenanceDM) * mgTogram;  //gram
+		deltaWater = waterUptake_xylem + waterUptake_phloem + respirationWater - transpirationMass; //g
+		waterMass += deltaWater/ mgTogram; //mg, change into mg in accordance with biomass
+		freshWeight = biomass + waterMass; //mg
+		waterContent = 1 - biomass/freshWeight;
+		
+		
+		//sugar concentration
+		sugarConcentration_fruit = solubleSugar/waterMass;  //g/gh20
+		malicConcentration_fruit = malicAcid/waterMass;  //g/gh20
+		tartaricConcentration_fruit = tartaricAcid/waterMass;  //g/gh20
+		
+		//update hydraulic conductance based on fruit weight before veraison
+		//after veraison this stays the same
+		if(FruitService.veraison == false) {
+
+		}
+		//if (printFlag) { println("dbiomass " + deltaBiomass + " dsugar " + deltaNonStructural*kss + " dw " + deltaWater/mgTogram ); }
+	}
+	
+	@Override
+	void calcKmax() {}
+	@Override
+	void calcKa() {
+		//Ka = Kmax * 1/(1 + Math.pow(this.waterPotential/phi_stem, cx1));
+	}
+	@Override
+	void calcWaterPotential() 
+	{
+		//GrowingOrgan g = first((*this (<--)+ GrowingOrgan*));
+		this.waterPotential_b = waterPotential_fruit;
+		this.waterPotential   = waterPotential_fruit;
+		//this.waterPotential = waterPotential_b - 1/Ka * this.waterFlux;
+		
+	}
+	
+	void calcElasticModulus()
+	{
+		elasticModulus = kel * turgorPressure_fruit * Math.pow((3 * vol / 4 / Math.PI),(1/3));
+	}
+	
+	// Calculate and print yield from this shoot
+	@Override
+	void calcYield()
+	{
+		potBerryMass = getBerryMass(this);
+		if (printFlag) { println("Fruit mass = " + potBerryMass +"g"); }
+	}
+
+	/**
+	 * Computes effective fruit light area for complex berry bunch rendering.
+	 * Uses bunch sphere proxy only in grapevine bunch mode; otherwise falls back to Afruit-derived area.
+	 */
+	@Override
+	public double computeFruitLightArea_m2() {
+		double defaultArea = (Afruit > 0) ? Afruit * 1e-4 : area;
+		fruitBerryCountEffective = 1;
+
+		boolean useBunchProxyArea = false;
+		try {
+			useBunchProxyArea = (fruitVisibility == true)
+				&& "grapevine".equals(species)
+				&& (special_scenario == null || !special_scenario.equals("berry_population"));
+		} catch (RuntimeException e) {
+			useBunchProxyArea = false; // compatibility fallback for legacy/scenario configs
+		}
+		if (useBunchProxyArea == false) {
+			return defaultArea;
+		}
+
+		int nR = (numberOfRachis > 0) ? numberOfRachis : 1;
+		int nB = (numberOfBranchtigs > 0) ? numberOfBranchtigs : 1;
+		int nS = (numberOfSubtwigs > 0) ? numberOfSubtwigs : 1;
+		int nP = (numberOfPedicles > 0) ? numberOfPedicles : 1;
+		int berryCount = nR * nB * nS * nP;
+		if (berryCount <= 0) {
+			berryCount = 1;
+		}
+
+		// In GroIMP Sphere(r), input is radius. Keep same radius proxy as current bunch renderer.
+		double sphereRadius = Math.min(brRatio, Math.max(1e-2, brRatio * biomass));
+		if (Double.isNaN(sphereRadius) || Double.isInfinite(sphereRadius) || sphereRadius <= 1e-6) {
+			sphereRadius = 1e-6;
+		}
+
+		double singleBerryArea = 4 * Math.PI * sphereRadius * sphereRadius;
+		double totalArea = berryCount * singleBerryArea;
+		if (Double.isNaN(totalArea) || Double.isInfinite(totalArea) || totalArea <= 0) {
+			return defaultArea;
+		}
+
+		fruitBerryCountEffective = berryCount;
+		return totalArea;
+	}
+	
+	@Override
+	public void initializeCarbonTransport() {
+		this.r = 0;
+		this.xp = 0;
+		this.cpb = this.cpt = SOURCEcp;
+		//float Rs = ( R0 * PhloemResistanceRatio(initial_c0)/(PressureRatio(initial_c0)*R*Tk));   // resistance per unit length (initial case)
+		//this.cpt = SOURCEcp - cpn * length * SOURCEj * Rs;
+		//this.cpb = SOURCEcp - (cpn - 1) * length * SOURCEj * Rs;
+		this.j = j;
+	}
+	@Override
+	public void updateCTRs(double carbonConcentration) {
+		this.r =  0;
+		this.xp = 0;//(-Jw * h_internode_rs * initial_c0)/(PressureRatio(initial_c0)*R*Tk);  //need to update this term
+	}	
+	
+/* 	// Update each attribute of fruit, can be called iteratively
+	void calcConvergingAttributes()	{
+		
+	    if(age >= 0) {
+			calcDimensions();
+						
+			//growth stage and seed, and allocation parameters
+			
+			//calcAllocationAmongHexoseAcids();
+			//surface transpiration
+			calcSurfaceArea();
+			calcRo(this.ageD);
+			calcTranspiration();
+			//xylem and phloem hydraulic conductance and water potential
+			calcWaterPotential_xylem();
+			calcXylemHydraulicConductance();
+			calcPhloemHydraulicConductance(); 
+			//membrane and cell wall 
+			calcSigmap();
+			calcCellWallExtensibility();
+			calcVol();
+			calcElasticModulus();
+				
+			//calcElasticity();
+			//water uptake from xylem and phloem, sugar uptake from phloem
+			caclWaterUptake_xylem();
+			caclWaterUptake_phloem();
+			calcUnloading(phloemCarbonConcentration);
+		}
+	} */
+	
+	// Update attributes of fruit which should not be updated iteratively
+/* 	void updateODE() {
+		
+		updateInput();
+		
+		calcBerryGrowthStage();
+		calcAllocationAmongHexoseAcids();
+		//xylem and phloem water potential
+		calcOsmeticPotential_phloem(phloemCarbonConcentration);
+		calcOsmoticPotential_furit();
+			
+		//update all state variables
+		updateStateVariables();
+		
+			
+		//N balance
+		/* 
+		calcNdegradation();
+		calcNSynthesis(); 
+		nitrogen_total = nitrogen_structure + nitrogen_nonStructure; */
+		//we do not calculate exact nitrogen dynamics in fruit
+	/* 	nitrogen_total = biomass * Nm;
+		nitrogen_structure = biomass * Nm_min; 
+		nitrogen_nonStructure = nitrogen_total - nitrogen_structure;
+		nitrogen_mobile = nitrogen_total * N_CONTENT_MOBILE;
+	} */ 
+	
+	
+	// Update all attributes of fruit without ODE
+	void updateWithoutODE() {
+		
+		if(age >= 0) {
+			calcDimensions();
+			
+			updateInput();
+			//fractionOfSolubleSugar = 0.2783+0.4116*(1-0.987**ageHour);
+						
+			//growth stage and seed, and allocation parameters
+			calcBerryGrowthStage();
+			
+			calcAllocationAmongHexoseAcids();
+			//surface transpiration
+			calcSurfaceArea();
+			calcRo(this.ageD);
+			calcTranspiration();
+			//xylem and phloem hydraulic conductance and water potential
+			calcWaterPotential_xylem();
+			calcXylemHydraulicConductance();
+			calcPhloemHydraulicConductance(); 
+			calcOsmoticPotential_phloem(sugarConcentration_phloem);
+			calcOsmoticPotential_furit();
+			//membrane and cell wall 
+			calcSigmap();
+			calcCellWallExtensibility();
+			calcVol();
+
+			//turgor pressure
+			calcTurgorPressure_fruit();
+			//calcElasticity();
+			//water uptake from xylem and phloem, sugar uptake from phloem
+			caclWaterUptake_xylem();
+			caclWaterUptake_phloem();
+			calcUnloading(sugarConcentration_phloem);
+			//update all state variables
+			updateStateVariables();
+			//if (printFlag) { println("Biomass: "+biomass + " sugar uptake: "+unloading); }
+				
+			//N balance
+			nitrogen_total = biomass * Nm;
+			nitrogen_structure = biomass * Nm_min; 
+			nitrogen_nonStructure = nitrogen_total - nitrogen_structure;
+			nitrogen_mobile = nitrogen_total * N_CONTENT_MOBILE;
+			/* calcNdegradation();
+			calcNSynthesis(); 
+			nitrogen_total = nitrogen_structure + nitrogen_nonStructure; */
+			initialized = true;
+			
+			//if (printFlag) { println( " fruit fresh Weight " + freshWeight + " biomass " + biomass ); }
+		}
+	}
+	
+	
+	
+	// @override
+	@Override
+	void update() {
+		super.update();
+		// If ODE used then update state only needs to be called in first step to set initial values
+		//println("berry");
+		/**searching and update state and pointer variables */
+		if(this.plantBaseID <= 0) { this.plantBaseID = first((* p:PlantBase, (p.plantNumber == this.plantNumber)*)).nodeID;} 
+		
+		if (parentID <= 0) {  // Assuming 0 is an uninitialized ID
+			GrowingOrgan parentOrgan = (GrowingOrgan) first((* this (<--)+ Internode*));
+			if (parentOrgan != null) {
+				this.parentID = parentOrgan.nodeID;
+				parentOrgan.addChildFruitId(this.nodeID);
+			}
+		}
+		
+		updateWithoutODE();
+		
+		if(step > 1) {
+			output = this.getJsonValues();
+			syncOutputs(output);
+			if(outputIndividualFruit == true) {
+				writeObjectNodeToCsv(output, this.outputFilePath, 2); // Start writing only at step 2 as data is not initialized beforehand
+			}
+		}
+	}
+
+	@Override
+	void initOutputFilePath() {
+		if(outputIndividualFruit == true) {
+			outputFilePath = PATH_OUTPUT + "P_" +plantNumber + "_F_" + this.ID  + ".output.csv";
+			initializeOutputFile(outputFilePath);			
+		}
+	}
+	
+
+	@Override
+	void initOutputHeaders() {
+		outputHeader = new ArrayList();
+		outputHeader.addAll(Arrays.asList(growthHeader));
+	}
+	
+	/**  
+	* The Fruit module interface, share the common function the the virtual fruit module.	
+	*/
+	// TODO: define in interface or abstract class
+	public BerryComplex(String fruitParams, int delta) {}
+
+	public BerryComplex(ParametersFactory parametersFactory, int delta) {}
+
+	void initiate_pb(PlantBase pb, Internode N) {
+		initOutputFilePath();
+		initOutputHeaders();
+	}
+	
+	/**
+	 * Execute one time step of the simulation.
+	 */
+	public void step();
+	
+	/**
+	 * Get raw output values.
+	 * 
+	 * @return The raw output values.
+	 */
+	public double[] getRawValues() {
+		return new double[growthHeader.length];
+	}
+
+	/**
+	 * Get JSON output values.
+	 * 
+	 * @return The output values in JSON format.
+	 */
+	public ObjectNode getJsonValues() {
+		return super.getJsonValues();
+	}
+
+	/**
+	 * Synchronise the fruit input values to the input row.
+	 * 
+	 * @param age The age of the fruit.
+	 * @param fruitRow The input row.
+	 */
+	public void updateInput(int age, JsonNode fruitRow);
+
+	/**
+	 * Convert an input row into a JFruit2 Input object.
+	 * 
+	 * @param age The age of the fruit.
+	 * @param fruitRow The input row.
+	 */
+	public void fromArray(int age, JsonNode fruitRow);
+	
+	/**
+	 * Synchronise the output from JFruit2 output values to the state variables in the fruit module.
+	 * 
+	 * @param see the Abstractfruit module
+	 */
+	public void syncOutputs(ObjectNode node) {
+		node.put("w", waterMass); //mgTogram;
+		node.put("s", biomass); //mgTogram;
+		
+		node.put("pip", osmoticWaterPotential_phloem);
+		node.put("piv", osmoticWaterPotential_vascular);
+		node.put("pif", osmoticWaterPotential_fruit);
+	
+		node.put("pp", turgorPressure_phloem);
+		node.put("pv", turgorPressure_vascular);
+		node.put("pf", turgorPressure_fruit);
+	
+		node.put("sfstone", seedDryWeight); //mgTogram;
+		node.put("af", Afruit);
+		node.put("ctcs", sugarConcentrationMole_fruit);
+	
+			
+		node.put("tf", transpirationMass);
+		node.put("cv", sucroseConcentration_vascular);
+		node.put("ua", sugarUptake_active);
+	
+		node.put("ux1", waterUptake_vascular_xylem);
+		node.put("up1", waterUptake_vascular_phloem);
+	
+		node.put("khx", Lxylem);
+		node.put("khp", Lphloem);
+	
+		node.put("ux", waterUptake_xylem);
+		node.put("up", waterUptake_phloem);
+	
+		node.put("masfls", sugarUptake_massflow);
+		node.put("pasfls", sugarUptake_passive);
+	
+		node.put("rM", maintenanceDM);
+		node.put("rG", growthCost);
+	
+		node.put("pf1", pf1);
+		node.put("pf2", pf2);
+			
+		node.put("v", vol);
+	}
+	
+
+}
+==>	
+ if(fruitVisibility == true) ( 
+if("grapevine".equals(species) && (special_scenario == null || !special_scenario.equals("berry_population")))
+	(
+ { int totalRank = 0;}
+ RU(130) RV(1000)
+ for(int i = 1; i<= numberOfRachis; i++)( //seems 8-13 rachis is good shape
+    RV(-10) RH(137.5) RV(0.5) Cylinder(rachiesLengthDynamic[i]/100, radiusDyn).(setLayer(border?borderLayer: 0),setShader(new RGBAShader(0,0.39,0)))
+	for(int j:(1:numberOfBranchtigs))(
+			   [RV(0.3) RH(137.5*(j)) RU(60)  for(int k:(1:numberOfBranchInternodes))(
+				   if(pow(numberOfBranchtigs_goodExample[i+j+k-3],i+k)> pNumberOfBranchtigs) 
+				   (Cylinder(rachiesLengthDynamic[i+j+k-3]/100, radiusDyn/1.5).(setLayer(border?borderLayer: 0),setShader(new RGBAShader(0,0.39,0)))
+				   ) [ 
+						 RL(pow(-1,k) * 45)
+						for(int l:(1:numberOfSubtwigs))(
+							if(pow(numberOfSubtwigs_goodExample[l+i-2], l+i)> pNumberOfBranchtigs) 
+								(Cylinder(rachiesLengthDynamic[l+i-2]/120, radiusDyn/2).(setLayer(border?borderLayer: 0),setShader(new RGBAShader(0,0.39,0)))
+						    )
+							for(int m:(1:numberOfPedicles))(
+								
+				 				[RH(137.5*(m)) if(pow(rpPedicle[m-1],j) > pPedicle && totalRank <= berryNumPerBunch)
+								(RL(45) Cylinder(rachiesLengthDynamic[i+j+k+m-4]/150, radiusDyn/3).(setLayer(border?borderLayer: 0),setShader(new RGBAShader(0,0.39,0)))
+								Sphere(Math.min(brRatio, max(1e-2, brRatio*biomass))).(setLayer(border?borderLayer: 0),setShader(getBerryShader(ageGdd)))
+								//for creating visualization
+								//Sphere(Math.min(5e-3, max(1e-2, 1e-3))).(setLayer(border?borderLayer: 0),setShader(getBerryShader(600)))
+								{totalRank++; } //println(totalRank);}
+								) ] 
+							  )
+							)
+				   		]
+						)
+			   		])
+  //)
+  
+  )  
+  ) else if (special_scenario.equals("berry_population"))
+  	( 
+  		Sphere(Math.min(brRatio*200, max(1e-2, brRatio*biomass)))
+  	
+  	) else if(species.equals("apple")) (
+  	  [RG() Cylinder(4e-2, 0.1e-2).(setShader(GREEN)) M(4e-2) Sphere(4e-2).(setShader(fruitTexture))]
+  	  )
+ ) 	  
+  ;

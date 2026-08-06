@@ -1,0 +1,3 @@
+file-name-model-options: model.options.FOPS-D34-SatDryTest.json
+light-interception-mode: cpu
+use-shading-factor: true

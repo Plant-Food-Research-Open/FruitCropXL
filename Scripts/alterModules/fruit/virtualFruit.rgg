@@ -1,0 +1,1674 @@
+import static main.*;
+import static absOrgan.*;
+import static leaf.*;
+import static shoot.*;
+import static plantBase.*;
+import static java.lang.Math.*;
+import static globalParameters.*;
+import static plantParameters.*;
+import static modelOptions.*;
+import static initialConditions.*;
+import static extraTools.*;
+import static carbonTransport.*;
+import static berryYield.*;
+import static archReader.*;
+import static rootSystem.*;
+import static flowerBase.*;
+import static flowerApple.*;
+import static budBase.*;
+import static fruitBase.*;
+import static carbonTransport.*;
+
+/** External */
+
+// Utils
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Arrays;
+import java.util.List;
+import java.util.ArrayList;
+import java.util.Iterator;
+
+
+// File Reader
+import java.io.InputStream;
+import java.io.FileInputStream;
+import java.io.BufferedReader;
+import java.io.File;
+import java.nio.file.Files;
+import java.io.FileReader;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.util.Properties;
+
+// Jackson Writer
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.dataformat.csv.CsvMapper;
+import com.fasterxml.jackson.databind.MappingIterator;
+import com.fasterxml.jackson.dataformat.csv.CsvSchema;
+
+// JFruit2
+import org.inra.psh.jfruit2.data.Input;
+import org.inra.psh.jfruit2.main.JLaunch;
+import org.inra.psh.jfruit2.main.Util;
+import org.inra.psh.jfruit2.model.Growth;
+import org.inra.psh.jfruit2.config.ParametersFactory;
+import org.inra.psh.jfruit2.data.Result;
+
+import org.apache.commons.configuration2.Configuration;
+import org.apache.commons.configuration2.PropertiesConfiguration;
+import org.apache.commons.configuration2.ex.ConfigurationException;
+
+// Config Module
+import io.github.fruitcropxl.config.params.groups.*;
+import io.github.fruitcropxl.config.params.structures.*;
+import interfaces.*;
+
+import java.io.File;
+import org.apache.commons.cli.ParseException;
+
+import java.io.Serializable;
+ 
+import de.grogra.pf.ui.registry.RunAfterSave;
+import de.grogra.pf.ui.registry.RunAfterLoad;
+import de.grogra.pf.registry.RegistryContext;
+// ********************************************** //
+// 		Data
+// ********************************************** //
+
+ 
+
+
+// ********************************************** //
+// 		JFruit2 Input Schemas
+// ********************************************** //
+
+/**  
+ * The Virtual Fruit module, shell for the virtual fruit jar.
+ * this class is designed to simulate fruit growth and development within the FruitCropXL framework.
+ * It integrates various submodules for handling environmental inputs, growth processes, 
+ * carbon and water transport, and output synchronization. 
+ *
+ * <h2>Key Functionalities:</h2>
+ * <ul>
+ *   <li><b>Parameter and File Loading:</b> Reads simulation parameters from configuration files 
+ *       and initializes input data, including environmental conditions and fruit attributes.</li>
+ *   <li><b>Data Processing:</b> Retrieves fruit data based on age and processes inputs dynamically 
+ *       depending on vessel conditions. and then passing to the jLaunch through fromArrays function 
+ *		 which calls the updateInput function to update the values if needed 
+ * 		 input.fromArray(ageMin, values);</li>
+ *   <li><b>Execution and Error Handling:</b> Computes growth parameters and handles exceptions 
+ *       (e.g., arithmetic errors) to ensure robustness.</li>
+ *   <li><b>Logging and Debugging:</b> Captures runtime details for debugging and analysis.</li>
+ *   <li><b>Output Synchronization:</b> Stores computed values in JSON format and writes them 
+ *       to an output file for further analysis.</li>
+ *   <li><b>Iterative Simulation Updates:</b> Continuously updates fruit attributes through multiple 
+ *       simulation steps, ensuring realistic growth dynamics.</li>
+ * </ul>
+ *
+ * <h2>Implementation Highlights:</h2>
+ * <ul>
+ *   <li>Bitwise model selection using hex flags to toggle different simulation components.</li>
+ *   <li>Integration with external libraries such as JFruit2 for model execution and configuration management.</li>
+ *   <li>Dynamic fruit property initialization and modification, ensuring adaptability for different species.</li>
+ *   <li>Real-time computation of physiological factors such as osmotic potential, turgor pressure, 
+ *       and transpiration effects.</li>
+ * </ul>
+ *
+ * This module serves as a key component within the FruitCropXL system, 
+ * supporting detailed, flexible, and scalable fruit growth simulations.
+ * pass model hour (0..23) into getFruitInput(..) and convert inside to file-hour for virtual fruit when needed.
+ */
+public module VirtualFruit extends FruitService {
+	// Preserve compatibility with serialized GroIMP graphs in project storage.
+	private static final long serialVersionUID = 7760587866344920309L;
+
+	@Override
+	void updateCarbonAllocation(double sugarConcentration) {
+		calcPTCTRAM(sugarConcentration);
+		calcLoading(sugarConcentration);
+		calcLeakage(sugarConcentration);
+		calcUnloading(sugarConcentration);
+	}
+
+	// JFruit2 Properties //
+	public double T;
+	public int H_a;
+	public double psi_x;
+
+		
+	// Store the first age_d and age_h when initializing
+	public static int firstAgeD = -1;
+	public static int firstAgeH = -1;
+	//own variables
+	/** instance parameter factory for making it possible to adding variations to 
+	individual fruit status */
+	private ParametersFactory instanceParametersFactory;
+	private static boolean loggedTemplateInitOverrideKeysOnce = false;
+	/** delay the step excution only after the first update, because fruit needs to be
+	initialized properly first*/
+	private boolean delayExecutionFlag = true; // Tracks execution delay
+
+	double sugarConcentration_phloem_pre; 
+	// Optional debug hook for MM scaling in calcUnloading (default off for compatibility).
+	private static final boolean VF_DEBUG_MM = false;
+	String outputFilePath;
+	// JFruit2 requires cP > 0; cP is derived from cpm, so keep a tiny positive floor on cpm (mol/L).
+	private static final double VF_CPM_MIN_MOL_PER_L = 1e-6;
+	private double lastInputCpmMolPerL = Double.NaN;
+	private double lastInputCpmMolPerCm3 = Double.NaN;
+	
+	
+	/**
+	 * Initializes the first age_d and age_h from the list.
+	 */
+	private void initializeFirstAge() {
+		if (inputNodeList != null && !inputNodeList.isEmpty()) {
+			
+			JsonNode firstEntry = (JsonNode) inputNodeList.get(0); // Fix: Use index 0 instead of 1
+			println("DEBUG: First entry in INPUT FRUIT DATA " + firstEntry.toString());
+			  
+			firstAgeD = firstEntry.has("age_d") ? firstEntry.get("age_d").asInt() : -1;
+			firstAgeH = firstEntry.has("age_h") ? firstEntry.get("age_h").asInt() : -1;
+		
+		}
+
+	}
+	
+	/** for indicating the selected model functions as a bitwise combination
+		Constants Defined with Hexadecimal Values
+		NONE = 0: This constant represents a situation where no flags are set. It is zero in binary, meaning all bits are off.
+		GROWTH = 0x01: This is represented as 0001 in binary (4 bits for simplicity). It sets the lowest bit to 1.
+		SUGAR = 0x02: This is 0010 in binary. It sets the second lowest bit to 1.
+		SUGAR2 = 0x04: This is 0100 in binary. It sets the third lowest bit to 1.
+		CITRATE = 0x08: This is 1000 in binary. It sets the fourth lowest bit to 1.
+		MALATE = 0x10: This is 1 0000 in binary (5 bits to show the fifth position). It sets the fifth lowest bit to 1. 
+	*/
+		/**
+	 * Modèle actifs.
+	 */
+	public final static class Active {
+		/**
+		 * Constructeur privé qui interdit la création d'une instance de la classe.
+		 */
+		private Active() {
+		}
+
+		public static final int NONE = 0;
+		public static final int GROWTH = 0x01;
+		public static final int SUGAR = 0x02;
+		public static final int SUGAR2 = 0x04;
+		public static final int CITRATE = 0x08;
+		public static final int MALATE = 0x10;
+	}
+	
+
+
+
+
+
+    /**
+     * Initialise the simulation context.
+     */
+    void initContext() {
+    	
+    	
+        CategoryStore config = ((DocumentCategoryNameGroup) CONFIG.getGroup(FILE_NAME_MODEL_OPTIONS, 
+			DocumentCategoryNameGroup.class)).getCategoryStore();
+		
+		config.setFlattenedAccess(true);
+  	
+        FruitService.PARAMS = PATH_SCENARIOS + config.getString("virtualFruitParameter_file");
+       
+       if (jLaunch == null) {  // <- don't clobber a pre-wired jLaunch/ParametersFactory
+        jLaunch = new ExtendedJLaunch();
+		jLaunch.readProperties(FruitService.PARAMS);
+	   }
+		originalParametersFactory = jLaunch.getParamFct(); 
+        
+		//parametersFactory.print();
+		active = originalParametersFactory.getJfruit2Param().getActive();
+		
+		input = jLaunch.initInput(DELTA);
+		inputHeaders = input.getHeader();
+		
+		if(printFlag) {
+			println(" active " + active);
+			println("Fruit input Headers: " + Arrays.toString(inputHeaders));
+			println(FruitService.PARAMS);
+		}
+		
+		
+		//if (printFlag) { println("FruitService.PARAMS " + FruitService.PARAMS); }
+		config.setFlattenedAccess(false);	
+		
+		
+    }
+    
+    
+
+    /**
+     * Initialise the fruit data for the simulation.
+     */
+	@Override
+	void initData() {
+		if (jLaunch == null) {
+			initContext();
+		}
+	
+		if (inputVesselConditions) {
+			String csvPath = PATH_INPUT + virtualFruitModelInput_file;
+	
+			// Detect delimiter from the header line
+			char sep = detectDelimiter(csvPath); // ';' or ','
+			CsvMapper csvMapper = new CsvMapper();
+			CsvSchema  csvSchema = CsvSchema.emptySchema().withHeader().withColumnSeparator(sep);
+	
+			inputNodeList = csvMapper.readerFor(JsonNode.class)
+									 .with(csvSchema)
+									 .readValues(new File(csvPath))
+									 .readAll();
+	
+			// quick sanity
+			if (inputNodeList != null && !inputNodeList.isEmpty()) {
+				JsonNode head = (JsonNode) inputNodeList.get(0);
+				println("DEBUG first row keys: " + head.fieldNames().next()); // will show real keys now
+			}
+			initializeFirstAge();  // now finds age_d / age_h
+		} else {
+			inputNodeList = null;
+			if (firstAgeD == -1) firstAgeD = (int) this.ageD;
+			if (firstAgeH == -1) firstAgeH = toFileHour(hourOfDay);
+		}
+	}
+	
+	// --- helper ---
+	private static char detectDelimiter(String path) {
+		BufferedReader br = null;
+		try {
+			br = new BufferedReader(new FileReader(path));
+			String line = br.readLine();
+			if (line != null) {
+				if (line.indexOf(';') >= 0) return ';';
+				if (line.indexOf(',') >= 0) return ',';
+			}
+		} catch (IOException e) {
+			// ignore, fall through
+		} finally {
+			try { if (br != null) br.close(); } catch (IOException e) {}
+		}
+		return ';'; // your file clearly uses ';'
+	}
+
+    
+    
+	public VirtualFruit(String fruitParams, int delta) {
+		 // Check if parametersFactory is initialized before proceeding
+		
+		super(fruitParams, delta);
+		this.length = 2e-2;
+		
+        //setOutputHeaders(this.active);
+        
+	}
+	
+	/**
+	 * Constructor used by FruitPlanner add-fruit for virtual-fruit species (apple path).
+	 *
+	 * Initialization is intentionally two-stage:
+	 * 1) Build an instance-specific ParametersFactory and seed it with DEFAULT init values from
+	 *    `initial.conditions.*` (FW/DW + Sugar2.c*0) so this fruit has a valid standalone baseline.
+	 * 2) FruitPlanner later calls `initiate_pb(...)` for graph placement and then, if a nearby
+	 *    template fruit was found, calls `applyInitState(FruitInitState)` on this new fruit.
+	 *
+	 * The later template override updates both:
+	 * - FruitService runtime fields (FW/DW/sugars/etc.), and
+	 * - this VirtualFruit instanceParametersFactory (`Growth.*`, `Sugar2.*`),
+	 * then rebuilds the JFruit runtime so model state and parameter init keys stay consistent.
+	 */
+	public VirtualFruit(ParametersFactory parametersFactory, int delta) {
+		// Create an instance-specific parameter factory so per-fruit init can vary.
+		this.instanceParametersFactory = copyParametersFactory(parametersFactory);
+		FruitService.FruitInitState initState = buildDefaultVirtualFruitInitStateFromConfig();
+		applyInitStateToInstanceParametersFactory(initState, true, false);
+		rebuildVirtualFruitRuntime(delta);
+		
+		loadParameters();
+		initOutputHeaders();
+		this.isFirstUpdate = true;
+		this.length = 2e-2;
+		this.active = instanceParametersFactory.getJfruit2Param().getActive();
+		
+	}
+
+	private FruitService.FruitInitState buildDefaultVirtualFruitInitStateFromConfig() {
+		FruitService.FruitInitState s = new FruitService.FruitInitState();
+		s.valid = true;
+		s.freshWeight_mg = FRUIT_FRESH_WEIGHT;
+		s.dryWeight_mg = FRUIT_DRY_WEIGHT;
+
+		CategoryStore config_Init =
+			((DocumentCategoryNameGroup) CONFIG.getGroup(
+				FILE_NAME_INITIAL_CONDITIONS,
+				DocumentCategoryNameGroup.class))
+			.getCategoryStore();
+		config_Init.setCategoryContext("fruit");
+
+		s.hasSugar2Concentrations = false;
+		Double cSuc0 = readOptionalSugar2InitDouble(config_Init, "cSuc0");
+		Double cSor0 = readOptionalSugar2InitDouble(config_Init, "cSor0");
+		Double cGlu0 = readOptionalSugar2InitDouble(config_Init, "cGlu0");
+		Double cFru0 = readOptionalSugar2InitDouble(config_Init, "cFru0");
+		Double cSta0 = readOptionalSugar2InitDouble(config_Init, "cSta0");
+		if (cSuc0 != null && cSor0 != null && cGlu0 != null && cFru0 != null && cSta0 != null) {
+			s.cSuc0 = cSuc0.doubleValue();
+			s.cSor0 = cSor0.doubleValue();
+			s.cGlu0 = cGlu0.doubleValue();
+			s.cFru0 = cFru0.doubleValue();
+			s.cSta0 = cSta0.doubleValue();
+			s.hasSugar2Concentrations = true;
+		}
+		return s;
+	}
+
+	private boolean isFiniteVF(double v) {
+		return !(Double.isNaN(v) || Double.isInfinite(v));
+	}
+
+	private Double readOptionalSugar2InitDouble(CategoryStore config_Init, String key) {
+		double v;
+		try {
+			v = config_Init.getDouble(key, Double.NaN);
+		} catch (Exception e) {
+			return null;
+		}
+		if (!isFiniteVF(v) || v < 0.0) return null;
+		return Double.valueOf(v);
+	}
+
+	private Double readOptionalSugar2InitDouble(ParametersFactory parametersFactory, String key) {
+		double v;
+		try {
+			if (parametersFactory == null || parametersFactory.getConfiguration() == null) return null;
+			v = parametersFactory.getConfiguration().getDouble(key, Double.NaN);
+		} catch (RuntimeException e) {
+			return null;
+		}
+		if (!isFiniteVF(v) || v < 0.0) return null;
+		return Double.valueOf(v);
+	}
+
+	private void populateSugar2InitStateFromParameters(FruitService.FruitInitState s) {
+		if (s == null) return;
+
+		ParametersFactory parametersFactory = instanceParametersFactory;
+		if (parametersFactory == null && jLaunch != null) {
+			parametersFactory = jLaunch.getParamFct();
+		}
+		if (parametersFactory == null) return;
+
+		Double cSuc0 = readOptionalSugar2InitDouble(parametersFactory, "Sugar2.cSuc0");
+		Double cSor0 = readOptionalSugar2InitDouble(parametersFactory, "Sugar2.cSor0");
+		Double cGlu0 = readOptionalSugar2InitDouble(parametersFactory, "Sugar2.cGlu0");
+		Double cFru0 = readOptionalSugar2InitDouble(parametersFactory, "Sugar2.cFru0");
+		Double cSta0 = readOptionalSugar2InitDouble(parametersFactory, "Sugar2.cSta0");
+		if (cSuc0 == null || cSor0 == null || cGlu0 == null || cFru0 == null || cSta0 == null) return;
+
+		s.cSuc0 = cSuc0.doubleValue();
+		s.cSor0 = cSor0.doubleValue();
+		s.cGlu0 = cGlu0.doubleValue();
+		s.cFru0 = cFru0.doubleValue();
+		s.cSta0 = cSta0.doubleValue();
+		s.hasSugar2Concentrations = true;
+	}
+
+	private void applyInitStateToInstanceParametersFactory(FruitService.FruitInitState s,
+			boolean printKeys, boolean templateOverride) {
+		if (instanceParametersFactory == null || s == null || !s.valid) return;
+
+		double w0 = FRUIT_FRESH_WEIGHT * mgTogram;
+		if (isFiniteVF(s.freshWeight_mg) && s.freshWeight_mg > 0) {
+			w0 = s.freshWeight_mg * mgTogram;
+		}
+
+		double s0 = FRUIT_DRY_WEIGHT * mgTogram;
+		if (isFiniteVF(s.dryWeight_mg) && s.dryWeight_mg >= 0) {
+			s0 = s.dryWeight_mg * mgTogram;
+		}
+
+		boolean sugar2Active = false;
+		try {
+			int activeFlags = instanceParametersFactory.getJfruit2Param().getActive();
+			sugar2Active = ((activeFlags & Active.SUGAR2) != 0);
+		} catch (Throwable t) {
+			sugar2Active = true; // compatibility fallback: keep Sugar2-centric behavior
+		}
+
+		String[] growthKeys = {"Growth.stot0", "Growth.w0", "Sugar2.s0"};
+		String[] growthVals = {String.valueOf(s0), String.valueOf(w0), String.valueOf(s0)};
+		int i;
+		for (i = 0; i < growthKeys.length; i++) {
+			instanceParametersFactory.getConfiguration().setProperty(growthKeys[i], growthVals[i]);
+		}
+
+		if (sugar2Active && s.hasSugar2Concentrations) {
+			String[] sugarKeys = {
+				"Sugar2.cSuc0",
+				"Sugar2.cSor0",
+				"Sugar2.cGlu0",
+				"Sugar2.cFru0",
+				"Sugar2.cSta0"
+			};
+			String[] sugarVals = {
+				String.valueOf(s.cSuc0),
+				String.valueOf(s.cSor0),
+				String.valueOf(s.cGlu0),
+				String.valueOf(s.cFru0),
+				String.valueOf(s.cSta0)
+			};
+			for (i = 0; i < sugarKeys.length; i++) {
+				instanceParametersFactory.getConfiguration().setProperty(sugarKeys[i], sugarVals[i]);
+			}
+		} else if (templateOverride && sugar2Active && fruitAddDebug && printFlag) {
+			println("[VirtualFruit] template init missing Sugar2 concentrations; keeping existing Sugar2.c*0 defaults.");
+		}
+
+		try {
+			instanceParametersFactory.writeAndCheck();
+		} catch (IOException e) {
+			e.printStackTrace();
+		}
+
+		if (printKeys && fruitAddDebug && printFlag && templateOverride
+			&& !loggedTemplateInitOverrideKeysOnce) {
+			loggedTemplateInitOverrideKeysOnce = true;
+			println("[VirtualFruit] template init override applied:");
+			println("  Growth.stot0=" + instanceParametersFactory.getConfiguration().getString("Growth.stot0"));
+			println("  Growth.w0=" + instanceParametersFactory.getConfiguration().getString("Growth.w0"));
+			println("  Sugar2.s0=" + instanceParametersFactory.getConfiguration().getString("Sugar2.s0"));
+			if (sugar2Active) {
+				println("  Sugar2.cSuc0=" + instanceParametersFactory.getConfiguration().getString("Sugar2.cSuc0"));
+				println("  Sugar2.cSor0=" + instanceParametersFactory.getConfiguration().getString("Sugar2.cSor0"));
+				println("  Sugar2.cGlu0=" + instanceParametersFactory.getConfiguration().getString("Sugar2.cGlu0"));
+				println("  Sugar2.cFru0=" + instanceParametersFactory.getConfiguration().getString("Sugar2.cFru0"));
+				println("  Sugar2.cSta0=" + instanceParametersFactory.getConfiguration().getString("Sugar2.cSta0"));
+			}
+		}
+	}
+
+	private void rebuildVirtualFruitRuntime(int delta) {
+		if (instanceParametersFactory == null) return;
+		jLaunch = new ExtendedJLaunch(instanceParametersFactory);
+		input = jLaunch.initInput(delta);
+		this.active = instanceParametersFactory.getJfruit2Param().getActive();
+	}
+
+	@Override
+	public FruitService.FruitInitState captureInitState() {
+		FruitService.FruitInitState s = super.captureInitState();
+		populateSugar2InitStateFromParameters(s);
+		return s;
+	}
+
+	@Override
+	public void applyInitState(FruitService.FruitInitState s) {
+		// Called by FruitPlanner after initiate_pb(...) when a neighbour/template fruit exists.
+		// This keeps FruitService fields and VirtualFruit instance init keys synchronized.
+		super.applyInitState(s);
+		if (s == null || !s.valid) return;
+		if (instanceParametersFactory == null) return;
+
+		applyInitStateToInstanceParametersFactory(s, true, true);
+		rebuildVirtualFruitRuntime(DELTA);
+		initOutputHeaders();
+		this.isFirstUpdate = true;
+		delayExecutionFlag = true;
+	}
+		
+
+		/**
+	 * Calculates the carbon potential molarity (Cpm) in the fruit phloem based on the given
+	 * sugar concentration in the phloem sap.
+	 * <p>
+	 * The sugar concentration is first converted into molar concentration (mol/L)
+	 * using {@code convertSugarToMol(double)}. The result is then capped at a maximum
+	 * of 0.69 mol/L to avoid numerical instability in the virtual fruit model simulations.
+	 * <p>
+	 * <b>Conversion background:</b><br>
+	 * The molar concentration is calculated from the sugar concentration (g/g) assuming:
+	 * <ul>
+	 *   <li>Solution density ≈ 1000 g/L (for dilute sugar solutions)</li>
+	 *   <li>Molar mass is a weighted average depending on sugar type: 
+	 *       sucrose (342.3 g/mol) and sorbitol (182.17 g/mol).</li>
+	 *   <li>Formula: {@code mol/L = (sugar concentration * 1000) / (effective molar mass)}</li>
+	 *   <li>The effective molar mass is calculated as:<br>
+	 *       {@code effective molar mass = FRACTION_SORBITOL × MOL_SORBITOL + (1 - FRACTION_SORBITOL) × MOL_SUCROSE}</li>
+	 * </ul>
+	 * <p>
+	 * For example, with 30% sorbitol and 70% sucrose, the effective molar mass is about 294 g/mol.
+	 * Thus, a sugar concentration of 0.15 g/g corresponds approximately to 0.51 mol/L.
+	 * <p>
+	 * Note: Previously, random noise was added to Cpm to prevent singularities. The current
+	 * implementation strictly caps the value instead.
+	 * when cpm exceeds 0.69, there will be error pop up from the virtual fruit and the turgor pressure is too big
+	 *
+	 * @param sugarConcentration_phloem Sugar concentration in the phloem (g/gSolution).
+	 * @see #convertSugarToMol(double)
+	 */
+	void calcCpm(double sugarConcentration_phloem) {
+		this.Cpm = Math.min(0.69, convertSugarToMol(sugarConcentration_phloem));
+	}
+	
+	@Override
+	public void initializeCarbonTransport() {
+		this.r = 0;
+		this.xp = 0;
+		this.cpb = this.cpt = SOURCEcp;
+		//float Rs = ( R0 * PhloemResistanceRatio(initial_c0)/(PressureRatio(initial_c0)*R*Tk));   // resistance per unit length (initial case)
+		//this.cpt = SOURCEcp - cpn * length * SOURCEj * Rs;
+		//this.cpb = SOURCEcp - (cpn - 1) * length * SOURCEj * Rs;
+		this.j = j;
+	}
+	@Override
+	public void updateCTRs(double carbonConcentration) {
+		this.r =  0;
+		this.xp = 0;//(-Jw * h_internode_rs * initial_c0)/(PressureRatio(initial_c0)*R*Tk);  //need to update this term
+	}	
+	
+	public void loadParameters() {
+			
+		/** Set the context for file name parameters*/
+		CategoryStore config = ((DocumentCategoryNameGroup) CONFIG.getGroup(FILE_NAME_PLANT_PARAMETERS, 
+			DocumentCategoryNameGroup.class)).getCategoryStore();
+
+		
+		/** Configuration context for fruit parameters */
+		config.setCategoryContext("fruit");
+		FRUIT_BEGIN   = FRUIT_AGE_AFTER_FULLBLOOM;
+		km_pri        = config.getDouble("KM_PRI");
+
+		//get the skin conductance parameters
+		roMin		 = config.getDouble("roMin");
+		roMax		 = config.getDouble("roMax");
+		kro		 	 = config.getDouble("kro");
+		coefRo		 = config.getDouble("coefRo");
+		
+		if (debug && printFlag) println( "fruit roMax " + roMax + " " +  kro + " " +  coefRo);
+		
+		config.setCategoryContext("leaf-water");
+		//a list of parameters for the sensitivities of hydraulic conductance 
+		//for generic parameter initiation
+		growth_a	 = config.getDouble("growth_a", -10);
+		growth_b	 = config.getDouble("growth_b", -0.5);
+		
+		
+
+				
+	}
+	
+	@Override
+	FruitService initiate_pi(PlantIdentifier pi, float length_, float diameter_)
+	{
+		loadParameters();
+		//IDENTIFIERS
+		this.plantNumber = pi.plantNumber;
+		this.border = pi.border;
+		this.length = length_;
+		this.diameter = diameter_;
+		
+		ageD = FRUIT_AGE_AFTER_FULLBLOOM; 
+		ageHour = (int) ageD *24;
+		ageMin = 60 * ageHour;
+		double thermalDayUnit = OPT_TEMP == 0 ? 0.5 : (Tmax + Tmin) / 2 / OPT_TEMP;
+		double degreeDayUnit = Math.min(1, ((Tmax + Tmin) / 2 - baseT));
+		
+		age = ageTd = ageD * thermalDayUnit; //Age in the main model is thermal time, assume the effective day is 0.6
+		ageGdd = ageD * degreeDayUnit; 
+		this.organType = "Fruit";
+		initOutputFilePath();
+		initOutputHeaders();
+		
+		return this;
+	}
+	
+	@Override
+	void initiate_pb(PlantBase pb, Internode N)
+	{
+		loadParameters();
+		//IDENTIFIERS
+		plantNumber = pb.plantNumber;
+		border = pb.border;
+		this.organType = "Fruit";
+		this.plantBaseID = pb.nodeID;
+		// Check if N is not null to prevent NullPointerException
+		if (N != null) {
+			this.ID = N.ID;
+			this.order = N.order; 
+			this.rank = N.rank;
+			this.axis2ID = N.axis2ID; 
+			this.axis3ID = N.axis3ID;
+			this.axis4ID = N.axis4ID;
+			this.axis5ID = N.axis5ID;
+			this.axis6ID = N.axis6ID;
+			this.cpn = axis2ID + axis3ID + axis4ID + axis5ID + axis6ID + rank;
+			this.nodeNumber = N.nodeNumber; 
+			this.cordonNumber = N.cordonNumber;
+		} else {this.ID = 10000;}
+		length = 1e-3;
+		diameter = 1e-3; 	
+		
+		ageD = FRUIT_AGE_AFTER_FULLBLOOM; 
+		ageHour = (int) ageD *24;
+		ageMin = 60 * ageHour;
+		double thermalDayUnit = OPT_TEMP == 0 ? 0.5 : (Tmax + Tmin) / 2 / OPT_TEMP;
+		double degreeDayUnit = Math.min(1, ((Tmax + Tmin) / 2 - baseT));
+		
+		age = ageTd = ageD * thermalDayUnit; //Age in the main model is thermal time, assume the effective day is 0.6
+		ageGdd = ageD * degreeDayUnit; 
+		initOutputFilePath();
+		initOutputHeaders();
+	}
+		
+	/**
+	 * Initiate from apex
+	 */
+	@Override
+	void initiate_apex(ApexService a)
+	{
+		loadParameters();
+		//IDENTIFIERS
+		plantNumber = a.plantNumber;
+		border = a.border;
+		rank = a.rank;		
+		order = a.order;                                                 
+		nodeNumber = a.nodeNumber; 
+		cordonNumber = a.cordonNumber;
+				
+		this.axis2ID = a.axis2ID; 
+		this.axis3ID = a.axis3ID;
+		this.axis4ID = a.axis4ID;
+		this.axis5ID = a.axis5ID;
+		this.axis6ID = a.axis6ID;
+		this.cpn = axis2ID + axis3ID + axis4ID + axis5ID + axis6ID + rank;
+		this.organType = "Fruit";
+		
+		length = 1e-4;
+		diameter = 1e-3; 		
+				
+		ageD = FRUIT_BEGIN; 
+		
+		ageHour = (int) ageD *24;
+		ageMin = 60 * ageHour;
+		double thermalDayUnit = OPT_TEMP == 0 ? 0.5 : (Tmax + Tmin) / 2 / OPT_TEMP;
+		double degreeDayUnit = Math.min(1, ((Tmax + Tmin) / 2 - baseT));
+		
+		age = ageTd = ageD * thermalDayUnit; //Age in the main model is thermal time, assume the effective day is 0.6
+		ageGdd = ageD * degreeDayUnit; 
+		initOutputFilePath();
+		initOutputHeaders();
+	}
+	
+	
+	
+	
+	/**
+	 * Converts the fruit's environmental and physiological parameters into an array format 
+	 * and passes them to the virtual fruit model.
+	 * <p>
+	 * This method first calls the parent class's {@code fromArray} method to initialize the 
+	 * standard properties. Then, it prepares an array of five values representing the fruit's 
+	 * environmental and physiological conditions, ensuring that units are appropriately 
+	 * converted before passing them to the {@code input} object.
+	 * </p>
+	 *
+	 * <h3>Processing Steps:</h3>
+	 * <ol>
+	 *   <li>Calls {@code super.fromArray(ageMin, fruitRow)} to initialize standard parameters.</li>
+	 *   <li>Creates a double array to store converted parameter values.</li>
+	 *   <li>Assigns the values with necessary unit conversions:
+	 *      <ul>
+	 *          <li>Temperature (`T`) converted from Celsius to Kelvin.</li>
+	 *          <li>Humidity (`H_a`) converted from percentage to a decimal fraction.</li>
+	 *          <li>Water potential (`psi_x`) stored in bar as is.</li>
+	 *          <li>Phloem sugar concentration (`Cpm`) converted from mol/dm³ to mol/dm³ by dividing by 1000.</li>
+	 *          <li>Hydraulic conductance (`ro`) stored as is.</li>
+	 *      </ul>
+	 *   </li>
+	 *   <li>Passes the formatted values to the virtual fruit simulation via {@code input.fromArray(ageMin, values)}.</li>
+	 * </ol>
+	 *
+	 * @param ageMin   The minimum age of the fruit in minutes.
+	 * @param fruitRow The JSON node containing fruit properties, extracted prior to this method.
+	 */
+ 	@Override
+	public void fromArray(int ageMin, JsonNode fruitRow) {
+		updateInput(ageMin, fruitRow);
+		
+		//convert into array and passing to the virtual fruit model
+		double[] values = new double[5];
+		//feed JFruit2 via fromArray(...), you must pre-convert exactly what convertData()
+		//as Input.convertData() (where T→K, h_a→0–1, cpm÷1000) is called only by Data.fromFile(...) 
+		//Data.fromArray(...) does not call convertData().
+		values[0] = (T > 200.0 ? T : T + 273.15);    //K
+		values[1] = (H_a> 1.0) ? H_a / 100.0 : H_a;   //0-1
+		values[2] = psi_x;		   //bar	
+		double cpmInputMolPerL = Cpm;
+		if (!isFiniteVF(cpmInputMolPerL) || cpmInputMolPerL <= 0.0) {
+			// Compatibility guard: zero/negative cpm causes JFruit2 Growth.computeDerivatives() fatal cP errors.
+			cpmInputMolPerL = VF_CPM_MIN_MOL_PER_L;
+		}
+		double cpmInputMolPerCm3 = cpmInputMolPerL / 1000.0;
+		values[3] = cpmInputMolPerCm3;    //pass cpm in mol·cm⁻³ (mol·L⁻¹ / 1000), [mol sucre.dm-3 sève 0.05 - 0.53, divided by 1000 to convert into mol sucre.cm-3 sève 
+		values[4] = ro;		   //cm/h  40- 370	
+		lastInputCpmMolPerL = cpmInputMolPerL;
+		lastInputCpmMolPerCm3 = cpmInputMolPerCm3;
+		
+		if (debug && printFlag) { println(Arrays.toString(values)); }
+		//this is needed to passing the values to the virtual fruit
+		if (input == null && jLaunch != null) {
+			input = jLaunch.initInput(DELTA);
+		}
+		input.fromArray(ageMin, values);
+	}
+	
+	
+	/**
+	 * Updates the input values for the fruit simulation based on the provided JSON node.
+	 * <p>
+	 * This method assigns environmental and physiological parameters either from the JSON input 
+	 * (if {@code inputVesselConditions} is true) or through calculated/default values (if {@code inputVesselConditions} is false).
+	 * Additionally, it performs conversions for key parameters, assigns default values to prevent errors,
+	 * and includes a temporary solution to prevent ODE calculation errors.
+	 * </p>
+	 *
+	 * <h3>Behavior:</h3>
+	 * <ul>
+	 *   <li>If {@code inputVesselConditions} is true, it loads values directly from the JSON node.</li>
+	 *   <li>If {@code inputVesselConditions} is false, it calculates and assigns default values, including:
+	 *     <ul>
+	 *       <li>Estimating water potential if missing or invalid.</li>
+	 *       <li>Converting carbon concentration to sucrose concentration.</li>
+	 *       <li>Computing `ro` based on fruit age.</li>
+	 *     </ul>
+	 *   </li>
+	 *   <li>Ensures values are not NaN, infinite, or invalid to maintain stability in the simulation.</li>
+	 *   <li>Handles a special case where the organ growth method is "TempLimited".</li>
+	 * </ul>
+	 *
+	 * @param ageMin   The minimum age in minutes.
+	 * @param fruitRow A JSON node containing the following fruit properties:
+	 *                 <ul>
+	 *                     <li>{@code age_d} - Fruit age in days.</li>
+	 *                     <li>{@code age_h} - Fruit age in hours.</li>
+	 *                     <li>{@code T} - Temperature (Kelvin).</li>
+	 *                     <li>{@code H_a} - Humidity level.</li>
+	 *                     <li>{@code psi_x} - Water potential.</li>
+	 *                     <li>{@code Cpm} - Phloem sucrose concentration.</li>
+	 *                     <li>{@code rho} - Density.</li>
+	 *                 </ul>
+	 */
+	@Override
+	public void updateInput(int ageMin, JsonNode fruitRow) {
+		Double Tm   = firstNum(fruitRow, new String[]{"T","t"});            // °C
+		Double Ham  = firstNum(fruitRow, new String[]{"H_a","h_a","Ha"});   // %
+		Double psim = firstNum(fruitRow, new String[]{"psi_x","Psi_x","psiX"});
+		Double CpmM = firstNum(fruitRow, new String[]{"Cpm","cpm"});
+		Double rom  = firstNum(fruitRow, new String[]{"ro","rho","Ro","Rho"});
+	
+		T     = (Tm  != null) ? Tm.doubleValue()   : 20.0;
+		H_a   = (int) Math.max(0, Math.min(100, Math.round((Ham != null ? Ham.doubleValue() : 50.0))));
+		psi_x = (psim!= null) ? psim.doubleValue() : -8.0;
+		Cpm   = (CpmM!= null) ? CpmM.doubleValue() : 0.20;
+		ro    = (rom != null) ? rom.doubleValue()  : roMin;
+		
+		if (Double.isNaN(T)    || Double.isInfinite(T))    T    = 20.0;
+		if (Double.isNaN(psi_x)|| Double.isInfinite(psi_x)) psi_x = -8.0;
+		if (Double.isNaN(Cpm)  || Double.isInfinite(Cpm))  Cpm   = 0.20;
+		if (Double.isNaN(ro)   || Double.isInfinite(ro))   ro    = roMin;
+		if (Cpm <= 0.0) Cpm = VF_CPM_MIN_MOL_PER_L;
+
+	}
+	
+	// Java 1.5-friendly (raw types, Double.valueOf)
+// Accept numbers OR numeric strings; Java 1.5 compatible (no generics; Double.valueOf)
+private static Double firstNum(JsonNode row, String[] keys) {
+    if (row == null) return null;
+    for (int i = 0; i < keys.length; i++) {
+        JsonNode v = row.get(keys[i]);
+        if (v == null || v.isNull()) continue;
+
+        // Already numeric?
+        if (v.isNumber()) return Double.valueOf(v.asDouble());
+
+        // Text node that looks like a number?
+        if (v.isTextual()) {
+            String s = v.asText();
+            if (s != null) {
+                s = s.trim();
+                if (s.length() > 0) {
+                    // guard for locales that might sneak in a comma
+                    if (s.indexOf(',') >= 0) s = s.replace(',', '.');
+                    try { return Double.valueOf(Double.parseDouble(s)); }
+                    catch (NumberFormatException e) { /* ignore and check next key */ }
+                }
+            }
+        }
+    }
+    return null;
+}
+
+
+	// Java 1.5-compatible helpers (no generics)
+	private static double getNum(JsonNode row, String k, double dflt) {
+		JsonNode v = row != null ? row.get(k) : null;
+		return (v != null && v.isNumber()) ? v.asDouble() : dflt;
+	}
+	private static Double getNumMaybe(JsonNode row, String k) {
+		JsonNode v = row != null ? row.get(k) : null;
+		return (v != null && v.isNumber()) ? Double.valueOf(v.asDouble()) : null; // Double.valueOf for Java 1.5
+	}
+
+
+	
+	@Override
+	public ObjectNode getJsonValues() {
+		return super.getJsonValues();
+	}
+
+	@Override
+	void initOutputFilePath() {
+		if(outputIndividualFruit == true) {
+			if(this.nodeID <= 0) 
+		 	{
+              this.nodeID = this.getId();
+        	}
+        	
+        	if(this.nodeID > 0) 
+        	{
+        		outputFilePath = PATH_OUTPUT + "fruit_" + this.nodeID  + ".csv";
+        		initializeOutputFile(outputFilePath);
+			}
+		}
+	}
+	
+	@Override
+	void initOutputHeaders() {
+		outputHeader = new ArrayList();
+		//if (printFlag) { println(" active " + active + " Active.GROWTH " + Active.GROWTH); }
+
+		// Conditionally add headers based on the active flags
+		if ((active & Active.GROWTH) != 0) {
+			outputHeader.addAll(Arrays.asList(growthHeader));
+		}
+		if ((active & Active.SUGAR) != 0) {
+			outputHeader.addAll(Arrays.asList(sugarHeader));
+			if ((active & Active.GROWTH) == 0) {
+				outputHeader.addAll(Arrays.asList(sugarConcHeader));
+			}
+		}
+		if ((active & Active.SUGAR2) != 0) {
+			outputHeader.addAll(Arrays.asList(sugar2Header));
+		}
+		if ((active & Active.CITRATE) != 0) {
+			outputHeader.addAll(Arrays.asList(citrateHeader));
+			if ((active & Active.GROWTH) == 0) {
+				outputHeader.addAll(Arrays.asList(citrateConcHeader));
+			}
+		}
+		if ((active & Active.MALATE) != 0) {
+			outputHeader.addAll(Arrays.asList(malateHeader));
+		}
+	
+		// Print or return the headers (depending on your needs, you may want to store this list or use it further)
+		 // Check and print the header list to debug
+		// if (outputHeader.isEmpty()) {
+		// 	if (printFlag) { println("No headers have been added."); }
+		// } else {
+		// 	if (printFlag) { println("Output Headers: " + outputHeader); }
+		// }
+	}
+	
+		public void printAllFields(ObjectNode node) {
+		// Use raw Map.Entry to maintain Java 1.5 compatibility (no generics)
+		for (Iterator it = node.fields(); it.hasNext(); ) {
+			Map.Entry entry = (Map.Entry) it.next();
+			String key = (String) entry.getKey();
+			JsonNode value = (JsonNode) entry.getValue();
+			println(key + " : " + value.asText());
+		}
+	}
+	
+	@Override
+	public void syncOutputs(ObjectNode node) {
+		//printAllFields(node);
+		
+		waterMass = node.get("w").asDouble()/mgTogram;
+		biomass = node.get("s").asDouble() /mgTogram;
+		this.diameter = calculateDiameter(biomass*1e-6); //need kg as input
+		
+		osmoticWaterPotential_phloem = node.get("pip").asDouble();
+		osmoticWaterPotential_vascular = node.get("piv").asDouble();
+		osmoticWaterPotential_fruit = node.get("pif").asDouble();
+		
+		turgorPressure_phloem = node.get("pp").asDouble();
+		turgorPressure_vascular = node.get("pv").asDouble();
+		turgorPressure_fruit = node.get("pf").asDouble();
+		
+		seedDryWeight = node.get("sfstone").asDouble()/mgTogram;
+		Afruit = node.get("af").asDouble();
+		sugarConcentrationMole_fruit = node.get("ctcs").asDouble();
+		
+				
+		transpirationMass = node.get("tf").asDouble();
+		sucroseConcentration_vascular = node.get("cv").asDouble();
+		sugarUptake_active = node.get("ua").asDouble();
+		
+		waterUptake_vascular_xylem = node.get("ux1").asDouble();
+		waterUptake_vascular_phloem = node.get("up1").asDouble();
+		
+		Lxylem = node.get("khx").asDouble();
+		Lphloem = node.get("khp").asDouble();
+		
+		waterUptake_xylem = node.get("ux").asDouble();
+		waterUptake_phloem = node.get("up").asDouble();
+		
+		sugarUptake_massflow = node.get("masfls").asDouble();
+		sugarUptake_passive = node.get("pasfls").asDouble();
+		
+		maintenanceDM = node.get("rM").asDouble();
+		growthCost = Math.max(0,node.get("rG").asDouble());
+		
+		pf1 = node.get("pf1").asDouble();
+		pf2 = node.get("pf2").asDouble();
+				
+		vol = node.get("v").asDouble();
+		
+		waterPotential_fruit = turgorPressure_fruit - osmoticWaterPotential_fruit;
+		waterPotential_phloem = turgorPressure_phloem - osmoticWaterPotential_phloem;
+
+		mSta = node.get("mSta").asDouble();
+		mSyn = node.get("mSyn").asDouble();
+		
+		//special to the sugar model, "mSol";
+		if ((active & Active.SUGAR) != 0) {
+			mSol = node.get("mSol").asDouble();
+		}
+		//special to sugar2 model
+		if ((active & Active.SUGAR2) != 0) {
+			try {
+				mSuc = node.get("mSuc").asDouble();
+				mSor = node.get("mSor").asDouble();
+				mGlu = node.get("mGlu").asDouble();
+				mFru = node.get("mFru").asDouble();
+
+				if (debug && printFlag) {
+					double sugar2SolubleSugarMass_g = calcSugar2SolubleSugarMass_g();
+					double fruitWaterMass_g = getFruitWaterMass_g();
+					println(String.format(
+						"Sugar2 pools: w=%.6f g, S=%.6f g",
+						fruitWaterMass_g, sugar2SolubleSugarMass_g));
+				}
+			} catch (RuntimeException e) {
+				// Compatibility fallback for legacy outputs that do not expose Sugar2 pools.
+			}
+		}
+		
+		// decide not to synchronize the sugars as it changes with different sugar model
+		// can see the detail output in the json file
+		//just as a approximate, not absolutly as the fraction may differ
+		//not in use for big calculations
+		freshWeight = waterMass + biomass + seedDryWeight; //mg
+		carbon_total = (biomass + seedDryWeight) * CARBON_FRACTION_GLUCOSE;
+		//carbon_structure = carbon_total-carbon_nonStructure; 
+
+		double solubleSugarMass_g = calcSyncedSolubleSugarMass_g();
+		if (isFiniteVF(solubleSugarMass_g)) {
+			solubleSugar = solubleSugarMass_g / mgTogram;
+		}
+
+		double syncedSugarConcentration = calcSyncedSugarConcentration_g_per_g_water();
+		if (isFiniteVF(syncedSugarConcentration)) {
+			sugarConcentration_fruit = syncedSugarConcentration;
+		} else {
+
+			double waterMass_g = getFruitWaterMass_g();
+			if (isFiniteVF(sugarConcentration_fruit) && isFiniteVF(waterMass_g) && waterMass_g > 0.0) {
+				solubleSugar = sugarConcentration_fruit * waterMass_g / mgTogram;
+			}
+		}
+		if (species.equals("apple") &&((active & Active.SUGAR2) != 0)) {
+			unloadingPerFruit = maintenanceDM + ( (1 - FRACTION_SORBITOL) * CARBON_FRACTION_SUCROSE +  FRACTION_SORBITOL * CARBON_FRACTION_SORBITOL) * 
+		 						(sugarUptake_active + sugarUptake_passive + sugarUptake_massflow)/mgTogram; 
+			unloading = unloadingPerFruit; 		 						
+		} else {
+			unloadingPerFruit = maintenanceDM + (CARBON_FRACTION_SUCROSE) * 
+		 						(sugarUptake_active + sugarUptake_passive + sugarUptake_massflow)/mgTogram;
+		 	unloading = unloadingPerFruit;
+		}
+		
+	}
+	
+
+
+	
+	
+	/**
+	 * Update each fruit within the simulation.
+	 * This gives age differences between fruits
+	 * needs to vary the initial fruit fresh weight, dry weight and sugar concentration as well
+	 */
+
+
+@Override
+void calcPTCTRAM(double sc) 
+{   					
+	if (!calcCarbonAllocation) {
+		resetCarbonAllocationOffState();
+		return;
+	}
+	
+	calcUnloading(sc);
+	sugarConcentration_phloem_pre = sc; // update previous sugar at end of timestep for next MM scaling
+	structureDM_PRI_PT = unloading;
+	structureDM_SEC_PT = 0; 
+			
+	maintenanceDM_PT = maintenanceDM; 
+	
+	reserveDM_PT = 0;
+	
+	loading_PT =  0; 
+	
+	//println("structureDM_PRI_PT: " + structureDM_PRI_PT);
+	
+}
+
+	
+	
+@Override
+void calcUnloading(double sugarConcentration_phloem) {
+	if (!calcCarbonAllocation) {
+		resetCarbonAllocationOffState();
+		return;
+	}
+    
+	// ---------- Scale the per-fruit demand by MM factor (previous vs current sugar) ----------
+    double s_prev = sugarConcentration_phloem_pre;
+    if (s_prev <= 0f || Double.isNaN(s_prev) || Double.isInfinite(s_prev)) s_prev = sugarConcentration_phloem;
+
+    float mm_prev = sinkUnloading(s_prev, this.km_pri);
+    if (mm_prev < 1e-8f) mm_prev = 1e-8f;  // avoid division by ~0
+    float mm_curr = sinkUnloading(sugarConcentration_phloem, this.km_pri);
+    if (shouldUsePreT1PotentialGrowth()) {
+        // Pre-T1 mode keeps virtual-fruit potential demand without carbon down-scaling.
+        mm_curr = mm_prev;
+    }
+
+    // NOTE: unloadingPerFruit is mg·h⁻¹ (from VF sync); keep units in mg·h⁻¹ here.
+    unloading   = unloadingPerFruit <= 0 ? 0.1 : (unloadingPerFruit * (mm_curr / mm_prev)); // mg/h
+    structureDM = unloading;
+
+    if ((debug && printFlag) || (VF_DEBUG_MM && printFlag)) { 
+        float mm_ratio = mm_curr / mm_prev;
+        println("VF.calcUnloading"
+            + " s_prev=" + s_prev
+            + " s_curr=" + sugarConcentration_phloem
+            + " mm_prev=" + mm_prev
+            + " mm_curr=" + mm_curr
+            + " ratio=" + mm_ratio
+            + " unloadingPerFruit(mg/h)=" + unloadingPerFruit
+            + " -> unloading(mg/h)=" + unloading);
+           }
+    
+}
+
+
+	@Override
+	void calcLeakage(double sugarConcentration_phloem) 
+	{ //leakage only calculates for shoot, leaf is zero
+		leakage = 0;
+	}	
+	@Override
+	void calcLoading(double sugarConcentration_phloem)
+	{
+		loading =  0;
+	} 
+	@Override
+	void calcKmax() {}
+	@Override
+	void calcKa() {}
+	@Override
+	void calcWaterPotential() {}
+	
+	@Override
+	void calcRo(double ageD) {
+		// If we’re driving vessel conditions from file, KEEP the CSV 'rho' untouched.
+		if (inputVesselConditions) return;
+	
+		// otherwise use the logistic
+		ro = Math.max(roMin, (roMax- roMin) / (1 + Math.exp(kro * (ageD - coefRo))) + roMin);
+		
+	  // println("roMax: " + roMax + " kro " + kro + " roMin " + roMin + "ageD" + ageD + "coefRo" + coefRo);
+	  // if (printFlag) { println("ro" + ro); }
+	  //roMax         kro      coefRo       roMin 
+	  //450.8257928   0.4015518  23.4633682  36.6229140 
+	}
+  
+  
+	
+	@Override
+	boolean shouldDrop() {
+		return shouldDrop;
+		
+	}
+	
+	
+	
+	/**
+ * #########################################
+ * # Hour/Time Conventions (overview)
+ * #########################################
+ *
+ * There are two hour domains in FruitCropXL + JFruit2:
+ *
+ *  1) MODEL hour: 0..23      (used internally by FruitCropXL)
+ *  2) FILE hour : 1..24      (used in CSV / JFruit2 input "age_h")
+ *
+ * Why the mismatch?
+ *   - FruitCropXL's simulation clock uses the usual 0-based hour-of-day.
+ *   - JFruit2 and the CSV inputs encode hours 1..24 (inclusive).
+ *
+ * Core rules implemented here:
+ *   - All *internal* code uses MODEL hour (0..23).
+ *   - Any time we read/write JSON/CSV rows for JFruit2, we convert MODEL->FILE (0..23 -> 1..24).
+ *   - Indexing into inputNodeList uses FILE hour (1..24) and a (firstAgeD, firstAgeH) FILE-based origin.
+ *   - Canonical simulation minutes are built from (age_d, age_h[FILE]) and then forced to be strictly increasing
+ *     when pushed to JFruit2 to avoid "integration interval length = 0".
+ *
+ * Key helpers:
+ *   - toFileHour(int h0_23)   : 0..23 -> 1..24
+ *   - toModelHour(int h1_24)  : 1..24 -> 0..23
+ *   - toMinutes(ageD, h1_24)  : (ageD * 24 + toModelHour(h1_24)) * 60
+ *
+ * Persisted origins:
+ *   - firstAgeD : first day observed in the input series
+ *   - firstAgeH : first hour observed in the input series, stored as FILE hour (1..24)
+ *
+ * Typical flow (per update()):
+ *   1) We ask for a row with getFruitInput(ageD, modelHour0_23).
+ *      - If file-backed, we convert to FILE hour and index inputNodeList.
+ *      - If synthesized, we keep MODEL hour and emit FILE hour in the row.
+ *   2) We call processInput(row):
+ *      - setTimeFromRow(row) parses (age_d, age_h[FILE]) -> MODEL hour, canonical minutes.
+ *      - We guarantee the minute index we push to JFruit2 is strictly increasing.
+ *   3) We step the ODEs and then write outputs (only if the step ran).
+ *
+ * Midnight boundary:
+ *   - There is no "0" FILE hour. 00:00 in MODEL hour is "1" in FILE hour for that day.
+ *   - (age_d, age_h=24) FILE is the last hour of the day; the next hour is (age_d+1, age_h=1).
+ */
+
+ 
+	// File-hour (CSV/JFruit2) is 1..24; Model-hour is 0..23
+	private static int toFileHour(int hour0_23) { return hour0_23 + 1; }
+	private static int toModelHour(int hour1_24) {
+		int h = hour1_24 - 1;
+		if (h < 0) h = 0;
+		if (h > 23) h = 23;
+		return h;
+	}
+	
+	// Build minutes from (age_d, fileHour) deterministically
+	private static int toMinutes(int ageD, int fileHour1_24) {
+		return (ageD * 24 + toModelHour(fileHour1_24)) * 60;
+	}
+	
+	/** Set internal time from row (age_d, age_h in 1..24). 
+	    this is for input into the fruit model 
+	    thus row is using file hour for the virtual fruit*/
+	private void setTimeFromRow(JsonNode row) {
+		int ageD_file  = row.get("age_d").asInt();
+		int hourF      = row.get("age_h").asInt();   // 1..24
+		//this.ageD    = ageD_file;
+		//this.ageHour = toModelHour(hourF);           // keep 0..23 inside the model
+		//this.ageMin  = toMinutes(ageD_file, hourF);  // canonical minutes
+	}
+     
+	// Use fruit's own clock to produce FILE hour (1..24)
+	private int fileHourFromOrganClock() {
+		int h = this.ageHour % 24;
+		if (h < 0) h += 24;
+		return toFileHour(h);
+	}
+	
+	// Build VF minutes strictly from fruit's organ day + hour
+	private int vfMinutesFromOrganClock() {
+		int d  = (int) Math.floor(this.ageD);
+		int fh = fileHourFromOrganClock();
+		return toMinutes(d, fh);
+	}
+
+	
+	/** Returns input Json either from file-backed list or synthesized from model state.
+	 *  Expects hour_ in MODEL space (0..23).
+	 */
+	private JsonNode getFruitInput(int ageD_, int hour_) {
+		if (inputVesselConditions) {
+			int fileHour = toFileHour(hour_);              // 1..24
+			JsonNode n = tryGetInput(ageD_, fileHour, false);
+			if (n == null) n = tryGetInput(ageD_, fileHour, true);
+			return n;
+		}
+		// Synthesis path expects MODEL hour; it will write age_h as 1..24 itself
+		return synthesizeInputNode(ageD_, hour_);
+	}
+
+
+	/** Build a Json input row from current model/environment state (no file). */
+	private JsonNode synthesizeInputNode(int ageD_, int hour_) {
+		ObjectMapper om = new ObjectMapper();
+		ObjectNode n = om.createObjectNode();
+	
+		// --- Age fields expected downstream ---
+		n.put("age_d", ageD_);
+		n.put("age_h", toFileHour(hour_)); // write 1..24
+	
+		// --- Temperature in °C (your fromArray will convert to K) ---
+		double Tc = (Ta > 200.0) ? (Ta - 273.15) : Ta; // °C
+	
+		// --- Relative humidity as percent (from 0–1 rh) ---
+		int Ha = (int) (rh * 100.0);
+	
+		// --- Water potential psi_x in bar ---
+		double psiBar;
+		if (parentID > 0) {
+			Organ par = getParent();
+			if (par instanceof GrowingOrgan) {
+				double pWP = ((GrowingOrgan) par).waterPotential;
+				psiBar = (pWP <= 0) ? (pWP * 10.0) : (inputWaterPotential * 10.0);
+			} else {
+				psiBar = inputWaterPotential * 10.0;
+			}
+		} else {
+			psiBar = inputWaterPotential * 10.0;
+		}
+		if (psiBar < -25) psiBar = -25; // keep your guard
+		// --- Hydraulic conductance ro (cm/h) ---
+		calcRo(ageD_); // updates this.ro
+		double roLocal = this.ro;
+	
+		// --- Phloem sugar concentration Cpm (mol/L) via your calcCpm(sugar) ---
+		double sc_curr;
+		if (!organGrowthMethod.equals("TempLimited")) {
+			if (!useCTRAM) {
+				if (plantBaseID > 0 && getPlantBase().sugarConcentration_phloem > 0) {
+					sc_curr = getPlantBase().sugarConcentration_phloem;
+				} else {
+					sc_curr = 1e-2;
+				}
+			} else {
+				sc_curr = sugarFromCp(this.cpt);
+			}
+		} else {
+			sc_curr = 1e-2;
+		}
+
+		// Keep stored previous sugar for MM scaling; initialize once if absent/invalid.
+		double sc_prev = sugarConcentration_phloem_pre;
+		if (!(sc_prev > 0) || Double.isNaN(sc_prev) || Double.isInfinite(sc_prev)) {
+			sc_prev = sc_curr;
+			sugarConcentration_phloem_pre = sc_curr;
+		} else {
+			sugarConcentration_phloem_pre = sc_prev;
+		}
+
+		calcCpm(sc_curr);                   // sets this.Cpm in mol/L (capped)
+		double cpmMolPerL = this.Cpm;
+	
+		// --- Emit fields as your updateInput(inputVesselConditions==true) expects ---
+		n.put("T",    Tc);          // °C  -> fromArray adds 273.15
+		n.put("H_a",  Ha);          // %   -> fromArray divides by 100
+		n.put("psi_x", psiBar);     // bar (as-is)
+		n.put("Cpm",  cpmMolPerL);  // mol/L -> fromArray divides by 1000
+		n.put("rho",  roLocal);     // cm/h (as-is)
+	
+		return n;
+	}
+
+	
+	
+	/**
+	 * Attempts to retrieve the fruit simulation input at a specific age (in days and hours).
+	 * If the inputNodeList is missing or not initialized correctly, the method will attempt
+	 * one retry by invoking {@code initData()}.
+	 *
+	 * <p>This method is designed to be resilient to deserialization or reload gaps where
+	 * transient fields like inputNodeList are not restored.</p>
+	 *
+	 * @param ageD The age of the fruit in days.
+	 * @param hour The hour of the day.
+	 * @return The corresponding {@link JsonNode} for the given age and hour, or {@code null} if unavailable.
+	 */
+	private JsonNode getInputByIndex(int ageD, int hour) {
+		JsonNode result = tryGetInput(ageD, hour, false);
+		if (result == null) {
+			result = tryGetInput(ageD, hour, true);
+		}
+		return result;
+	}
+	/**
+	 * Internal utility method to retrieve a {@link JsonNode} from the inputNodeList,
+	 * optionally reinitializing the data if requested.
+	 *
+	 * <p>This function calculates an index based on the fruit's age and checks that
+	 * the node exists in the list. If not, it returns the final element as a fallback,
+	 * or {@code null} if the list is empty or uninitialized.</p>
+	 *
+	 * @param ageD  Age in days (used to compute list index).
+	 * @param hour  Hour offset from the starting hour (used to compute list index).
+	 * @param retry If {@code true}, will call {@code initData()} to repopulate inputNodeList.
+	 * @return The matching {@link JsonNode} from the list, or {@code null} if data is missing.
+	 */
+	private JsonNode tryGetInput(int ageD, int hour, boolean retry) {
+		if (retry) {
+			println("⚠️ Reinitializing fruit input data...");
+			initData();
+		}
+	
+		if (inputNodeList == null || firstAgeD == -1 || firstAgeH == -1) {
+			println("❌ Input metadata missing" + (retry ? " after retry." : "."));
+			return null;
+		}
+	
+		int index = ((ageD - firstAgeD) * 24) + (hour - firstAgeH);
+		if (index >= 0 && index < inputNodeList.size()) {
+			return (JsonNode) inputNodeList.get(index);
+		} else if (!inputNodeList.isEmpty()) {
+			return (JsonNode) inputNodeList.get(inputNodeList.size() - 1); // return last known input
+		} else {
+			println("❌ Input list is empty" + (retry ? " after retry." : "."));
+			return null;
+		}
+	}
+
+
+/**
+ * Processes input when inputVesselConditions == true.
+ *
+ * @param ageMin    The computed age in minutes.
+ * @param inputJsonNode The JsonNode containing input data.
+ */
+// Class field (per fruit)
+private int lastPushedMin = Integer.MIN_VALUE;
+
+private void processInput(JsonNode row) {
+    if (input == null && jLaunch != null) input = jLaunch.initInput(DELTA);
+    if (row == null) { println("⚠️ processInput: row == null, skipping."); return; }
+
+    // Minutes from the SAME organ day/hour used for the CSV index
+    int nowMin = vfMinutesFromOrganClock();
+
+    int cadence = (input != null && input.getDelta() > 0) ? input.getDelta() : Math.max(DELTA, 60);
+
+    // Ensure strictly increasing time for VF ODEs
+    if (lastPushedMin != Integer.MIN_VALUE && nowMin <= lastPushedMin) {
+        nowMin = lastPushedMin + cadence;
+    }
+
+    if (isFirstUpdate || !input.isValid() || input.getDelta() <= 0) {
+        int prevMin = nowMin - cadence;
+        if (prevMin < 0) prevMin = Math.max(0, nowMin - 60);
+
+        fromArray(prevMin, row);  // prime older frame
+        fromArray(nowMin,  row);  // prime current frame
+
+        lastPushedMin      = nowMin;
+        isFirstUpdate      = false;
+        delayExecutionFlag = true;   // step next tick
+        return;
+    }
+
+    fromArray(nowMin, row);
+    lastPushedMin      = nowMin;
+    delayExecutionFlag = false;
+}
+
+
+ private boolean stepRanOk = false;
+
+	private boolean shouldRunVirtualFruitStep() {
+		return calcCarbonAllocation;
+	}
+
+	private void syncAgeFromFruitClock() {
+		double min = this.ageMin;
+		this.ageHour = (int)Math.floor(min / 60.0);
+		this.ageD = min / 1440.0;
+	}
+
+	private void resetCarbonAllocationOffState() {
+		// Carbon allocation is disabled: expose zero fruit demand (mg C h-1) and keep JFruit2 state frozen.
+		unloadingPerFruit = 0.0;
+		unloading = 0.0;
+		structureDM = 0.0;
+		structureDM_PRI = 0.0;
+		structureDM_SEC = 0.0;
+		maintenanceDM_PT = 0.0;
+		structureDM_PRI_PT = 0.0;
+		structureDM_SEC_PT = 0.0;
+		reserveDM_PT = 0.0;
+		loading_PT = 0.0;
+		reserveDM = 0.0;
+		loading = 0.0f;
+	}
+/**
+     * Executes the core computational step for the fruit model.
+     * Handles arithmetic exceptions and unexpected errors to prevent crashes.
+     */
+private void executeStepCalculation() {
+    stepRanOk = false;
+    try { step(); stepRanOk = true; }
+    catch (ArithmeticException e) { shouldDrop = true; logArithmeticException(e); }
+    catch (Exception e) { if (printFlag) println("Unexpected: " + e.getMessage()); }
+}
+
+    /**
+     * Logs details for ArithmeticException and prevents further processing
+     * when a critical mathematical error occurs during computation.
+     *
+     * @param e The ArithmeticException encountered.
+     */
+	private void logArithmeticException(ArithmeticException e) {
+	    println("*** Error ***  ArithmeticException occurred : " + e.getMessage() + "\n" +
+	            "**... ageMin: " + ageMin + "\n" +
+	            "**... biomass: " + biomass + "\n" +
+	            "**... freshweight: " + freshWeight + "\n" +
+	            "**... sugarConcentration_fruit(last synced): " + sugarConcentration_fruit + "\n" +
+	            "**... T: " + T + "\n" +
+	            "**... H_a: " + H_a + "\n" +
+	            "**... psi_x: " + psi_x + "\n" +
+	            "**... Cpm(mol/L): " + Cpm + "\n" +
+	            "**... Cpm_jf2_input(mol/cm3): " + lastInputCpmMolPerCm3 + "\n" +
+	            "**... ro: " + ro);
+
+}
+
+
+	private void debugCheckAddedFruitPostCalc() {
+		if (!(fruitAddDebug && printFlag)) return;
+		if (!addFruitDebugPendingPostCalcCheck) return;
+
+		try {
+			Internode p = null;
+			try { p = (Internode) getParent(); } catch (Throwable t0) { p = null; }
+			boolean parentOk = (p != null)
+				&& (addFruitDebugParentInternodeId <= 0 || p.nodeID == addFruitDebugParentInternodeId);
+
+			FruitService tpl = null;
+			if (addFruitDebugTemplateFruitId > 0) {
+				try {
+					tpl = first((* f:FruitService, (f.nodeID == addFruitDebugTemplateFruitId) *));
+				} catch (Throwable t1) {
+					tpl = null;
+				}
+			}
+
+			println("[FruitPlanner/add/VF-check]"
+				+ " fruitId=" + this.nodeID
+				+ " parentInternodeId=" + (p != null ? String.valueOf(p.nodeID) : "null")
+				+ " expectedParentInternodeId=" + addFruitDebugParentInternodeId
+				+ " parentOk=" + parentOk
+				+ " scFruit=" + sugarConcentration_fruit
+				+ " FW=" + freshWeight
+				+ " DW=" + biomass);
+
+			if (!isFiniteVF(sugarConcentration_fruit) || sugarConcentration_fruit <= 0.0) {
+				println("[FruitPlanner/add/VF-check] WARN non-positive sugarConcentration_fruit after sync for fruitId=" + this.nodeID);
+			}
+
+			if (tpl != null) {
+				println("[FruitPlanner/add/VF-check/template]"
+					+ " tplId=" + tpl.nodeID
+					+ " scFruit_tpl=" + tpl.sugarConcentration_fruit
+					+ " FW_tpl=" + tpl.freshWeight
+					+ " DW_tpl=" + tpl.biomass
+					+ " ageD_tpl=" + tpl.ageD
+					+ " ageD_new=" + this.ageD);
+			}
+		} catch (Throwable t) {
+			println("[FruitPlanner/add/VF-check] WARN post-calc check failed: " + t);
+		}
+
+		addFruitDebugPendingPostCalcCheck = false;
+	}
+
+
+	    /**
+	     * Synchronizes outputs and writes JSON data to file.
+	     * Ensures the results of the fruit model simulation are properly stored.
+     */
+		private void processOutput() {
+			try {
+				   output = this.getJsonValues();
+				   syncOutputs(output);
+				   debugCheckAddedFruitPostCalc();
+				if (outputIndividualFruit) {
+					if(this.nodeID <= 0 || this.outputFilePath == null) 
+					{
+					initOutputFilePath();
+				}
+				
+				writeObjectNodeToCsv(output, this.outputFilePath, 2); // Start writing only at step 2 as data is not initialized beforehand
+			}
+		} catch (Exception e) {
+			println("*** Error -- virtualFruit: Exception calling syncOutputs (possibly due to previous ArithmeticException) ***");
+		}
+	}
+	
+
+	/**
+	 * Update each fruit within the simulation.
+	 * Go through the following processes:
+	 * - Parameter and file loading
+	 * - Data processing and input conditions handling
+	 * - Execution of stepwise calculations with error handling
+	 * - Logging and debugging information
+	 * - Synchronization of outputs and data storage
+	 * - Iterative updates during the simulation cycle
+	 *
+	 *  It also handles:
+	 * - Lazy initialization of fruit input data if not yet available (e.g., after deserialization and reloading from gsz).
+	 * - Retrieval and processing of time-specific input from a preloaded JSON input dataset.
+	 * If input data is missing during the first call (common after loading a `.gsz` file),
+	 * the method reinitializes the data and skips numerical computations for that step.
+	 */
+	@Override
+	void update() {
+		// wiring (parent/plant base) as you already have...
+		if (this.plantBaseID <= 0) {
+			PlantBase pbq = first((* p0:PlantBase, (p0.plantNumber == this.plantNumber) *));
+			if (pbq != null) this.plantBaseID = pbq.nodeID;
+		}
+
+		if (parentID <= 0) {
+			GrowingOrgan parentOrgan = (GrowingOrgan) first((* this (<--)+ Internode*));
+			if (parentOrgan != null) {
+				this.parentID = parentOrgan.nodeID;
+				parentOrgan.addChildFruitId(this.nodeID);
+			}
+		}
+
+		if (!shouldRunVirtualFruitStep()) {
+			super.update();
+			syncAgeFromFruitClock();
+			resetCarbonAllocationOffState();
+			return;
+		}
+	
+		// If file-backed mode and nothing loaded yet, load once and prefill
+		if (inputVesselConditions && (inputNodeList == null || inputNodeList.isEmpty())) {
+			println("⏳ Waiting for fruit input to be initialized...");
+			initData(); // loads file only when inputVesselConditions==true
+			
+			JsonNode row = getFruitInput((int) this.ageD, hourOfDay);
+			// Make sure ageMin is synced before processInput
+			processInput(row);
+			return;
+		}
+	
+		// Advance organ-level time state
+		super.update();
+		
+		// after super.update()
+		syncAgeFromFruitClock();
+
+		
+		// --- derive FILE coordinates from the same organ clock ---
+		int dOrgan  = (int) Math.floor(this.ageD);
+		int fhOrgan = fileHourFromOrganClock();     // 1..24
+		int hModel  = toModelHour(fhOrgan);         // 0..23
+
+		// Always fetch input (from file or synthesized), then run
+		// hourOfDay is 0..23 -> pass MODEL hour directly
+		//println( this.ageD + " int ageD: " + (int) ageD);
+		
+		JsonNode row;
+		if (inputVesselConditions) {
+			// Read from CSV using the organ-driven index
+			row = tryGetInput(dOrgan, fhOrgan, false);
+			if (row == null) row = tryGetInput(dOrgan, fhOrgan, true);
+			if (row == null) row = synthesizeInputNode(dOrgan, hModel); // last fallback
+		} else {
+			// Synthesis path: emit a row that matches organ time
+			row = synthesizeInputNode(dOrgan, hModel);
+		}
+		
+		if (row == null) { println("⚠️ No input JSON for ageD=" + dOrgan + ", fileHour=" + fhOrgan); return; }
+
+
+		processInput(row);
+		if (!delayExecutionFlag) {
+			executeStepCalculation();
+			if (stepRanOk) processOutput(); // never write a primed/zero row
+		}
+	}
+
+} 
+==> if(fruitVisibility == true) ( RH(72*3) RL(80) {float diam = diameter/2;} 
+[
+ if (diam < 0.025) ( //pétiole
+    RL(25 + (diam - 0.015) * 120) Cylinder(0.025 + (diam - 0.015) * 0.005, 0.001 + (diam - 0.015) * 0.001) .(setShader(Peto1))
+    RL(-15 + (diam - 0.015) * 50) Cylinder(0.01 + (diam - 0.015) * 0.005, 0.001 + (diam - 0.015) * 0.001) .(setShader(Peto1)) //fruit et étamine
+    [RL(90) Sphere(diam) .(setShader(Pom4))] M(diam * 0.02) Sepale(diam) Scale(1.5) Stamen(2) 
+) else if (diam < 0.05) ( // pétiole
+    RL(165) RV(0.1) Cylinder(0.04, 0.002) .(setShader(Peto1)) RL(15) Cylinder(0.015, 0.002) .(setShader(Peto1))
+    [RL(90) Sphere(diam) .(setShader(Pom5))] M(diam * 0.0155) Sepale(diam) Scale(1.5) Stamen(2)
+) else ( //pétiole
+    RL(165) RV(1) Cylinder(0.05, 0.002) .(setShader(Peto2)) RL(15) Cylinder(0.02, 0.002) .(setShader(Peto2))
+    [RL(90) Sphere(diam) .(setShader(diam < 0.07 ? Pom6 : Pom7))] 
+    M(diam > 0.08 ? 0.0984 : diam * 0.0123) Sepale(0.01)
+)
+]
+)
+;

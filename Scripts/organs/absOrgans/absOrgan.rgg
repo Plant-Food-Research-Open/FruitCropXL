@@ -1,0 +1,2981 @@
+// Utils
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Arrays;
+import java.util.List;
+import java.util.ArrayList;
+import java.util.Objects;
+// File Reader
+import java.io.InputStream;
+import java.io.FileInputStream;
+import java.io.BufferedReader;
+import java.io.File;
+import java.nio.file.Files;
+import java.io.FileReader;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.util.Properties;
+
+import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.annotation.JsonPropertyDescription;
+
+import de.grogra.turtle.M;
+
+import de.grogra.graph.impl.Node;
+import de.grogra.turtle.TurtleState;
+import de.grogra.graph.GraphState;
+
+//ray tracing grogra
+import de.grogra.vecmath.Math2;
+import io.github.fruitcropxl.config.params.groups.*;
+import io.github.fruitcropxl.config.params.structures.*;
+import io.github.fruitcropxl.output.annotation.Unit;
+
+import interfaces.*;
+import static java.lang.Math.*;
+import static main.*;
+import static carbonTransport.*;
+import static plantBase.*;
+import static globalParameters.*;
+import static plantParameters.*;
+import static modelOptions.*;
+import static lightInterception.*;
+import static initialConditions.*;
+import static photosynthesisAndTranspiration.*;
+import static environment.*;
+import static extraTools.*;
+import static archReader.*;
+import static aggregatedRoot.*;
+
+import static rootSystem.*;
+import static soil.*;
+import static leaf.*;
+import static shoot.*;
+import static fieldBase.*;
+import static fineRoot.*;
+import static structuralRoot.*;
+import static flowerBase.*;
+import static fruitBase.*;
+import static budBase.*;
+import static tasks.*;
+
+class LeafWaterCandidate {
+	double fWaterFlux;
+	double candidateXylemWaterPotential;
+	double candidateABA;
+
+	double waterPotentialBoundary;
+	double waterPotential;
+	double meanPreviousWaterPotential;
+	double PLC_leaf;
+	double Ka;
+	double g0_leaf;
+	double eq1_alpha;
+	double gs;
+	double waterFlux;
+
+	boolean valid;
+}
+/** Non-static members belong to an object, not to the class itself, 
+	so you need to create an instance (or use an existing one) to access these members.
+	It is generally not recommended to have static fields in an abstract class intended 
+	to be different for each subclass that extends it. 
+	Static fields are shared among all instances of a class and its subclasses, 
+	meaning if one subclass changes the value of a static field, 
+	it changes for all other subclasses and instances of that abstract class.
+*/
+
+/**
+ * Custom implementation of the M class that conditionally performs movement 
+ * along the local z-direction based on a control flag.
+ */
+
+
+/**
+ * Abstract class representing a plant organ.
+ * <p>
+ * This class serves as the parent module for all plant organs.
+ * It contains various attributes like length, diameter, ID, etc.
+ 
+ * parent module for all plant organs
+ * An abstract module for Organ, with super.length, diameter, ID, organID, and order as inputs
+ * ID is based on the identifier (first column) of the architecture input excel
+ * OrganID is the organID in the architecture input excel, indicates the type of the organ
+ * UUID is a self increasing ID for unique identification
+ * order from xnode (1 = main stem (trunk), 2 for cordon, 3 for uprights, 4 for branches on the uprights)
+ * note in the shoot.rgg, for differentiate primary annual shoot growth and sylleptic branching, another variable
+ * called syllepticOrder was added as well. 
+ * Used this convention:
+	 * Axis slot means branch path, not organ ID.
+	 * For a child of order k, overwrite axiskID.
+	 * The value written into that slot should be the attachment-site identity.
+	 * For ordinary single axillary buds, that can be the parent internode rank.
+	 * For cases with potentially multiple children from one site, use a stronger local identifier than rank alone.
+ * There is two initiate methods for the organ. 
+ * one is initiating newly grown organ, with a small initial size, mainly for dynamic growth 
+ * another one is for initiation of an exisitng architecture with known organ size.
+ 
+ * </p>
+ */
+ /* only use static before the parameters which will make it the same for each class*/
+ /* do not use static before the variables AND EVEN THE PARAMETERS THAT WILL CHANGE BASED ON ORGAN TYPE, LIKE KM*/
+abstract module Organ(super.length) extends M(length) implements Configurable
+{
+	/**
+	 * Keep graph-deserialization compatibility for existing project graph/shader links.
+	 * Matches the UID used in saved graphs prior to recent helper-method additions.
+	 */
+	private static final long serialVersionUID = 6522110303210210030L;
+
+	public static double profileValueAt(double[][] profile, double x) {
+		if (profile == null || profile.length < 2) return Double.NaN;
+		double[] xs = profile[0];
+		double[] ys = profile[1];
+		if (xs == null || ys == null || xs.length == 0 || ys.length == 0) return Double.NaN;
+		if (Double.isNaN(x) || Double.isInfinite(x)) x = xs[0];
+		if (x <= xs[0]) return ys[0];
+		int last = Math.min(xs.length, ys.length) - 1;
+		if (x >= xs[last]) return ys[last];
+		int i;
+		for (i = 0; i < last; i++) {
+			double x0 = xs[i];
+			double x1 = xs[i + 1];
+			if (x >= x0 && x <= x1) {
+				double y0 = ys[i];
+				double y1 = ys[i + 1];
+				double span = x1 - x0;
+				if (span <= 0.0) return y1;
+				double w = (x - x0) / span;
+				return y0 + w * (y1 - y0);
+			}
+		}
+		return ys[last];
+	}
+
+	public static double profileValueAtRank(double[][] profile, int rank1) {
+		int safeRank = rank1;
+		if (safeRank < 1) safeRank = 1;
+		return profileValueAt(profile, Double.valueOf(safeRank).doubleValue());
+	}
+
+	public static double actualToPotentialSize(double actualSize) {
+		double safeActual = actualSize;
+		if (Double.isNaN(safeActual) || Double.isInfinite(safeActual)) safeActual = 0.0;
+		if (safeActual < 0.0) safeActual = 0.0;
+		if ("potentialFromActual".equalsIgnoreCase(leafSizeMode) &&
+			!"TempLimited".equalsIgnoreCase(organGrowthMethod)) {
+			return safeActual * potentialLengthMultiplier;
+		}
+		return safeActual;
+	}
+
+	public boolean shouldUsePreT1PotentialGrowth() {
+		if (!enablePotentialGrowthBeforeT1) return false;
+		if (!preT1PotentialGrowthActive) return false;
+		if (!"apple".equalsIgnoreCase(species)) return false;
+		if (useStaticArc) return false;
+		return true;
+	}
+
+	public static void applyLeafTargetLengthAtInit(Leaf lf, double targetLength) {
+		if (lf == null) return;
+		double safeTarget = targetLength;
+		if (Double.isNaN(safeTarget) || Double.isInfinite(safeTarget)) return;
+		safeTarget = Math.max(1.0e-4, safeTarget);
+		// Dynamic leaves keep a shared emergence size; only their final growth ceiling varies by rank.
+		lf.maxLength = safeTarget;
+		double safeCurrent = lf.length;
+		if (Double.isNaN(safeCurrent) || Double.isInfinite(safeCurrent) || safeCurrent <= 0.0) {
+			safeCurrent = Math.max(1.0e-4, lf.initialLength);
+		}
+		safeCurrent = Math.min(safeCurrent, lf.maxLength);
+		lf.length = safeCurrent;
+		if (Double.isNaN(lf.initialLength) || Double.isInfinite(lf.initialLength) || lf.initialLength <= 0.0) {
+			lf.initialLength = safeCurrent;
+		}
+		lf.initialLength = Math.min(lf.initialLength, lf.maxLength);
+		double safePotLength = lf.potLength;
+		if (Double.isNaN(safePotLength) || Double.isInfinite(safePotLength) || safePotLength <= 0.0) {
+			safePotLength = safeCurrent;
+		}
+		lf.potLength = Math.max(safeCurrent, Math.min(safePotLength, lf.maxLength));
+		if (Double.isNaN(lf.lwRatio) || lf.lwRatio <= 0.0) {
+			lf.lwRatio = leafShape.getRefLength()/leafShape.getRefWidth();
+		}
+		lf.width = lf.length / lf.lwRatio;
+	}
+
+	public static double clampNonShrinkingPotentialLength(double currentLength, double candidateLength, double maxLength) {
+		double safeCurrent = currentLength;
+		if (Double.isNaN(safeCurrent) || Double.isInfinite(safeCurrent) || safeCurrent <= 0.0) {
+			safeCurrent = 1.0e-4;
+		}
+		double safeMax = maxLength;
+		if (Double.isNaN(safeMax) || Double.isInfinite(safeMax) || safeMax <= 0.0) {
+			safeMax = Math.max(safeCurrent, candidateLength);
+		}
+		safeMax = Math.max(1.0e-4, safeMax);
+		double safeCandidate = candidateLength;
+		if (Double.isNaN(safeCandidate) || Double.isInfinite(safeCandidate) || safeCandidate <= 0.0) {
+			safeCandidate = safeCurrent;
+		}
+		safeCandidate = Math.min(safeCandidate, safeMax);
+		return Math.max(safeCurrent, safeCandidate);
+	}
+
+	public static void applyLeafTargetGeometryAtInit(Leaf lf, double targetLength, double targetWidth) {
+		if (lf == null) return;
+		double safeTargetLength = targetLength;
+		if (Double.isNaN(safeTargetLength) || Double.isInfinite(safeTargetLength)) return;
+		safeTargetLength = Math.max(1.0e-4, safeTargetLength);
+		double safeTargetWidth = targetWidth;
+		if (Double.isNaN(safeTargetWidth) || Double.isInfinite(safeTargetWidth) || safeTargetWidth <= 0.0) {
+			double fallbackRatio = lf.lwRatio;
+			if (Double.isNaN(fallbackRatio) || Double.isInfinite(fallbackRatio) || fallbackRatio <= 0.0) {
+				fallbackRatio = leafShape.getRefLength()/leafShape.getRefWidth();
+			}
+			safeTargetWidth = safeTargetLength / fallbackRatio;
+		}
+		lf.lwRatio = safeTargetLength / Math.max(1.0e-6, safeTargetWidth);
+		applyLeafTargetLengthAtInit(lf, safeTargetLength);
+		lf.width = lf.length / lf.lwRatio;
+	}
+
+	public static void applyLeafTargetAreaAtInit(Leaf lf, double targetArea) {
+		if (lf == null) return;
+		double safeTarget = targetArea;
+		if (Double.isNaN(safeTarget) || Double.isInfinite(safeTarget)) return;
+		safeTarget = Math.max(1.0e-8, safeTarget);
+		double baseLength = lf.maxLength;
+		if (Double.isNaN(baseLength) || Double.isInfinite(baseLength) || baseLength <= 0.0) {
+			baseLength = Math.max(1.0e-4, lf.length);
+		}
+		if (Double.isNaN(lf.lwRatio) || lf.lwRatio <= 0.0) {
+			lf.lwRatio = leafShape.getRefLength()/leafShape.getRefWidth();
+		}
+		double baseWidth = baseLength / lf.lwRatio;
+		double baseArea = leafShape.calcLeafPolygonArea((float) baseLength, (float) baseWidth, lf.fid);
+		if (Double.isNaN(baseArea) || Double.isInfinite(baseArea) || baseArea <= 0.0) {
+			baseArea = Math.max(1.0e-8, lf.area);
+		}
+		double scale = Math.sqrt(safeTarget / Math.max(1.0e-8, baseArea));
+		if (Double.isNaN(scale) || Double.isInfinite(scale) || scale <= 0.0) {
+			scale = 1.0;
+		}
+		applyLeafTargetLengthAtInit(lf, Math.max(1.0e-4, baseLength * scale));
+		lf.area = leafShape.calcLeafPolygonArea((float) lf.length, (float) lf.width, lf.fid);
+		// Do not overwrite profile-derived final-size targets here. This helper only
+		// adjusts current emergence geometry; developApple owns final-size semantics.
+	}
+
+	public static void applyPetioleTargetLengthAtInit(Petiole pt, double targetLength) {
+		if (pt == null) return;
+		double safeTarget = targetLength;
+		if (Double.isNaN(safeTarget) || Double.isInfinite(safeTarget)) return;
+		safeTarget = Math.max(1.0e-4, safeTarget);
+		// Dynamic petioles keep a shared emergence size; only their final growth ceiling varies by rank.
+		pt.maxLength = safeTarget;
+		double safeCurrent = pt.length;
+		if (Double.isNaN(safeCurrent) || Double.isInfinite(safeCurrent) || safeCurrent <= 0.0) {
+			safeCurrent = Math.max(1.0e-4, pt.initialLength);
+		}
+		safeCurrent = Math.min(safeCurrent, pt.maxLength);
+		pt.length = safeCurrent;
+		if (Double.isNaN(pt.initialLength) || Double.isInfinite(pt.initialLength) || pt.initialLength <= 0.0) {
+			pt.initialLength = safeCurrent;
+		}
+		pt.initialLength = Math.min(pt.initialLength, pt.maxLength);
+		double safePotLength = pt.potLength;
+		if (Double.isNaN(safePotLength) || Double.isInfinite(safePotLength) || safePotLength <= 0.0) {
+			safePotLength = safeCurrent;
+		}
+		pt.potLength = Math.max(safeCurrent, Math.min(safePotLength, pt.maxLength));
+		pt.area = Math.PI * (pt.width * pt.width / 4.0);
+		pt.vol = calcVol(pt.length, pt.width);
+		pt.biomass = pt.vol * pt.density;
+		pt.initCN_content(pt.biomass);
+	}
+
+	public static void applyInternodeTargetLengthAtInit(Internode i, double targetLength) {
+		if (i == null) return;
+		double safeTarget = targetLength;
+		if (Double.isNaN(safeTarget) || Double.isInfinite(safeTarget)) return;
+		safeTarget = Math.max(1.0e-4, safeTarget);
+		// Dynamic internodes keep a shared emergence size; only their final growth ceiling varies by rank.
+		i.maxLength = safeTarget;
+		double safeCurrent = i.length;
+		if (Double.isNaN(safeCurrent) || Double.isInfinite(safeCurrent) || safeCurrent <= 0.0) {
+			safeCurrent = Math.max(1.0e-4, i.initialLength);
+		}
+		safeCurrent = Math.min(safeCurrent, i.maxLength);
+		i.length = safeCurrent;
+		if (Double.isNaN(i.initialLength) || Double.isInfinite(i.initialLength) || i.initialLength <= 0.0) {
+			i.initialLength = safeCurrent;
+		}
+		i.initialLength = Math.min(i.initialLength, i.maxLength);
+		double safePotLength = i.potLength;
+		if (Double.isNaN(safePotLength) || Double.isInfinite(safePotLength) || safePotLength <= 0.0) {
+			safePotLength = safeCurrent;
+		}
+		i.potLength = Math.max(safeCurrent, Math.min(safePotLength, i.maxLength));
+		i.biomass = Math.PI * (i.diameter*i.diameter/4) * i.length * i.density;
+		i.area = Math.PI * (i.diameter*i.diameter/4);
+		i.initCN_content(i.biomass);
+	}
+
+	 /**
+     * Variables for plant identification.
+     */
+    PlantIdentifier pi;
+    /**
+	 * Retrieves a unique node ID for an organ.
+	 * use public final long getId() function to get a unique ID for this node. 
+	 * The IDs are serially counted up from zero for each node that is created and inserted into the graph.
+	 * Nodes that are created but not inserted into the graph have an ID of -1. 
+	 * Nodes that were part of the graph, but were removed later on have an ID of -2.
+	 * 
+	 * @return The unique node ID.
+	 */
+    public long nodeID;
+     
+    
+    //for comparing with the ID in the shoot generator, 
+    //we need the ID read from the excel.
+    long ID;
+    
+    public String simuuid; // simulation uuid for grouping different files
+     
+    {
+    	this.simuuid = simUUID;
+    }
+    public int order; 
+     
+	/**
+     * Initializes the Organ module with necessary transformations and shaders.
+     */
+    {
+        setTransform(new TMatrix4d()); 
+        setShader(BLACK);
+     }
+
+    /**
+     * The plant number in the field.
+     */
+    public int plantNumber;
+    /**
+     * The cordon identification of an organ.
+     */
+    public int cordonNumber;
+    /**
+     * The node position of an organ on a cordon.
+     */
+    public int nodeNumber; 
+    
+	/** Identifier for Axis 1, which is the trunk. */
+	int axis1ID;
+	/** Identifier for Axis 2. Represents the cordon identification where an organ grows. */
+	int axis2ID;
+	/** Represents the node position of an organ on a cordon for Axis 3. 
+	Mark as 0 if no shoots grow from that cordon segment */
+	int axis3ID;
+	/** Identifier for Axis 4. */
+	int axis4ID;
+	/** Identifier for Axis 5. */
+	int axis5ID;
+	/** Identifier for Axis 6. */
+	int axis6ID;
+	/** Identifier for Axis 7. */
+	int axis7ID;
+	/** Identifier for Axis 8. */
+	int axis8ID;
+	/** Identifier for Axis 9. */
+	int axis9ID;
+	/** Specifies the type of the organ. */
+	public String organType;
+    /** Indicates if the organ is part of a border plant. True if it is, false otherwise. */
+	boolean border;
+	/** True for organs belonging to the reportable/original field instance. */
+	boolean isReportable = true;
+	/** Field instance identifier; original field = 0, clones > 0. */
+	int fieldInstanceId = 0;
+	/** Represents the phytomer rank of the organ. starting from 1 */
+	public int rank;
+	/** Represents the cumulative phytomer number for the organ. */
+	int cpn;
+	
+	 /**
+     * Checks if the object is an organ.
+     * 
+     * @return true if the object is an organ, false otherwise.
+     */
+    boolean isOrgan = true;
+    
+    /**
+     * The x-coordinate of the organ.
+     */
+    public double x = 0;
+    public double endX = 0;
+    /**
+     * The y-coordinate of the organ.
+     */
+    public double y = 0;
+    public double endY = 0;
+    /**
+     * The z-coordinate of the organ.
+     */
+    public double z = 1.0;
+	public double endZ= 1.1;
+	
+	/** Represents the main organ age in terms of effective growing days adjusted for temperature effects. */
+	public double age = 0;
+	/** Represents the organ age in days. */
+	public double ageD = 0;
+	/** Represents the organ age in growing degree days. */
+	protected double ageGdd = 0; //oCd-1
+	
+	/** Represents the organ age in thermal optimal days. */
+	double ageTd = 0;  //thermal day
+	/** Represents the organ age in turgor time. */
+	double ageTg = 0;  //MPa hr
+	
+	/** 
+	 * Used for calculating the dt. 
+	 * The dt is then multiplied to the rate. 
+	 * Which dt to multiply depends on what time is referred to in the rate definition.
+	 * If the rate is naturally in hours, e.g., fruit model, no dt is required to multiply as dt is the same as the model step.
+	 */
+	double age_pre;
+	/** Represents the previous value of the organ age in growing degree days. */
+	double ageGdd_pre;
+	double ageTd_pre;
+	double ageTg_pre;
+	
+	/** Time at which the maximum growth rate is obtained (0 < tm < te) */
+	double tm;
+	/** Time at which Lmax is obtained */
+	double te;
+	/** diameter for the internode */
+	public float diameter;
+	
+	/** Water potential at the top of the organ (MPa) */
+	public double waterPotential = -1e-5;
+	/** assume the turgor loss point is similar as P50 (or 0.9* P50, or determined value), 
+	   	see Dayer et al., 2020*/
+	double turgorLossPoint = -1.5; //Mpa Syrah
+	/** assume as absolute osmotic potential, see Dayer et al., 2020*/
+	double turgorMax = 1.34; //MPa Syrah
+	
+	/** 
+    	storing the plantBaseID, parentID, find the connected parent module, internode for the shoot organs. 
+    */
+    long plantBaseID;
+    public long parentID;
+    
+	public void getPlantBaseID() {
+    	if(plantBaseID <= 0) {
+			PlantBase pb = first((* this (<--)+ PlantBase*));
+			if(pb != null) {
+				this.plantBaseID = pb.getId();
+			}
+		}
+	}
+    
+    public PlantBase getPlantBase() {
+		return (PlantBase) graph().getNodeForId(plantBaseID);
+	}
+    
+	public void storeParentId(Node n) {
+		parentID = n.getId();
+	}
+	
+	public Organ getParent() {
+		 // guard: unset/self
+		 if (parentID <= 0 || parentID == this.getId()) return null;
+		// graph().getNodeForId returns Object, not Organ
+		Object obj = graph().getNodeForId(parentID);
+	
+		// Only return if it's actually an Organ; otherwise (e.g., PlantBase) return null
+		return (obj instanceof Organ) ? (Organ) obj : null;
+	}
+	
+	/** Get any node by id (null if id<=0 or not found). */
+	public Node getNode(long id) {
+		if (id <= 0) return null;
+		return graph() != null ? (Node) graph().getNodeForId(id) : null;
+	}
+	
+	/** Get any Organ by id (null if not an Organ). */
+	public Organ getOrgan(long id) {
+		Node n = getNode(id);
+		return (n instanceof Organ) ? (Organ) n : null;
+	}
+
+
+	/**Calculates the age of the organ based on temperature.*/
+	void calcAge(){
+		age_pre = age;
+		ageGdd_pre = ageGdd;
+		ageTd_pre = ageTd;
+		ageTg_pre = ageTg;
+		/** updating the age */
+		ageD = ageD + DT;
+		
+		ageGdd = ageGdd_pre + deltaAgeGdd(Ta, baseT, DT);
+		ageTd  = ageTd_pre + wangEngelTempFunction(Ta, MIN_TEMP, OPT_TEMP, MAX_TEMP,REFTMP) * DT;
+		ageTg  = ageTg + calcTurgor(this.waterPotential);
+		//this is needed because of initial age assignment at initiation, like plant age
+		//we also want to keep track of all age calculation for cross validation in future
+		double deltaAge = 0;
+		if (thermalUnit.equals("thermalDay")) {
+			deltaAge = wangEngelTempFunction(Ta, MIN_TEMP, OPT_TEMP, MAX_TEMP,REFTMP) * DT;
+		} else if(thermalUnit.equals("growingDegreeDay")) {
+			deltaAge = Ta > baseT ? (Ta - baseT) * DT : 0;
+		} else if(thermalUnit.equals("day")) {
+			deltaAge = DT;
+		} else if(thermalUnit.equals("turgorTime")) {
+			deltaAge = calcTurgor(this.waterPotential);
+		}
+		
+		  // Check for valid deltaAge before updating age
+		if (!Double.isNaN(deltaAge) && Double.isFinite(deltaAge)) {
+			age += deltaAge;
+		} else {
+			// Handle invalid deltaAge value, e.g., log an error or use a default value
+			println("Invalid deltaAge encountered: " + deltaAge);
+			age += 0;
+		}
+		
+		
+		 if(this.nodeID <= 0) 
+		 	{
+              this.nodeID = this.getId(); 
+        	}
+        	
+		 
+	}
+	
+	double calcTurgor(double waterPotential) {
+		if(waterPotential > turgorLossPoint) {
+			return((waterPotential - turgorLossPoint)/Math.abs(turgorLossPoint) * turgorMax );
+		} else return 0;
+	}
+	
+	/**Initializes the properties of the organ from an XNode input.
+	@param N The XNode containing the organ properties.
+	*/
+	public void fromXNode(XNode N){
+		this.length = N.length;
+		this.diameter = N.diameter;
+		this.ID = N.id;
+		this.order = N.order;
+		this.organType = N.organType;
+		this.rank = N.segment;
+		this.axis2ID = N.axis2ID;
+		this.axis3ID = N.axis3ID;
+		this.axis4ID = N.axis4ID;
+		this.axis5ID = N.axis5ID;
+		this.axis6ID = N.axis6ID;
+		this.axis7ID = N.axis7ID;
+		this.axis8ID = N.axis8ID;
+		this.axis9ID = N.axis9ID;
+		this.cordonNumber = axis2ID; 
+		this.nodeNumber = axis3ID; 
+		this.cpn = axis2ID + axis3ID + axis4ID + axis5ID + axis6ID + axis7ID + axis8ID + axis9ID + rank;
+		 if(!(this instanceof FruitService)) 
+			{ 
+				initAge(N.age);
+			}	
+	}
+	
+	void initAge(float age_) {
+		
+		try {	
+			// Additional validation checks can be placed here for age_, Tmax, Tmin, etc.
+			if(age_ > 0) {
+				this.ageD = age_;
+			} else if (age_ <= 0 && this instanceof Trunk) {
+				this.ageD = PLANT_AGE_DAYS;
+			} else if ( this instanceof Cordon) {
+				this.ageD = PLANT_AGE_DAYS - 365;
+				//if (printFlag) { println("organType: " + this.organType + "this.ageD " + this.ageD); }
+			} else if ( this instanceof BudService) {
+				this.ageD = (int) plastochron/thermaltimeUnit;
+			} else {
+				int delta = Math.max(1, MAX_PHYTOMER_NUM - this.rank);
+				this.ageD = (int) (delta * plastochron/ thermaltimeUnit)*2;
+					
+			}
+			
+			this.ageTd = this.ageD * (Tmax + Tmin) / 2 / OPT_TEMP;
+			this.ageGdd = Math.max(this.ageD * ((Tmax + Tmin) / 2 - baseT), ageTd);
+			this.ageTg = ageD * 0.5; 
+			
+			if (thermalUnit.equals("thermalDay")) {
+				this.age = ageTd;
+				
+			} else if(thermalUnit.equals("growingDegreeDay")) {
+				this.age = ageGdd;
+			} else if(thermalUnit.equals("day")) {
+				this.age = ageD;
+			} else if(thermalUnit.equals("turgorTime")) {
+				this.age = ageTg;
+			}
+			
+			//if (printFlag) { println(this.organType + " rank " + this.rank + " : " + this.age); }
+		} catch (Exception e) {
+			// Log the error or take corrective action
+			e.printStackTrace();
+			// Consider setting age to a default value or throwing a custom exception
+		}
+	}
+
+	
+	void assignAge(PlantBase pb, int cpn) {
+		this.age = Math.max(pb.age - cpn * plastochron / thermaltimeUnit, plastochron);
+		this.ageD = Math.max(pb.ageD - cpn * plastochron / thermaltimeUnit, 1);
+		this.ageTd = Math.max(pb.ageTd - cpn * plastochron / thermaltimeUnit, plastochron);
+		this.ageGdd = Math.max(pb.ageGdd - cpn * plastochron / thermaltimeUnit, 10);
+		
+	}
+	
+	/**Sets the direction of the organ.
+	@param direction The Vector3d representing the direction.
+	*/
+	public void setDirection(Vector3d direction){
+		final Matrix3d m = new Matrix3d();
+		Math2.getOrthogonalBasis(direction, m, true);
+		((TMatrix4d) this[transform]).setRotationScale(m);
+	}
+	/**Updates the transformation matrix for the organ.
+	@param mat The new transformation matrix.
+	*/
+	public void setNewTransform(TMatrix4d mat){
+		this[transform] = mat;
+	}
+	
+
+	/**Updates the 3D coordinates of the organ.*/
+	void update3D(){
+		Point3d loc = location(this);
+		x = loc.x;
+		y = loc.y;
+		z = loc.z;
+		Point3d endLoc = endlocation(this);
+		endX = endLoc.x;
+		endY = endLoc.y;
+		endZ = endLoc.z;
+	}
+	
+	public void loadParameters() {}
+	
+}
+	
+/**
+ * Parent module for all organs that grow.
+ * <p>
+ * This code simulates carbon loading and unloading in plants. It is based on
+ * mathematical models of logistic growth rate, primary and secondary growth rate,
+ * reserve synthesis, reserve hydrolysis, source loading, and sink unloading.
+ * </p>
+ * <ul>
+ * <li>The {@code primaryGrowthRate} function calculates the growth of the plant's length.</li>
+ * <li>The {@code secondaryGrowthRate} function calculates the growth of the plant's diameter.</li>
+ * <li>The {@code reserveSynthesis} function calculates the rate of reserve buildup.</li>
+ * <li>The {@code reserveHydrolysis} function calculates the rate of reserve depletion.</li>
+ * <li>The {@code sinkUnloading} function calculates the unloading of carbon from the plant's sinks.</li>
+ * <li>The {@code sourceLoading} function calculates the loading of carbon into the plant's sources.</li>
+ * <li>The {@code calcLoading} function calculates the net loading of carbon into the plant.</li>
+ * </ul>
+ * <p>
+ * In Java, static variables belong to the class and not to instance (object). This means:
+ * If the parameters are declared as static, they will be shared among all instances of the class. When you assign a value to a static variable, this value is set for all instances of the class. So, any change to a static variable affects all instances.
+ * If the parameters are not static, each instance of the class has its own copy of the parameter. This means when you create an object of the class and assign values to its parameters, those values are unique to that instance.
+ * The effects of temperature are considered in various calculations. The code also
+ * implements methods to ensure stability, such as using a small minimum value in cases
+ * where the carbon reserve would otherwise be negative.
+ * </p>
+ */
+module GrowingOrgan extends Organ implements TransportOrgan
+{
+	/**
+	 * Keep graph-deserialization compatibility for existing project graph/shader links.
+	 * Matches the UID used in saved graphs prior to recent class-shape changes.
+	 */
+	private static final long serialVersionUID = 2347872199995312455L;
+
+	/** Set timestamp as public to output to table. */
+	@JsonProperty(value = "timestamp", index = 0)
+	public String timestamp;
+
+    /** adding cocurrent task definitions, see details in the tasks.rgg*/
+    transient GrowthUpdateTask gutask; 
+	{
+		gutask = new GrowthUpdateTask(this);
+	}
+	/***************************************************************************/
+	/* this part is for state and other variables*/
+	/**************************************************************************/
+	/****	CARBON STATE VARIABLES ************/
+	/** Dry matter (mg) */
+	public double biomass;
+	/** biomass in the previous step */
+	double biomass_pre;
+	/** Fresh weight of the organ (mg) */
+	double freshWeight;
+	/** Area of the organ (m2) */
+	double area;
+	
+	/** Total amount of carbon (mg) */
+	public double carbon_total;
+	/** Amount of structural carbon (mg) */
+	public double carbon_structure;
+	
+	/**Maximum amount of non-structural carbon (mg) */
+	double carbon_nonStructure_max;
+	/** Amount of non-structural carbon (mg) */
+	public double carbon_nonStructure;
+	/** non-structural carbon vs structural carbon */
+	double fNSCtoSC;
+	/** Fraction of non-structural carbon in total carbon */
+	double fNSC;
+	
+	/** Potential demand for primary structure growth (mg C) */
+	double structureDM_PRI_PT;
+	/** Potential demand for secondary structure growth (mg C) */
+	double structureDM_SEC_PT;
+	/** Maintenance DM actual cost (mg C hour-1) */
+	double maintenanceDM_PT;
+	/** Potential demand for reserves (mg C) */
+	double reserveDM_PT;
+	/** Potential amount of carbon load to phloem (source organ) (mg) */
+	double loading_PT;
+	/** Potential change in length */
+	double deltalength_PT;
+	/** changes in structural carbon */
+	double delta_str = 0; 
+	/** changes in non-structural carbon */
+	double delta_NSC = 0;
+	
+	/** Actual demand for primary structure growth (mg C) */
+	public double structureDM;
+	/** Actual demand for primary structure growth (mg C) */
+	public double structureDM_PRI;
+	/** Actual demand for secondary structure growth (mg C) */
+	public double structureDM_SEC;
+	/** Maintenance DM actual cost (mg C hour-1) */
+	public double maintenanceDM;
+	/** Actual demand for reserves (mg C) */
+	public double reserveDM;
+	/** Growth cost */
+	public double growthCost;
+	/** Carbon mobilization cost */
+	double carbonMobilizationCost;	
+	/** Amount of carbon load to phloem (source organ) (mg) */
+	public float loading;
+	/** Sugar in transport phloem leaking to internode or wood stock due to the presence of plasmodesmata */
+	float leakage;
+	/** Assimilates allocated */
+	public double unloading;
+	/** Overall carbon influx and outflux (mg per hour) */
+	double Cflux;
+	/** Change in length */
+	double deltalength;
+	
+	/** Potential biomass supplied by this organ */
+	double biomassSupply;
+	/** Potential biomass demand by this organ for maintenance and growth */
+	double biomassDemand;
+   
+	/** Potential organ length at time t if no limitation occurs, 
+	    equal to the organ length defined by temperature */
+	double potLength;
+	
+	
+	/****	WATER STATE VARIABLES ************/
+	/** Maximum hydraulic conductivity per meter length of shoot (mg s-1 MPa-1) */
+	double Kmax;
+	/** Actual hydraulic conductivity (mg s-1 MPa-1) */
+	public double Ka;
+	/** Water potential at the bottom of the organ (MPa) */
+	double waterPotential_b;
+	/** Water flux (mg/s) */
+	public double waterFlux;
+	/** Water potential in the previous step (MPa) */
+	float waterPotential_pre;	
+	/** Water potential in the previous five steps (MPa) */
+	float[] waterPotential_preArray = new float[6];
+	{Arrays.fill(waterPotential_preArray, inputWaterPotential);}
+
+	
+	/****	NITROGEN STATE VARIABLES ************/
+	/** Total amount of nitrogen (mg) */
+	double nitrogen_total;
+	/** Amount of structural nitrogen (mg) */
+	double nitrogen_structure;
+	/** Amount of non-structural nitrogen (mg) */
+	double nitrogen_nonStructure;
+	/** Amount of mobile nitrogen (mg) */
+	double nitrogen_mobile;
+	/** Nitrogen degradation at each time step (mg) */
+	double Ndegradation;
+	/** Nitrogen synthesis at each time step (mg) */
+	double Nsynthesis;
+	/** Nitrogen concentration in g g-1, updated at each time step or each day. */
+	double Nm;
+	
+	/** Nitrogen concentrations*/
+	 /** Clamps for Nm avoid unrealistic values.
+	 *  - Nm_min = 0.005 (0.5% N, senescent leaf residual)
+	 *  - Nm_max = 0.060 (6.0% N, very high young tissue)
+	 */
+	double Nm_min = 0.005;
+	double Nm_max = 0.020;
+	/** Slope of Nm decline with thermal time (fractional units).
+	 *  Unit: g N g⁻¹ DM (fraction) per °C·d
+	 *  - Grapevine (Prieto 2012): ~−8.1e−6 per °C·d
+	 *  - Apple ageing slower: ~−5.0e−6 suggested
+	 *
+	 * Note: if Nm were expressed in %, slope would be −8.1e−4 instead.
+	 * applies on shoot with a different rate as well
+	 */
+	double aN_slope = -8.1e-6;
+		
+	/***************************************************************************/
+	/* this part is for parameters to be load from the config module*/
+	/**DO NOT USE STATIC BEFORE THE PARAMETERS HERE AS THERE WILL STILL CHANGE PER ORGAN TYPE***/
+	/**************************************************************************/
+    /** Maximum organ length at the end of growth, 
+    	this can not be a static variable as different instances needs to have different max length for different node */
+	double maxLength;
+	/** Potential final size target for this organ (organ-native unit). */
+	public double potentialFinalSize = 0.0;
+	/** Realized final size target after stress scaling (organ-native unit). */
+	public double realizedFinalSize = 0.0;
+	/** Potential half-time for expansion (thermal time unit). */
+	public double expansionHalfTimePotential = 0.0;
+	/** Realized half-time for expansion after stress scaling (thermal time unit). */
+	public double expansionHalfTimeRealized = 0.0;
+	/** initialLength for dynamic growth, 
+    	as we use growth rate instead of relative growth rate, so 
+    	initial length has very small effects. it is more linked with how people define leaf appearance*/
+	double initialLength;
+	/** Maintenance coefficient (g CH2O g-1 DM hour-1) */
+	double maintenanceCoff;
+	/** Growth respiration (gC g-1 gc) */
+	double growthCoff;
+	/**
+	 * Peak potential radial secondary-growth rate in m h-1.
+	 *
+	 * Loaded per organ carbon category:
+	 * - internode-carbon for annual internodes and the slow radial phase after primary elongation
+	 * - wood-carbon for cordon and trunk perennial wood
+	 * - structuralRoot-carbon for structural roots
+	 *
+	 * Biological note:
+	 * This rate is a potential cambial radius-growth capacity before temperature,
+	 * seasonal timing, age, carbon unloading, water limitation, and carbon-status
+	 * modifiers are applied. The historical grapevine estimate was based on
+	 * multi-year trunk circumference data and Smart 1974 water-relations data:
+	 * irrigated daily stem radial growth around 1.58e-5 m h-1 was treated as a
+	 * water-limited observed value; with daytime stem water potential near
+	 * -0.5 MPa and a 50 percent reduction point near -0.35 MPa, the potential
+	 * rate can be about twice the observed water-limited rate.
+	 *
+	 * This simplified cambial growth calculation does not represent reversible
+	 * elastic shrinkage/swelling of woody organs under water stress.
+	 */
+	double secondaryGrowthRate = 0.0;
+	/**
+	 * Baseline seasonal secondary-growth activity.
+	 *
+	 * This is the unitless fraction of peak activity allowed outside the main
+	 * Gaussian cambial-growth window. It keeps perennial cambial demand from
+	 * collapsing to zero late in the season while still preserving the spring/
+	 * early-season peak set by SEC_gauss_center and SEC_gauss_width.
+	 *
+	 * Typical values:
+	 * - 0.08 for above-ground perennial wood
+	 * - 0.04 for structural roots
+	 *
+	 * Units: fraction of peak (-)
+	 */
+	double secBase = 0.0;
+	/**
+	 * Post-harvest secondary-growth floor/bump.
+	 *
+	 * Used when daysSinceWinterSolstice is between harvestDAWS and km_res_te
+	 * and temperature is above MIN_TEMP. It represents the tendency for cambial
+	 * activity and reserve refilling in perennial structures to persist or rise
+	 * after fruit demand is removed, if leaves and temperature remain permissive.
+	 *
+	 * Typical values:
+	 * - 0.20 for above-ground perennial wood
+	 * - 0.10 for structural roots
+	 *
+	 * Units: fraction of peak (-)
+	 */
+	double secBump = 0.0;
+	/**
+	 * Age decay coefficient for secondary growth rate modulation.
+	 *
+	 * Used to reduce cambial (secondary) growth activity as the organ ages.
+	 * Incorporated in the age-dependent function:
+	 *   ageEffect = max(0.1, 1 - k_age * log(ageYears + 1))
+	 *
+	 * Annual internodes set this to 0 and disable the age effect in
+	 * secondaryGrowthRate(). Perennial organs use organ-category values.
+	 *
+	 * Typical values:
+	 * - 0.18 for grapevine trunk (fast decline with age)
+	 * - 0.14 for apple trunk / cordon
+	 * - 0.10 for structural roots (slower decline)
+	 *
+	 * Units: year-1
+	 */
+	double k_age = 0.18;
+	
+	/** Sink priority for primary growth in leaf, internode, root  */
+	double km_pri;
+	/** Sink priority for secondary growth, diameter in leaf, internode, root */
+	double km_sec;
+	/** Active seasonal sink priority for reserve storage (g sugar / g solution). */
+	double km_res;
+	/** Early-season reserve-storage KM (g sugar / g solution). */
+	double km_res_early;
+	/** Late-season reserve-storage KM (g sugar / g solution). */
+	double km_res_late;
+
+	/** CARBON content in whole biomass, fraction */
+	float C_content;
+	/** STRUCTURE CARBON IN TOTAL CARBON, fraction */
+	float structure_C;
+	
+		
+	/** "Starch" synthesis rate */
+	double synRate;
+	/** "Starch" hydrolysis rate */
+	double hydRate;
+	/** MAXIMUM PERCENTAGE OF RESERVE IN RELATION TO dry mass 
+		for grapevine, zufferey et al 2001. 30% TNC values of above 30 % DW could
+		this is from 1/0.45 gDW / gC * 0.444 gC / gStarch * 0.225 gStarch/ gDW
+  		Stewart's root data show over 40%
+	*/
+	double maxRes = 0.4;
+	/** Density of the organ */
+	double density;
+	
+	/** Fraction of water in the organ */
+	float waterContent;
+	
+	 /**Growth_a: A constant that controls the steepness of the curve. 
+   	 	Negative for stress response, and positive for percentage of loss*/
+   	double growth_a = -10;
+   	/** - growth_b: A constant that shifts the curve horizontally, 
+ 		representing water potential (MPa) at 50% of maximum growth.*/
+	double growth_b = -0.5; 
+	
+	
+	///////////////////////////////////////////////
+/**
+ * Carbon transport properties for phloem-based simulation in FruitCropXL.
+ * These parameters are used to compute loading, unloading, resistance, and fluxes along 
+ * the carbon transport pathway. Values are updated iteratively using a Newton-Raphson scheme.
+ */
+ // Carbon source/sink function approximation
+	/** Intercept of the sink/source function (unit: g h⁻¹). */
+	double sink_source_a;
+	
+	/** Slope of the sink/source function (unit: g h⁻¹ per cp unit). */
+	 double sink_source_b;
+	
+	// Branch aggregation (upstream fluxes)
+	/** Intercept of the aggregated branch flux entering this segment (unit: g h⁻¹). */
+	 double branch_flux_a;
+	
+	/** Slope of the aggregated branch flux (unit: g h⁻¹ per cp unit). */
+	 double branch_flux_b;
+	
+	// Carbon potential
+	/** Carbon potential at the bottom of the segment (unit: g² cm⁻⁶). */
+	public double cpb;
+	
+	/** Carbon potential at the top of the segment (unit: g² cm⁻⁶). */
+	public double cpt;
+	
+	// Phloem transport resistance and water potential influence
+	/** Resistance of the segment to phloem carbon flow (unit: (g⋅h⋅cm−8). 
+	r=[g⋅h⋅cm−7]⋅[cm]/[cm2]=[g⋅h⋅cm−8]*/
+	 double r;
+	
+	//float Rs = ( R0 * PhloemResistanceRatio(initial_c0)/(PressureRatio(initial_c0)*R*Tk));   // resistance per unit length (initial case)
+	//Rs=[MPa⋅cm3⋅g−1⋅K−1]⋅[K][MPa⋅cm−4⋅h]​=[MPa⋅cm3⋅g−1][MPa⋅cm−4⋅h]​=[g⋅h⋅cm−7]
+	//float Rs = ( R0 * PhloemResistanceRatio(initial_c0)/(PressureRatio(initial_c0)*R*Tk));   // resistance per unit length (initial case)
+	//this.r =  Rs * this.length / area; //r is in unit of cm //divided by diameter
+	
+	/** Xylem pull effect based on water potential gradient (unit: MPa). */
+	 double xp;
+	
+	// Transport flow and storage
+	/** Net carbon flux into the sink/source of this segment (unit: g h⁻¹). */
+	public double j;
+	
+	/** Iterative error estimate for convergence (unit: g h⁻¹). */
+	 double err;
+	
+	/** Calculated Munch counterflow (osmotic-hydraulic coupling effect) (unitless). */
+	 double Mcf;
+	
+	 
+
+	
+	// in GrowingOrgan use for checking the folding coverage
+	 int  lastUnfoldStep = -1;
+	 long lastWriterId   = -1L;
+
+	// in GrowingOrgan
+	 int lastFoldStep = -1;      // which fold pass wrote me
+	 int foldRecv = 0;           // how many child writes I received this pass
+	 int foldExpect = 0;         // how many child writes I should receive
+
+	
+	///////////// for carbon transport — multiple children per type /////////////
+	/* Raw ArrayLists for Java 1.5 compatibility (store Long) */
+	private java.util.List childPetioleIDs   = new java.util.ArrayList();
+	private java.util.List childLeafIDs      = new java.util.ArrayList();
+	private java.util.List childFlowerIDs     = new java.util.ArrayList();
+	private java.util.List childFruitIDs     = new java.util.ArrayList();
+	public java.util.List childInternodeIDs = new java.util.ArrayList();
+	
+	/* --- internal: add unique id into a raw List<Long> --- */
+	private void addUniqueId(java.util.List list, long id) {
+		if (id <= 0) return;
+		int i, n = list.size();
+		for (i = 0; i < n; i++) {
+			if (((Long) list.get(i)).longValue() == id) return; // already there
+		}
+		list.add(Long.valueOf(id));
+	}
+	
+	/* --- mutators --- */
+	 public void addChildPetioleId(long id)   { addUniqueId(childPetioleIDs, id); }
+	 public void addChildLeafId(long id)      { addUniqueId(childLeafIDs, id); }
+	 public void addChildFlowerId(long id)    { addUniqueId(childFlowerIDs, id); }
+	 public void addChildFruitId(long id)     { addUniqueId(childFruitIDs, id); }
+	 public void addChildInternodeId(long id) { addUniqueId(childInternodeIDs, id); }
+	
+	/* --- accessors (counts + id at index) --- */
+	 public int  getChildPetioleCount()   { return childPetioleIDs.size(); }
+	 public int  getChildLeafCount()      { return childLeafIDs.size(); }
+	 public int  getChildFlowerCount()    { return childFlowerIDs.size(); }
+	 public int  getChildFruitCount()     { return childFruitIDs.size(); }
+	 public int  getChildInternodeCount() { return childInternodeIDs.size(); }
+
+	 public long getChildPetioleIdAt(int idx)   { return ((Long) childPetioleIDs.get(idx)).longValue(); }
+	 public long getChildLeafIdAt(int idx)      { return ((Long) childLeafIDs.get(idx)).longValue(); }
+	 public long getChildFlowerIdAt(int idx)    { return ((Long) childFlowerIDs.get(idx)).longValue(); }
+	 public long getChildFruitIdAt(int idx)     { return ((Long) childFruitIDs.get(idx)).longValue(); }
+	 public long getChildInternodeIdAt(int idx) { return ((Long) childInternodeIDs.get(idx)).longValue(); }
+	 public boolean hasChildFlowerId(long id) {
+		if (id <= 0) return false;
+		int i, n = childFlowerIDs.size();
+		for (i = 0; i < n; i++) {
+			if (((Long) childFlowerIDs.get(i)).longValue() == id) return true;
+		}
+		return false;
+	}
+	
+	/* --- typed getters you already have (kept here for convenience) --- */
+	 Petiole getPetiole(long id)    { Organ o = getOrgan(id); return (o instanceof Petiole)   ? (Petiole) o   : null; }
+	 Leaf getLeaf(long id)          { Organ o = getOrgan(id); return (o instanceof Leaf)      ? (Leaf) o      : null; }
+	 Flower getFlower(long id)      { Organ o = getOrgan(id); return (o instanceof Flower)    ? (Flower) o    : null; }  // NEW
+	 Internode getInternode(long id){ Organ o = getOrgan(id); return (o instanceof Internode) ? (Internode) o : null; }
+	 FruitService getFruit(long id) { Organ o = getOrgan(id); return (o instanceof FruitService) ? (FruitService) o : null; }
+
+	/////////////////////////////////////////////
+	
+   /**
+     * Initialize carbon and nitrogen content based on biomass and 
+     * carbon and nitrogen concentration
+     * @junqi to further separate the nitrogen content for different organs
+     */
+	void initCN_content(double biomass) {
+		if (shouldUpdateFreshWeightFromWaterContent()) {
+			freshWeight = biomass/(1-waterContent);
+		}
+		carbon_total = biomass * C_content;
+		
+		carbon_structure = carbon_total * (1.0-fNSC);  //mg, amount of structure carbon
+		
+		carbon_nonStructure = carbon_total * fNSC;    //mg, amount of starch carbon
+		
+		carbon_nonStructure_max = carbon_structure * maxRes/(1.0 - maxRes);
+		fNSCtoSC = carbon_nonStructure/carbon_structure; 
+		
+		fNSC = carbon_nonStructure/carbon_total;
+		
+		//NITROGEN
+		nitrogen_total = biomass * this.Nm;
+		nitrogen_structure = biomass * this.Nm_min; 
+		nitrogen_nonStructure = nitrogen_total * (1 - N_CONTENT_MOBILE) -  nitrogen_structure;
+		nitrogen_mobile = nitrogen_total * N_CONTENT_MOBILE;
+    }
+
+	/**
+	 * Whether the generic carbon-status update may derive fresh mass from dry
+	 * mass and water content. Demand-only organs can override this hook when
+	 * fresh mass is outside their physiological contract.
+	 */
+	boolean shouldUpdateFreshWeightFromWaterContent() {
+		return true;
+	}
+    
+    
+	/**
+	 * Update carbon state variables, use delta_str and NSC as input for a general update function
+	 */
+	void updateCarbonStatus(double delta_str, double delta_NSC) {
+		// Check for NaN in delta_str and delta_NSC, and assign fallback values if necessary
+		if (Double.isNaN(delta_str)) {
+			delta_str = 0.0;
+		}
+		if (Double.isNaN(delta_NSC)) {
+			delta_NSC = 0.0;
+		}
+	
+		// Store previous biomass value
+		double biomass_pre = biomass;
+	
+		// Update carbon structure and non-structure pools
+		carbon_structure += delta_str;
+		
+		// Avoid carbon_nonStructure becoming negative.
+		// Plants likely down-regulate maintenance or mobilize reserves—we simulate that with scaling.
+		
+		if (delta_NSC + carbon_nonStructure <= 0) {
+			// Gradually suppress large consumption when reserves are low
+			double availableNSC = carbon_nonStructure;
+			
+			// Cap the delta_NSC to only consume up to 90% of current NSC
+			delta_NSC = -0.5 * availableNSC;
+		
+			// Optional: log critical NSC level
+			println("⚠️ NSC critically low. Limiting delta_NSC to " + delta_NSC);
+		}
+		
+		// Apply update
+		carbon_nonStructure += delta_NSC;
+		
+		// Reserve pool must remain within physically possible capacity for this organ.
+		double reserveCapacity = Math.max(0.0, biomass * maxRes * CARBON_FRACTION_SUCROSE);
+		
+		// Final fallback: enforce minimum NSC to avoid system crash
+		if (carbon_nonStructure <= 0) {
+			println("❗Warning: carbon_nonStructure became non-positive after correction. Resetting to safe floor.");		
+			// Restore with a tiny floor, but never above reserve capacity.
+			double safeFloor = Math.max(2 * this.maintenanceDM, 1e-9);
+			this.carbon_nonStructure = Math.min(safeFloor, reserveCapacity);
+		}
+		
+		// Clamp reserves to [0, capacity] to prevent impossible post-init states.
+		if (this.carbon_nonStructure > reserveCapacity) {
+			this.carbon_nonStructure = reserveCapacity;
+		}
+		if (this.carbon_nonStructure < 0) {
+			this.carbon_nonStructure = 0;
+		}
+
+		// Recalculate total carbon and biomass
+		carbon_total = carbon_structure + carbon_nonStructure;
+		carbon_nonStructure_max = carbon_structure * maxRes/(1.0 - maxRes);
+		biomass = carbon_total / C_content;
+	
+		// Recalculate fresh weight only for organs that model a water fraction.
+		if (shouldUpdateFreshWeightFromWaterContent()) {
+			freshWeight = biomass / (1 - waterContent);
+		}
+	
+		
+		// Calculate fNSCtoSC safely
+		if (carbon_structure != 0) {
+			fNSCtoSC = carbon_nonStructure / carbon_structure;
+			if (Double.isNaN(fNSCtoSC) || Double.isInfinite(fNSCtoSC)) {
+				println("Invalid fNSCtoSC: " + fNSCtoSC +
+					" | carbon_nonStructure: " + carbon_nonStructure + 
+					", carbon_structure: " + carbon_structure);
+			}
+		} else {
+			fNSCtoSC = 0; // or Double.NaN if you prefer to signal a problem
+			// Optionally log or flag this condition
+		}
+		
+		// Calculate fNSC safely
+		if (carbon_total != 0) {
+			fNSC = carbon_nonStructure / carbon_total;
+			if (Double.isNaN(fNSC) || Double.isInfinite(fNSC)) {
+				println("Invalid fNSC: " + fNSC +
+					" | carbon_nonStructure: " + carbon_nonStructure + 
+					", carbon_total: " + carbon_total);
+			}
+		} else {
+			fNSC = 0; // or Double.NaN if appropriate for downstream use
+			// Log warning: total carbon is zero
+		}
+
+	}
+
+
+	
+	/**
+     * Calculate the potential carbon loading and unloading demand.
+     * @param sc sugar content g/g
+     */
+    void calcPTCTRAM(double sc) {}
+
+    /**
+     * Defines a logistic growth rate based on developmental age.
+     * Describes the decrease of relative growth rate.
+     * @param dev_age Developmental age
+     * @return Logistic growth rate
+     */
+    float logisticGrowthRate(double dev_age) {
+        return (1.0f / (1.0f + (double) Math.exp(dev_age)));
+    }
+
+	 /**
+	 * Calculates the primary growth rate (i.e., longitudinal elongation) of the organ per time step.
+	 *
+	 * This function models the irreversible lengthening of organs such as stems, internodes, or roots,
+	 * primarily as a function of organ developmental age, temperature, and water potential.
+	 *
+	 * The core assumptions are:
+	 *
+	 * ✅ Growth follows a biologically motivated potential function (e.g., beta growth curve)  
+	 * ✅ Relative elongation rate is relatively stable throughout the expansion phase  
+	 * ✅ Base primary growth is limited by environmental conditions (temperature and water availability)  
+	 * ✅ Carbon limitation, when used, is applied in organ-specific {@code calcUnloading(...)} logic  
+	 * ✅ Organ length approaches a maximum (potLength → maxLength), reducing growth rate over time  
+	 *
+	 * Responds to instantaneous water potential
+	
+	 * Reduces elongation rate during stress
+	 * No automatic compensation
+	 
+	 * ### Growth Components:
+	 *
+	 * - **Time step (`dt`)**: Computed from the difference between current and previous organ age  
+	 * - **Length ratio**: Scales growth rate as the organ approaches its potential or maximum length  
+	 * - **Temperature effect**: Embedded in `betaGrowthRate(...)` function, usually driven by developmental thermal time  
+	 * - **Water potential effect**: Applied unless `organGrowthMethod` is set to `"TempLimited"`  
+	 *     - Reflects the turgor-dependence of cell elongation  
+	 *     - Uses a water potential response function (`waterPotentialRes`) with tunable sensitivity  
+	 *
+	 * ### Numerical Safeguards:
+	 * - Checks for invalid (NaN, infinite, zero) inputs for length, water potential, and time step  
+	 * - Applies safe default values when needed to avoid instability or crashes  
+	 *
+	 * This method family is intentionally decomposed into:
+	 * <ul>
+	 *   <li>{@link #primaryGrowthPotential()} for temperature/developmental potential ({@code Lpot})</li>
+	 *   <li>{@link #primaryGrowthWaterEffect()} for the water response ({@code fw})</li>
+	 *   <li>{@link #primaryGrowthRate()} for the default combined base response ({@code Lpot * fw})</li>
+	 * </ul>
+	 * Subclasses (e.g., leaf / shoot / root) can reuse the decomposition to combine water and carbon
+	 * limitations using a dominant-limiter rule ({@code min(fw, fc)}) without changing the default behavior
+	 * for organs that still use only {@code primaryGrowthRate()}.
+	 *
+	 * @return Primary growth rate (m per timestep) for the base (non-carbon-limited) path
+	 */
+	/**
+	 * Potential primary elongation increment (no water or carbon limitation).
+	 *
+	 * <p>This returns the developmental/temperature-driven elongation potential ({@code Lpot})
+	 * before any water response is applied.
+	 *
+	 * @return Potential primary elongation increment (m per timestep)
+	 */
+	double primaryGrowthPotential() {
+		double dt = this.age - this.age_pre;
+	
+		// Ensure dt is a valid number
+		if (Double.isNaN(dt) || Double.isInfinite(dt) || dt <= 0) {
+			dt = 1.0;  // Assign a safe default value
+		}
+	
+		// Ratio should be based on the previous step, so potential length is updated later
+		double ratio = 1.0;
+	
+		// Ensure length and potLength are valid before calculating the ratio
+		if (Double.isNaN(this.length) || Double.isNaN(this.potLength) || this.potLength <= 0) {
+			ratio = 1.0;  // Default safe value when values are not valid
+		} else {
+			//adding carry over effects based on early growth limitation
+			ratio = 1.0; //Math.min(1.0, this.length / (this.potLength + 1.0e-9));
+		}
+	
+
+		// Calculate the potential growth rate
+		double L_growthRate = betaGrowthRate(this.age, this.maxLength * ratio, this.tm, this.te) * dt;
+	
+		// Ensure L_growthRate is valid
+		if (Double.isNaN(L_growthRate) || Double.isInfinite(L_growthRate)) {
+			L_growthRate = 0.0;
+		}
+
+		return L_growthRate;
+	}
+
+	/**
+	 * Water limitation factor for primary growth ({@code fw}).
+	 *
+	 * <p>Returns 1.0 for {@code TempLimited} growth mode; otherwise evaluates
+	 * {@code waterPotentialRes(...)} and clamps the result to {@code [0,1]} for numerical safety.
+	 *
+	 * @return Water limitation factor for primary growth, clamped to [0,1]
+	 */
+	double primaryGrowthWaterEffect() {
+		if (organGrowthMethod.equals("TempLimited")) {
+			return 1.0;
+		}
+
+		// Ensure water potential and coefficients are valid
+		double validWaterPotential = (Double.isNaN(this.waterPotential) || Double.isInfinite(this.waterPotential)) ? -0.1 : this.waterPotential;
+
+		double waterEffect = waterPotentialRes(validWaterPotential, this.growth_a, this.growth_b);
+		if (Double.isNaN(waterEffect) || Double.isInfinite(waterEffect)) {
+			waterEffect = 1.0;
+		}
+		if (waterEffect < 0.0) waterEffect = 0.0;
+		if (waterEffect > 1.0) waterEffect = 1.0;
+
+		return waterEffect;
+	}
+
+	/**
+	 * Default base primary growth rate used by organs that do not decompose water and carbon limits.
+	 *
+	 * <p>Equivalent to {@code primaryGrowthPotential() * primaryGrowthWaterEffect()}.
+	 *
+	 * @return Water-limited primary growth increment (m per timestep)
+	 */
+	double primaryGrowthRate() {
+		return primaryGrowthPotential() * primaryGrowthWaterEffect();
+	}
+
+	/**
+	 * Carbon stress factor proxy in [0,1], using plant-level shoot biomass fulfillment when available.
+	 */
+	double getCarbonStressFactor() {
+		double g = 1.0;
+		try {
+			if (this.plantBaseID > 0 && getPlantBase() != null) {
+				g = getPlantBase().fMb_shoot;
+			}
+		} catch (Throwable t) {
+			// compatibility fallback: legacy graphs may not expose plant-level stress fields
+			g = 1.0;
+		}
+		if (Double.isNaN(g) || Double.isInfinite(g)) g = 1.0;
+		if (g < 0.0) g = 0.0;
+		if (g > 1.0) g = 1.0;
+		return g;
+	}
+
+    
+	/**
+	 * Secondary radial growth rate for this organ (m h-1).
+	 *
+	 * Uses organ-instance parameters loaded from the organ carbon category.
+	 *
+	 * Calculation outline:
+	 * 1. Sanitize organ-specific parameters:
+	 *    - secondaryGrowthRate: peak potential radial rate, m h-1
+	 *    - secBase: baseline seasonal floor, fraction of peak
+	 *    - secBump: post-harvest floor/bump, fraction of peak
+	 *    - k_age: logarithmic age-effect coefficient, year-1
+	 * 2. Apply temperature response with wangEngelTempFunction(Ta, MIN_TEMP,
+	 *    OPT_TEMP, MAX_TEMP).
+	 * 3. Apply seasonal timing as a peak-normalized Gaussian centered at
+	 *    SEC_gauss_center with width SEC_gauss_width:
+	 *      dawsEffect = secBase + (1 - secBase) * gNorm
+	 * 4. Apply organ-type routing:
+	 *    - Annual internodes / shoots:
+	 *      * disable age decline
+	 *      * disable post-harvest bump
+	 *      * set dawsEffect to 1 because te and te_sec already gate the active
+	 *        secondary-growth phase in the caller
+	 *    - Trunk, cordon, structural root:
+	 *      * use seasonal floor
+	 *      * use age decline
+	 *      * allow post-harvest floor/bump during the reserve-refill window
+	 *    - Unknown organ:
+	 *      * no post-harvest boost; use sanitized rate and seasonal timing only
+	 * 5. Return:
+	 *      r = secondaryGrowthRate * tempEffect * dawsEffect * ageEffect
+	 *
+	 * Carbon limitation is not applied here. Callers multiply the returned
+	 * potential rate by sinkUnloading(...) and any organ-specific carbon-status
+	 * scale before converting radial growth to structureDM_SEC.
+	 *
+	 * Units:
+	 * - return value: m h-1 radial increment
+	 * - daysSinceWinterSolstice, harvestDAWS, km_res_te: days
+	 * - Ta, MIN_TEMP, OPT_TEMP, MAX_TEMP: deg C
+	 */
+	double secondaryGrowthRate() {
+		double baseRate = this.secondaryGrowthRate;
+		if (Double.isNaN(baseRate) || Double.isInfinite(baseRate) || baseRate <= 0.0) {
+			baseRate = 0.0;
+		}
+
+		double localSecBase = this.secBase;
+		if (Double.isNaN(localSecBase) || Double.isInfinite(localSecBase) || localSecBase < 0.0) {
+			localSecBase = 0.0;
+		}
+		if (localSecBase > 1.0) localSecBase = 1.0;
+
+		double localSecBump = this.secBump;
+		if (Double.isNaN(localSecBump) || Double.isInfinite(localSecBump) || localSecBump < 0.0) {
+			localSecBump = 0.0;
+		}
+		if (localSecBump > 1.0) localSecBump = 1.0;
+
+		double localKAge = this.k_age;
+		if (Double.isNaN(localKAge) || Double.isInfinite(localKAge) || localKAge < 0.0) {
+			localKAge = 0.18;
+		}
+
+		double tempEffect = wangEngelTempFunction(Ta, MIN_TEMP, OPT_TEMP, MAX_TEMP);
+		if (Double.isNaN(tempEffect) || Double.isInfinite(tempEffect)) {
+			tempEffect = 1.0;
+		}
+
+		double gNorm = evaluateGaussPeakNormalized(
+			daysSinceWinterSolstice,
+			SEC_gauss_center,
+			SEC_gauss_width
+		);
+		if (Double.isNaN(gNorm) || Double.isInfinite(gNorm)) {
+			gNorm = 0.0;
+		}
+		gNorm = Math.max(0.0, Math.min(1.0, gNorm));
+
+		double dawsEffect = localSecBase + (1.0 - localSecBase) * gNorm;
+
+		boolean isAnnualShoot = this.organType != null && (
+			this.organType.equalsIgnoreCase("Internode") ||
+			this.organType.equalsIgnoreCase("Shoot")
+		);
+
+		boolean isPerennial = this.organType != null && (
+			this.organType.equalsIgnoreCase("Trunk") ||
+			this.organType.equalsIgnoreCase("Cordon") ||
+			this.organType.equalsIgnoreCase("StructuralRoot")
+		);
+
+		double ageYears = this.ageD / 365.0;
+		double ageEffect = Math.max(0.1, 1.0 - localKAge * Math.log(ageYears + 1.0));
+
+		double phGate = 0.0;
+		if (daysSinceWinterSolstice >= harvestDAWS &&
+			Ta > MIN_TEMP &&
+			daysSinceWinterSolstice <= km_res_te) {
+			phGate = 1.0;
+		}
+
+		if (isAnnualShoot) {
+			ageEffect = 1.0;
+			phGate = 0.0;
+			dawsEffect = 1.0;
+		} else if (isPerennial) {
+			if (phGate > 0.0) {
+				dawsEffect = Math.max(dawsEffect, localSecBump);
+			}
+		} else {
+			phGate = 0.0;
+		}
+
+		double r_growthRate = baseRate * tempEffect * dawsEffect * ageEffect;
+		if (Double.isNaN(r_growthRate) || Double.isInfinite(r_growthRate) || r_growthRate < 0.0) {
+			r_growthRate = 0.0;
+		}
+		return r_growthRate;
+	}
+    
+
+    /**
+     * Calculate the rate of reserve synthesis in the organ.
+     * @return Rate of reserve synthesis
+     */
+    double reserveSynthesis() {
+        double reserveCapacity = biomass * maxRes * CARBON_FRACTION_SUCROSE;
+
+        if (reserveCapacity < carbon_nonStructure) {
+            println("Warning: stored carbon is > maximum possible!");
+            println("carbon_structure " + carbon_structure + 
+                " maxRes " + maxRes + " carbon_nonStructure " + carbon_nonStructure);
+        }
+
+		double calculatedPotentialSynthesis = synRate *
+			(reserveCapacity - carbon_nonStructure) * tempRes_enzyme(Ta);
+		return Math.max(0.0, calculatedPotentialSynthesis);
+    }
+
+	    /**
+     * Calculate the rate of reserve hydrolysis in the organ.
+     * @return Rate of reserve hydrolysis
+     */
+    double reserveHydrolysis() {
+    	        
+    /*    println("---- calcRespiration Debug ----");
+       println("Ta (air temp)           = " + Ta);
+    println("carbon_nonStructure     = " + carbon_nonStructure);
+    println("hydRate                 = " + hydRate);
+    println("tempRes_enzyme(Ta)      = " + tempRes_enzyme(Ta)); */
+        // hydRate is the fraction of NSC that can be loaded per hour; DT is handled by the caller.
+		double effectiveHydRate = adjustHydRateSeasonally(daysSinceWinterSolstice);
+        return (carbon_nonStructure * effectiveHydRate * tempRes_enzyme(Ta));
+
+
+    }
+		
+
+        
+    /**
+     * Defines carbon unloading in the organ.
+     * @param sugarConcentration_phloem Sugar concentration in the phloem
+     * @param Vm Maximum rate of unloading
+     * @param Km Michaelis constant
+     * @return unloading limitation
+     */
+     double sinkUnloading(double sugarConcentration_phloem, double Km) {
+        // the effects of temperature has been reflected in the Vm calculation
+        //double cp = Math.pow(sugarConcentration_phloem, 2) / 2;
+        return (sugarConcentration_phloem / (Km + sugarConcentration_phloem));
+    }
+
+	/**
+	 * Defines the carbohydrate loading response of a source organ (e.g., leaf or storage tissue) 
+	 * as a function of the current sugar concentration in the phloem.
+	 *
+	 * This function models the feedback inhibition of loading due to increasing phloem sugar levels, 
+	 * using a logistic (sigmoid) curve centered around a critical sugar concentration (`c0`).
+	 * 
+	 * The equation used is:
+	 * 
+	 * <pre>
+	 * loadingRate = 1 / (1 + exp(b * (sugarConcentration_phloem - c0)) + 1e-20)
+	 * </pre>
+	 *
+	 * This formulation provides:
+	 * 
+	 * ✅ A high loading rate when phloem sugar concentration is low (i.e., strong source-sink gradient)  
+	 * ✅ A relatively rapid decline in loading rate as the phloem sugar concentration exceeds the threshold `c0`, 
+	 * ✅ the current b is 35, and c0 is 0.1 g/g, when concentration is about 0.2, the export rate will be close to zero
+	 * ✅ A smooth, continuous decline that avoids solver instability  
+	 * ✅ A small constant (1e-20) to prevent division-by-zero or floating-point errors  
+	 *
+	 * ### 🧬 Biological Background — Phloem Loading Mechanisms:
+	 *
+	 * Plants use distinct strategies for loading sugars into the phloem, depending on their species and anatomy:
+	 *
+	 * 🔹 **Apoplastic Loaders** (e.g., grapevine, maize, Arabidopsis):
+	 * - Sugars are exported from mesophyll cells into the apoplast (cell wall space)
+	 * - Actively taken up into the phloem via specific transporters such as **SUTs** (sucrose transporters) and **SWEETs**
+	 * - Loading is regulated and can respond to feedback from phloem sugar concentration, turgor, or metabolic state
+	 *
+	 * 🔹 **Symplastic Loaders** (e.g., some cucurbits):
+	 * - Sugars move through plasmodesmata following a concentration gradient
+	 * - Generally more passive, with less direct regulation of phloem sugar levels
+	 *
+	 * In both cases, phloem loading does **not exhibit a sharp threshold** in nature — 
+	 * rather, loading typically **slows gradually** as phloem sugar concentration increases.
+	 * However, certain conditions may lead to more pronounced regulation:
+	 * 
+	 * - Accumulation of sugars in the phloem causing feedback inhibition
+	 * - Turgor/osmotic feedback from the phloem environment
+	 * - Environmental stress (e.g., drought, cold, or energy limitation)
+	 *
+	 * ### 🧠 Why Use a Sharp Logistic Curve?
+	 * The sharp decline used in this model is a **numerical abstraction**:
+	 * 
+	 * - It introduces a soft "cutoff" around a critical value (`c0`) for computational efficiency
+	 * - Helps coupled solvers converge faster in sugar transport or carbon allocation models
+	 * - Allows explicit tuning of responsiveness via the steepness parameter (`b`)
+	 * 
+	 * For more physiologically realistic modeling, a **shallower sigmoid** or **Michaelis-Menten-like function** 
+	 * may be used to reflect gradual reduction in loading.
+	 *
+	 * @param sugarConcentration_phloem Current sugar concentration in the phloem (e.g., mol/m³)
+	 * @param b Steepness parameter of the logistic curve; higher values yield a sharper transition
+	 * @param c0 Critical phloem sugar concentration at which loading is 50% of maximum
+	 * @return A unitless scaling factor [0–1] representing the fraction of maximum loading	  
+	 */
+
+    double sourceLoading(double sugarConcentration_phloem, float b, float c0) {
+        // the effects of temperature has been reflected in the hydrolysis calc
+        	return (1 / (1 + Math.exp(b * (sugarConcentration_phloem - c0)) + 1e-20));
+    }
+
+   /**
+	 * Calculates the carbon loading rate from the organ (e.g., a source leaf or storage organ) into the phloem.
+	 *
+	 * This method determines how much non-structural carbohydrate (NSC) can be safely mobilized
+	 * from the organ into the phloem, based on internal reserves, phloem sugar concentration,
+	 * and a minimum threshold to avoid complete depletion of local NSC.
+	 *
+	 * Loading is limited by:
+	 * 
+	 * ✅ Available Non-Structural Carbohydrates (NSC):
+	 *     Loading is only attempted if the current NSC fraction (fNSC) exceeds a minimum threshold (MINIMUM_NSC).
+	 *
+	 * ✅ Reserve Hydrolysis Capacity:
+	 *     A modeled function (reserveHydrolysis()) determines the maximum amount of NSC that can be released 
+	 *     per timestep based on physiological constraints (e.g., enzyme activity or temperature).
+	 *
+	 * ✅ Source-Phloem Gradient:
+	 *     The loading rate is scaled by a source-sink gradient function: 
+	 *     `sourceLoading(sugarConcentration_phloem, b, cp)`, which represents the resistance 
+	 *     or ease of sugar export from source to phloem depending on the existing phloem concentration.
+	 *
+	 * ✅ Safety Check for NSC Depletion:
+	 *     The method estimates the post-loading NSC level (`potential_fNSC`) and prevents loading 
+	 *     that would drop the organ below the `MINIMUM_NSC` threshold.
+	 *
+	 *     If necessary, loading is reduced to ensure a safe level of carbon remains for local metabolism and survival.
+	 *
+	 * @param sugarConcentration_phloem Current sugar concentration in the phloem (mol/m³ or similar).
+	 *                                  Higher phloem concentrations reduce the loading gradient.
+	 */
+
+	void calcLoading(double sugarConcentration_phloem)
+	{
+		if (this.fNSC > MINIMUM_NSC) {
+			double potentialLoading = reserveHydrolysis() * 
+									  sourceLoading(sugarConcentration_phloem, sourceLoading_b, sourceLoading_cp);
+	
+			// Estimate post-loading fNSC assuming simple linear relation (adjust as needed)
+			double potentialNSC = carbon_nonStructure - potentialLoading;
+			double potential_fNSC = potentialNSC / carbon_total; // Assuming leafBiomass exists and is > 0
+	
+			if (potential_fNSC >= MINIMUM_NSC) {
+				loading = potentialLoading;
+			} else {
+				// Limit loading to avoid dropping below MINIMUM_NSC
+				double safeNSC = MINIMUM_NSC * carbon_total;
+				double maxAllowedLoading = carbon_nonStructure - safeNSC;
+				loading = Math.max(0, maxAllowedLoading); // Ensure loading isn't negative
+			}
+		} else {
+			loading = 0;
+		}
+	}
+	
+	
+    /**
+     * Calculate the leakage rate in the organ.
+     * @param sugarConcentration_phloem Sugar concentration in the phloem
+     */
+    void calcLeakage(double sugarConcentration_phloem) {
+        // leakage only calculates for shoot and root, leaf is zero
+        leakage = (biomass * maxRes *CARBON_FRACTION_SUCROSE - carbon_nonStructure) * 
+        		  Kleakage * sugarConcentration_phloem * calculateCarbonFraction();
+    }
+    
+    /**
+     * Calculate the unloading rate in the organ.
+     */
+    void calcUnloading(double sugarConcentration_phloem) {
+        unloading = 0;
+    }
+    // Java 1.5-safe default (others return 0)
+    double getExudationPT() { return 0.0; }
+
+    void updateCarbonAllocation(double sugarConcentration) {
+		// Check if the sugar concentration in phloem is greater than 0
+			calcPTCTRAM(sugarConcentration);
+			calcSupplyDemand(sugarConcentration);
+			calcLoading(sugarConcentration);
+			calcLeakage(sugarConcentration);
+			calcUnloading(sugarConcentration);
+	 }
+	 
+    /**
+     * Calculate the instantaneous growth respiration in mg C per hour.
+     */
+    void calcGrowthRespiration() {
+        growthCost = structureDM * (growthCoff - 1);
+    }
+
+    /**
+     * Calculate the instantaneous maintenance respiration in mg C per hour.
+     * @param fNSCtoSC Fraction of non-structural to structural carbon
+     * @return Maintenance respiration rate
+     */
+
+	double calcMaintanceRespiration(double fNSCtoSC) {
+		// Ensure fNSCtoSC is a valid number
+		if (Float.isNaN(fNSCtoSC) || Float.isInfinite(fNSCtoSC)) {
+			fNSCtoSC = 0.75f; // Default to 0 if NaN or Infinity is detected
+		}
+	
+		// Maintenance coefficient converted to an hourly rate, no dt is used
+		float mainTS = carbon_structure * maintenanceCoff;
+	
+		// Temperature effect, ensure Ta and REFTMP are valid numbers
+		float tempDiff = Ta - REFTMP;
+		
+		float teff = (float) Math.pow(Q10MN, tempDiff/10f);
+		if (Float.isNaN(teff) || Float.isInfinite(teff)) {
+			teff = 1.0f; // Default to neutral effect if calculation is invalid
+		}
+	
+		// Assume that basic maintenance is 25% of the parameterized value,
+		// decreasing with the neighboring phloem concentration.
+		float cp_adj = 0.25f + Math.max(0.0, Math.min(0.75f, fNSCtoSC));
+		
+		// Final maintenance respiration calculation
+		float result = mainTS * teff * cp_adj;
+	
+		// Ensure the final result is a valid number
+		if (Float.isNaN(result) || Float.isInfinite(result)) {
+			result = 0.0f; // Default to 0 if the calculation fails
+		}
+	
+		return result;
+	}
+
+
+
+    /**
+     * Calculate the carbon mobilization cost.
+     */
+    void calcCarbonMobilizationCost() {
+        carbonMobilizationCost = Q_TRANS * (loading); // the cost for unloading was accounted in the growth coeff
+    }
+    
+    
+    /**
+     * Method for initiate the carbon transport variables
+     */
+	public void initializeCarbonTransport() {
+		double length_cm = this.length * 1e2;
+	    double area_cm2   = this.area * 1e4;
+		float Rs = ( R0 * PhloemResistanceRatio_mixture(initial_c0, FRACTION_SORBITOL)/(PressureRatio(initial_c0)*R_ct*Tk));   // resistance per unit length (initial case)
+		this.r =  Rs * length_cm / area_cm2; //r is in unit of cm //divided by diameter
+		float h_internode_rs = 0; //1/o.Ka /3.6; 	// hydraulic resistance
+		this.xp = 0;//(this.waterFlux * h_internode_rs * initial_c0)/(PressureRatio(initial_c0)*R*Tk);  //need to update this term
+		this.cpb = this.cpt =  SOURCEcp;		 
+		//this.cpt = SOURCEcp - cpn * ini_length * SOURCEj * Rs;
+		//this.cpb = SOURCEcp - (cpn - 1) * length * SOURCEj * Rs;
+	}
+   
+/* Compute/store resistence and xylem-pull magnitude (extra drop) {@code x_p ≥ 0}	 */
+ public void updateCTRs(double carbonConcentration) {
+		double length_cm = this.length * 1e2;
+	    double area_cm2   = this.area * 1e4;
+		float Rs = ( R0 * PhloemResistanceRatio_mixture(carbonConcentration, FRACTION_SORBITOL)/(PressureRatio(carbonConcentration)*R_ct*Tk));   // resistance per unit length (initial case)
+		this.r =  Rs * length_cm / area_cm2; //r is in unit of cm //divided by diameter
+		float h_internode_rs = 0; //1/o.Ka /3.6; 	// hydraulic resistance
+		this.xp = 0;//(this.waterFlux * h_internode_rs * carbonConcentration)/(PressureRatio(carbonConcentration)*R*Tk);  //need to update this term
+	}	
+    
+    
+  // Function incorporating flux from distal elements (Figure 4)
+  /**
+   * Exact <b>FOLD</b>: map distal linear coefficients {@code (a,b)} through one segment
+   * to an upstream view {@code (a', b')} such that {@code j = a' + b'·cpb}.
+   *
+   * <p><b>Derivation</b></p>
+   * Start with {@code j = a + b·cpt} and plug the exact unfold:
+   * <pre>
+   * j = a + b·(cpb − a·r − x_p)/(1 + b·r)
+   *   = [a + b·cpb − b·x_p] / (1 + b·r)
+   *   = a' + b'·cpb
+   * </pre>
+   * Therefore,
+   * <pre>
+   * a' = (a − b·x_p) / (1 + b·r)
+   * b' =  b         / (1 + b·r)
+   */
+  public void Update_Branch_Flux()
+  {
+	float denom = (1.0 + branch_flux_b * r); 
+	branch_flux_a = (branch_flux_a - branch_flux_b * xp) / denom; // since -xp = Xp≥0
+	branch_flux_b = branch_flux_b / denom;  
+	//println(branch_flux_a)
+  }
+    
+    
+    
+    
+    
+    
+    
+    
+
+    /**
+     * Calculate nitrogen degradation.
+     */
+    void calcNdegradation() {
+        Ndegradation = Ta >0 ? Ta * DT * DegradationRateN * nitrogen_nonStructure : 0;
+        nitrogen_nonStructure -= Ndegradation;
+        nitrogen_total -= Ndegradation;
+    }
+
+    /**
+     * Calculate nitrogen synthesis.
+     */
+    void calcNSynthesis() {
+        PlantBase pb = first((* a: PlantBase, (a[plantNumber] == plantNumber) *));
+        Nsynthesis = pb[mobileNContent] * NFractionInCflux * (unloading + leakage);
+        nitrogen_nonStructure += Nsynthesis;
+        nitrogen_total += Nsynthesis;
+    }
+
+    /**
+     * Calculate potential supply and demand of biomass from this organ.
+     * @param sugarConcentration_phloem Sugar concentration in the phloem
+     */
+    void calcSupplyDemand(double sugarConcentration_phloem) {
+        biomassSupply = loading_PT;
+        biomassDemand = structureDM_PRI_PT + structureDM_SEC_PT + maintenanceDM_PT + reserveDM_PT + getExudationPT();
+
+    }
+   
+    
+	/**
+	 * Resolves reserve-storage KM endpoints from absolute parameter values.
+	 *
+	 * KM_RES_EARLY and KM_RES_LATE are absolute KM values in g sugar / g
+	 * solution. The active km_res is updated seasonally from these endpoints.
+	 * Smaller KM means stronger reserve sink priority.
+	 */
+	void configureReserveKmAbsolute(CategoryStore config, double defaultEarlyKm, double defaultLateKm) {
+		try {
+			km_res_early = config.getDouble("KM_RES_EARLY", defaultEarlyKm);
+		} catch (RuntimeException e) {
+			km_res_early = defaultEarlyKm;
+		}
+		try {
+			km_res_late = config.getDouble("KM_RES_LATE", defaultLateKm);
+		} catch (RuntimeException e) {
+			km_res_late = defaultLateKm;
+		}
+		if (Double.isNaN(km_res_early) || Double.isInfinite(km_res_early) || km_res_early <= 0.0) {
+			km_res_early = defaultEarlyKm;
+		}
+		if (Double.isNaN(km_res_late) || Double.isInfinite(km_res_late) || km_res_late <= 0.0) {
+			km_res_late = defaultLateKm;
+		}
+
+		if (km_res_early < km_res_late) {
+			println("[Config] WARN: KM_RES_EARLY is below KM_RES_LATE; reserve priority will weaken late season.");
+		}
+		km_res = km_res_early;
+	}
+
+	/**
+	 * Loads constant reserve synthesis and early-season reserve hydrolysis rates.
+	 */
+	void configureReserveTurnover(CategoryStore config, double defaultHydRate, double defaultSynRate) {
+		hydRate = config.getDouble("HYDROLYSIS_RATE", defaultHydRate);
+		synRate = config.getDouble("SYNTHESIS_RATE", defaultSynRate);
+
+		if (Double.isNaN(hydRate) || Double.isInfinite(hydRate) || hydRate < 0.0) {
+			println("[Config] WARN: HYDROLYSIS_RATE is invalid; clamping to 0 h-1.");
+			hydRate = 0.0;
+		}
+		if (Double.isNaN(synRate) || Double.isInfinite(synRate) || synRate < 0.0) {
+			println("[Config] WARN: SYNTHESIS_RATE is invalid; clamping to 0 h-1.");
+			synRate = 0.0;
+		}
+
+		if (synRate > hydRate) {
+			println("[Config] WARN: SYNTHESIS_RATE is above HYDROLYSIS_RATE; reserve hydrolysis will strengthen late season.");
+		}
+	}
+
+	/**
+	 * Shared dimensionless seasonal index for reserve dynamics.
+	 *
+	 * A value of 0 represents early-season reserve remobilization and 1
+	 * represents late-season reserve rebuilding. Timing is shared with reserve KM.
+	 */
+	double getReserveSeasonBeta(int daysSinceWinterSolstice) {
+		double beta = betaGrowthFunction((float) daysSinceWinterSolstice, km_res_tm, km_res_te);
+		if (Double.isNaN(beta) || Double.isInfinite(beta)) beta = 0.0;
+		if (beta < 0.0) beta = 0.0;
+		if (beta > 1.0) beta = 1.0;
+		return beta;
+	}
+
+	/**
+	 * Seasonally adjusts reserve-storage KM.
+	 *
+	 * Smaller KM means stronger reserve sink priority. Early season uses
+	 * km_res_early (high KM, low priority). Late season uses km_res_late
+	 * (lower KM, stronger reserve-refilling priority). The transition is
+	 * controlled by km_res_tm and km_res_te.
+	 */
+	double adjustKmResSeasonally(int daysSinceWinterSolstice, double km_res_early_, double km_res_late_) {
+		double beta = getReserveSeasonBeta(daysSinceWinterSolstice);
+		return km_res_early_ + (km_res_late_ - km_res_early_) * beta;
+	}
+
+	/**
+	 * Seasonally adjusts reserve hydrolysis rate (h-1).
+	 *
+	 * HYDROLYSIS_RATE defines early remobilization strength. Late-season
+	 * hydrolysis approaches the constant SYNTHESIS_RATE, using the reserve-KM
+	 * timing so storage priority and reserve leakage change together.
+	 */
+	double adjustHydRateSeasonally(int daysSinceWinterSolstice) {
+		double beta = getReserveSeasonBeta(daysSinceWinterSolstice);
+		double rate = hydRate + (synRate - hydRate) * beta;
+		if (Double.isNaN(rate) || Double.isInfinite(rate)) rate = hydRate;
+		if (rate < 0.0) rate = 0.0;
+		return rate;
+	}
+
+	/**
+	 * Scale for woody secondary radial growth under negative plant carbon gain (-).
+	 */
+	double woodySecondaryGrowthCarbonStatusScale() {
+		if (!enableDailyCarbonStressControls) return 1.0;
+
+		PlantBase pb = null;
+		try {
+			if (plantBaseID <= 0) getPlantBaseID();
+			if (plantBaseID > 0) pb = getPlantBase();
+		} catch (RuntimeException e) {
+			pb = null;
+		}
+		if (pb == null) return 1.0;
+		if (!pb.plantCarbonStressForSecondaryGrowth) return 1.0;
+
+		double s = negativeCarbonWoodySecondaryGrowthScale;
+		if (Double.isNaN(s) || Double.isInfinite(s)) s = 0.20;
+		if (s < 0.0) s = 0.0;
+		if (s > 1.0) s = 1.0;
+		return s;
+	}
+
+    /**
+     * Update the state of the organ.
+	 * 
+	 * Concrete organ classes to @Override this method.
+	 * Use super.update(); to call this method.
+     */
+   void update() {
+        this.timestamp = globalParameters.timestamp;
+        if(plantBaseID <= 0) {
+			PlantBase pb = first((* this (<--)+ PlantBase*));
+			if(pb != null) {
+				this.plantBaseID = pb.getId();
+			}
+		}
+        // Implementation in specific organ modules
+    }
+    
+   void growthUpdate() {
+   	  calcGrowthRespiration();
+      calcCarbonMobilizationCost();
+      update();
+   } 
+    
+   public void loadParameters() {}
+}
+
+
+/**
+ * PhotosynthateOrgan Class
+ * 
+ * Overview:
+ * The `PhotosynthateOrgan` class extends the `GrowingOrgan` class and serves as the parent module for all plant organs capable of light absorption and photosynthesis.
+ * 
+ * Design Concepts:
+ * - **Light Absorption**: Utilizes either the FluxLightModel or Spectrum3d to calculate the amount of light absorbed by the organ.
+ * - **Photosynthesis**: Employs the Farquhar, von Caemmerer, and Fruit (FvCB) model to estimate the rate of photosynthesis.
+ * - **Transpiration**: Estimates transpiration rates based on leaf water potential and stomatal conductance.
+ * 
+ * Details:
+ * This class contains several key methods and state variables:
+ * 
+ * Methods:
+ * - `calcLight()`: Calculates the light absorption of the organ.
+ * - `shouldCalcAnet()`: Determines if net photosynthesis should be calculated.
+ * - `calcLeafConductance(double leafWaterFlux)`: Calculates leaf conductance based on transpiration and ABA effects.
+ * - `updateWindSpeed()`: Updates the wind speed at the organ's height.
+ * - `calcActualTranspiration()`: Calculates the actual rate of transpiration.
+ * 
+ * State Variables:
+ * - `biomass`: The organ's biomass.
+ * - `density`: Density of the organ.
+ * - `waterContent`: Water content in the organ.
+ * - `freshWeight`: Fresh weight of the organ.
+ * - `area`: Surface area of the organ.
+ * 
+ * Additional Variables:
+ * - Carbon content, water potential, nitrogen content, light absorption, and photosynthesis-related variables.
+ * 
+ * @author junqi zhu
+ * @version 2
+ */
+ 
+module PhotosynthateOrgan extends GrowingOrgan implements ILightInterceptable
+{
+	/***************************************************************************/
+	/* this part is for state and other variables*/
+	/**************************************************************************/
+
+	/** Absorbed total radiation in umol / s. */
+	double abs;
+	/** Absorbed radiation per unit area in umol / m2 / s. */
+	double absm2;
+	/** Incident PAR per unit area in umol / m2 / s. */
+	double incPARm2;
+	/** Fraction of total radiation reached on leaf surface. */
+	public double fabs;
+	/** Fraction of PAR reached on leaf surface. */
+	public double fpar;
+	
+	/** Absorbed PAR. (umol per square meter per second) */
+	double absPAR;
+	/** Absorbed Red light. */
+	double absRed;
+	/** Absorbed Far Red light. */
+	double absFarRed;
+	//clamp parameter for the fraction of light penetrate to this layer 
+	//as the ratio between full clone and single tree 
+	public double fLayer = 1.0;
+	
+	/** Assimilates acquired in umol CO2/hour. */
+	double assimilatedCO2;
+	/** Assimilated carbon in mg. */
+	double carbonAssimilation;
+	/** Potential net photosynthesis rate before hydraulic limitation (umol CO2 m-2 s-1). */
+	@JsonProperty("PAnet")
+	@JsonPropertyDescription("Potential net leaf photosynthesis before hydraulic limitation.")
+	@Unit("umol CO2/m2/s")
+	public double Alim;
+	/** Realized net photosynthesis rate after hydraulic limitation (umol CO2 m-2 s-1). */
+	@JsonProperty("Anet")
+	@JsonPropertyDescription("Realized net leaf photosynthesis after hydraulic limitation.")
+	@Unit("umol CO2/m2/s")
+	public double AlimActual;
+	/** Leaf temperature in degrees, calculated in calcEP. */
+	double Tleaf;
+	/** Potential transpiration rate per unit of area in mm s-1, calculated in calcEP. */
+	double EP;
+	/** Actual transpiration limited by soil water availability in mm/s. */
+	double Ea;
+	/** minimun actual transpiration during the day, and use as the night time transpiration 
+		set to 1e-6 mm/s to start with*/
+	double Ea_min = 1e-6;  
+	/** Potential water flux. */
+	double waterFluxPotential;
+	/** Potential stomatal conductance for water (m s-1), calculated in calcAlim. */
+	@JsonPropertyDescription("Potential stomatal conductance for water before hydraulic limitation.")
+	@Unit("m/s")
+	public double GSWpm;
+	/** Actual stomatal conductance for water (m s-1), calculated in calcAlim. */
+	@JsonPropertyDescription("Realized stomatal conductance for water after hydraulic limitation.")
+	@Unit("m/s")
+	public double GSWa;
+	/** Dark respiration, similar to leaf maintenance cost. */
+	double Rd;
+	/** Actual stomatal conductance. */
+	float RSWa;
+	/** g0 for an individual leaf. */
+	float g0_leaf;
+	/** Maximum stomatal conductance in the Tardieu Davies function. */
+	float eq1_alpha;
+	/** Percentage loss of conductivity for each individual leaf. */
+	float PLC_leaf;
+	/** Percentage loss of conductivity for each individual leaf in the previous step. */
+	float PLC_leaf_pre;
+	
+	/** Actual stomatal conductance in mol m-2 s-1. */
+	@JsonPropertyDescription("Realized molar stomatal conductance.")
+	@Unit("mol/m2/s")
+	public float gs;
+	/** Leaf width. */
+	float width;
+	/** Wind speed. */
+	float windSpeed;
+	/** Contains Alim and GSWpm. */
+	double[] AlimResult = new double[3];
+	/** Hydraulic conductance between xylem and evaporative sites in mg MPa-1 s-1. */
+	float Gxl;
+	/** Effect of ABA on hydraulic conductance. */
+	float GxlABA;
+	/** Circadian-dependent fraction of hydraulic conductance. */
+	float Gxlcircad;
+	/** Transpiration-dependent fraction of hydraulic conductance. */
+	float Gxltranspi;
+	
+	/** intermediate variables, trival */
+	double leafHeight_pesudo = 1.0; 
+    double leafWidth_pesudo = 0.1;
+    double ra; //own aerodynamic and heat resistance
+	
+	
+	/***************************************************************************/
+	/* this part is for parameters to be load from the config module*/
+	/* only use static before the parameters which will make it the same for each class*/
+	/* do not use static before the variables*/
+	/**************************************************************************/
+	/** parameter for calculating the slope of rate of loss of conductivity */
+	static double PLC_a;
+	/** parameter for calculating the rate of loss of conductivity,
+		leaf water potential at 50% loss of conductivity*/
+	static double PLC_b;
+   //paragxl a list of parameters for the sensitivities of hydraulic conductance Gxl to transpiration (equation 8 in Tardieu, Simonneau and Parent, Journal of Experimental Botany, 2015), amplitude of water potential (equation 7) and ABA (equation 9).
+	/** Gxl0 in equation 8 */
+	static double Gxl0;  // = 0.8
+	/** minimum value of Gxl */
+	static double Gxlmin; // = 0.2
+	/** maximum value of Gxl, I increased the Gcmax three times, as it is too small for big water fluxes */
+	static double Gxlmax; // = 2.5*4
+	/** circad for Gxl (equation 7) */
+	static double Taucircadgxl; //=0.05
+	/** transpiration for Gxl (equation 7) */
+	static double Tautranspigxl; //= 0.083
+	/** ABA for Gxl (equation 7) */
+	static double TauABAgxl; //=0.01
+	//parags a list of parameters for stomatal conductance and aerodynamic conductance, (equation 1 and 2 in Tardieu)
+	//maximum stomata conductance under current ambient condition in equation 1
+	//double eq1_alpha 		; // = 0.1826;	
+	/** ABA response when stomataWaterResFunction = 2;*/
+	static double eq1_beta 		; // = -0.003; 		
+	/** water potential response when stomataWaterResFunction = 2;*/
+	static double eq1_delta 		; // = -1; 			
+    /** stomataWaterResFunction = 1; 
+    coef water potential response when using water potential only for the stomata response function
+    */
+    static double eq1_a 		; // = -3.5;
+    /**  stomataWaterResFunction = 1; water potential shift*/
+    static double eq1_b 		; // = -0.7; 
+   
+    /***************************************************************************/
+	/**Nitrogen and specific leaf area */
+	/** overall framework
+	   1) Nm declines with time (linear in TT, Prieto-style; Nm stored as fraction, e.g. 0.03=3%).
+	   2) for fixed mode, Nm, LMA will come from the input
+	   3) for dynamic-prieto mode, LMA pre-lock comes from PPFD10: LMA = aM*ln(PPFD10)+bM (clamped).
+		When the leaf thermal age ≥ te, lock LMA (freeze it), 
+		and from then on compute Na = Nm × LMA_lock (no more PPFD10 wiggles). 
+		SLA is derived from the LMA you’re using.
+		The LOCK PREVENT the drift from the pure increase of non-structural carbon etc.. 
+	*/
+
+	/**************************************************************************/
+	/** height layer */
+	public int layer; // 0=LOW, 1=MID, 2=UP
+	
+	/** Specific leaf area (SLA) in m2/mg, which is 10^-7 cm2/g (COMMONE used unit), 
+	important for calculating biomass in terms of mg. 
+	be careful the unit: input is m2/mg as used in model. */
+	double SLA;
+	
+	/**leaf mass per m2, in g m-2, range from 40 to 200 in most cases*/
+	double LMA; 
+	
+	/** Nitrogen content in g m-2, updated at each time step or each day. */
+	double leafNcontent;
+	
+
+	// --- thermal timing ---
+	double TT_birth    = Double.NaN;  // °C·d at leaf birth (from PlantBase.ageGdd)
+	double TT_lock     = Double.NaN;  // °C·d when LMA locked (for debugging)
+
+	// --- LMA state ---
+	boolean LMA_locked = false;       // true once age ≥ te
+	double  LMA_lock   = Double.NaN;  // frozen LMA (g m^-2) used after lock
+	
+
+	
+	/** SLA–PPFD regression coefficients (for DYNAMIC mode):
+	 *  LMA = aM · ln(PPFD₁₀) + bM
+	 *  - Derived from grapevine (Prieto 2012).
+	 *  - Species-specific (apple: aM ≈ 45–55, bM ≈ −20).
+	 */
+	static double aM = 6.3;
+	static double bM = 53.5;
+	
+	/** Clamps for LMA avoid unrealistic values.
+	 *  - LMA_min = 45 g m⁻² (thin, shade leaves)
+	 *  - LMA_max = 80 g m⁻² (thick, sun leaves in grapevine)
+	 */
+	static double LMA_min = 45;
+	static double LMA_max = 80;
+
+	/**
+	 * Calculates light absorption for the organ.
+	 * <p>
+	 * This method calculates the light absorption using either the FluxLightModel or a specified channel for different light spectrum.
+	 * </p>
+	 */
+	@Override	
+	public void calcLight()
+	{
+	double effectiveLayerFactor = 1.0;
+	try {
+		// Read the active shading-factor row for the current step instead of the
+		// previous step's cached leaf fLayer, which is only refreshed later in update().
+		if (useShadingFactor) {
+			effectiveLayerFactor = (layer == LAYER_LOW) ? fLow
+				: (layer == LAYER_MID) ? fMid
+				: (layer == LAYER_UP) ? fUp
+				: fLayer;
+		} else {
+			effectiveLayerFactor = 1.0;
+		}
+	} catch (RuntimeException e) {
+		effectiveLayerFactor = 1.0;
+	}
+	if (Double.isNaN(effectiveLayerFactor) || Double.isInfinite(effectiveLayerFactor) || effectiveLayerFactor < 0.0) effectiveLayerFactor = 1.0;
+	double effectiveFarRedCorrection = fabsFarRedCorrection;
+	if (Double.isNaN(effectiveFarRedCorrection) || Double.isInfinite(effectiveFarRedCorrection) || effectiveFarRedCorrection < 0.0) effectiveFarRedCorrection = 1.0;
+	double farRedLayerFactor = Math.max(0.0, Math.min(1.0, effectiveLayerFactor * effectiveFarRedCorrection));
+
+	if (isLightInterceptionStepPrepared() == false || shouldCalcAnet() == false) {
+		abs = 0;
+		absm2 = 0;
+		incPARm2 = 0;
+		absPAR = 0;
+		absRed = 0;
+		absFarRed = 0;
+		fpar = 0;
+		fabs = 0;
+		return;
+	}
+
+	LightInterceptionResult result = getPhotosynthateLightResult(this, area, effectiveLayerFactor);
+	incPARm2 = result.incPARm2;
+	absPAR = result.absPAR;
+	absRed = 0;
+	absFarRed = result.absFarRed;
+	abs = result.abs;
+	absm2 = result.absm2;
+	fpar = result.fpar;
+	fabs = result.fabs;
+
+	accumulateHourlyPPFD(incPARm2, 24 * DT);
+
+	updateWindSpeed();
+}
+	/**
+	 * calcPotentialPhotosynthesis Method
+	 * 
+	 * Overview:
+	 * This method calculates the potential photosynthesis rate and water flux for a plant organ, considering two iterations to refine the calculations.
+	 * 
+	 * Design Concepts:
+	 * - **Potential Photosynthesis**: Utilizes the Farquhar, von Caemmerer, and Fruit (FvCB) model to calculate the potential net photosynthesis rate (`Alim`).
+	 * - **Stomatal Conductance**: Determines the potential stomatal conductance (`GSWpm`).
+	 * - **Dark Respiration**: Calculates the dark respiration rate (`Rd`).
+	 * - **Transpiration Rate**: Computes the potential transpiration rate (`EP`) based on environmental factors.
+	 * - **Leaf Temperature**: Adjusts the leaf temperature (`Tleaf`) based on the calculated transpiration rate.
+	 * - **Water Flux**: Calculates the potential water flux (`waterFluxPotential`) for the organ.
+	 * 
+	 * Details:
+	 * - `gs`: Stomatal conductance, checked for NaN values.
+	 * - `AlimResult`: Array holding the results of the `calcAlim` method.
+	 * - `Alim`: Potential net photosynthesis rate.
+	 * - `GSWpm`: Potential stomatal conductance.
+	 * - `Rd`: Dark respiration rate.
+	 * - `EP`: Potential transpiration rate.
+	 * - `Tleaf`: Leaf temperature after calculations.
+	 * - `waterFluxPotential`: Potential water flux in mg.
+	 * 
+	 * @throws IllegalStateException if `gs` is NaN, it is reset to `g0_leaf` and `PLC_leaf` is set to 0.
+	 */
+	//it is possible to use the real height and width, but tends to throw errors in some conditions, 
+	//especiall when organ is just initiated. since wind is already corrected for the actual leaf height,
+	//this approximation have very tiny influence.
+
+	void calcPotentialPhotosynthesis()
+	{
+		if(Double.isNaN(gs)) {
+				 if (printFlag) { println("gs is na"); }
+					gs = g0_leaf;
+					PLC_leaf = 0; 
+			}
+			
+
+		for (int i = 1; i<=2; i+=1) 
+		{
+			
+			 
+			if (i == 1) {
+				AlimResult = calcAlim(incPARm2, leafNcontent, Ta, rh, g0, this.fNSC, this.organType);
+				Alim = AlimResult[0];
+				GSWpm = Math.max(AlimResult[1], 1e-6);
+				Rd = AlimResult[2];
+				EP =  Math.max(calcEP1(absm2,Ta,rh,windSpeed,leafHeight_pesudo,leafWidth_pesudo,GSWpm,ra), 1e-6);
+				Tleaf = calcTleaf(absm2,Ta,windSpeed,leafHeight_pesudo,leafWidth_pesudo,EP);
+				if(Double.isNaN(Tleaf)) Tleaf = Ta;
+			}
+			if (i == 2) {
+				if(Double.isNaN(Tleaf)) Tleaf = Ta;
+				AlimResult = calcAlim(incPARm2, leafNcontent, Tleaf, rh, g0, this.fNSC, this.organType);
+				Alim = AlimResult[0];
+				GSWpm = Math.max(AlimResult[1], 1e-6);
+				Rd = AlimResult[2];
+				EP = Math.max(calcEP2(absm2,Tleaf,Ta,rh,windSpeed,leafHeight_pesudo,leafWidth_pesudo,GSWpm,ra), 1e-6);
+				Tleaf = calcTleaf(absm2,Ta,windSpeed,leafHeight_pesudo,leafWidth_pesudo,EP);
+				waterFluxPotential =  EP * area * 1e6;  // from 1 mm s = 1kg/m2/s, from kg to mg, is 1e6
+				if(Double.isNaN(Tleaf)) Tleaf = Ta;
+			}
+		}	
+	}
+	/**
+     * Checks if net photosynthesis should be calculated.
+     * @return true if global radiation is above a certain threshold and leaf area is significant, false otherwise.
+     */
+	boolean shouldCalcAnet() 
+	{
+
+		if(!isLeafGasExchangeTestScenario()) {
+			return(globalRadiation > LIGHT_THRESHOLD && this.area > 1e-4);
+		} else {
+			return true;
+		} 
+		
+		
+	} 
+	
+	/**
+     * Calculates leaf conductance based on leaf water flux and ABA concentration.
+     * @param leafWaterFlux The rate of water flow through the leaf.
+     * @return The leaf conductance.
+     */
+	float calcLeafConductance(double leafWaterFlux) {
+	  //Hydraulic ConductancesupdateLeafStatusAtNight
+	  // conductances depending on transpiration
+	  Gxltranspi = max(min(Tautranspigxl* leafWaterFlux, Gxlmax) , Gxlmin);
+	  //ABA effect
+	  float ABA = plantBaseID <= 0 ? 1e-5 : getPlantBase().ABA;
+	  GxlABA =  TauABAgxl * Math.log(ABA / 20);
+	  // Conductances 
+	  Gxl =   max(min((Gxl0 +  Gxltranspi) * (1 + GxlABA ) , Gxlmax) , Gxlmin);
+	  
+	  //if (printFlag) { println(" Gxlcircad " + Gxlcircad + " Gxltranspi " + Gxltranspi + " GxlABA " + GxlABA); }
+	 // if (printFlag) { println("leaf conductance: " + Gxl + " Gxlmin " + Gxlmin + " Gxlmax " + Gxlmax ); }
+	  return(Gxl);
+	}
+	
+	/**
+     * Updates the wind speed at the leaf's height.
+     */
+	void updateWindSpeed() {
+		wind = Math.max(wind, 1e-1);
+		
+		if( this.z > 0) {
+			//Natural logarithm (ln)
+		   this.windSpeed = wind * Math.log(this.z/windSpeed_refHeight)/Math.log(1.0/windSpeed_refHeight);
+		   leafHeight_pesudo = this.z;
+		   this.ra = rbh(wind,leafWidth_pesudo) + rt(wind, leafHeight_pesudo);
+		  // if (printFlag) { println("ra" + this.ra); }
+		} else {
+			this.windSpeed = wind;
+			leafHeight_pesudo = 1.0; 
+			leafWidth_pesudo = 0.1;
+		}
+		
+		leafWidth_pesudo = (Double.isNaN(width) || this.width < 1e-2)? 0.1 : this.width;
+		this.ra = rbh(windSpeed,leafWidth_pesudo) + rt(windSpeed, leafHeight_pesudo);
+		if(Double.isNaN(this.ra)) {this.ra = photosynthesisAndTranspiration.ra;}
+	}
+	
+	
+	/**
+	 * calcActualTranspiration Method
+	 * 
+	 * Overview:
+	 * This method calculates the actual rate of transpiration based on environmental conditions and leaf physiology.
+	 * 
+	 * Design Concepts:
+	 * - **Water Flux**: Calculates the actual water flux (`actualWaterFlux`) based on potential water flux and water flux reduction factor.
+	 * - **PLC (Percentage Loss of Conductivity)**: Updates `PLC_leaf` based on the previous water potential.
+	 * - **Leaf Conductance**: Calculates the leaf conductance (`Ka`) based on the actual water flux and PLC.
+	 * - **Water Potential**: Updates the water potential of the leaf.
+	 * - **Stomatal Conductance**: Updates stomatal conductance (`gs`) based on various factors including global radiation and leaf water potential.
+	 * - **Transpiration Rate**: Calculates the actual transpiration rate (`waterFlux`) based on environmental conditions.
+	 * 
+	 * Details:
+	 * - `actualWaterFlux`: Actual water flux, calculated based on `waterFluxPotential` and `f_waterFlux`.
+	 * - `PLC_leaf`: Percentage loss of conductivity, updated based on `waterPotential_pre`.
+	 * - `Ka`: Leaf conductance, calculated based on `actualWaterFlux` and `PLC_leaf`.
+	 * - `waterPotential`: Updated water potential of the leaf.
+	 * - `gs`: Stomatal conductance, updated based on various factors.
+	 * - `waterFlux`: Actual rate of transpiration, calculated based on `gs` and environmental conditions.
+	 */
+/**
+ * Calculates the actual transpiration of a leaf based on water potential, 
+ * radiation, and environmental conditions. This method takes into account
+ * various physiological and environmental parameters to compute the transpiration
+ * rate and adjust water potential accordingly.
+ */
+// Define a circular index for waterPotential_preArray
+private int index = 0;
+
+	PlantBase candidatePlantBase() {
+		if (plantBaseID > 0) {
+			Object obj = graph().getNodeForId(plantBaseID);
+			if (obj instanceof PlantBase) return (PlantBase) obj;
+		}
+		return first((* this (<--)+ PlantBase*));
+	}
+
+	Organ candidateParentOrgan() {
+		if (parentID > 0) return getParent();
+		return (Organ) first((* this (<--)+ Internode*));
+	}
+
+	public LeafWaterCandidate evalActualTranspirationCandidate(
+		double fWaterFluxCandidate,
+		double candidateXylemWaterPotential,
+		double candidateABA
+	) {
+		LeafWaterCandidate c = new LeafWaterCandidate();
+		c.fWaterFlux = fWaterFluxCandidate;
+		c.candidateXylemWaterPotential = candidateXylemWaterPotential;
+		c.candidateABA = candidateABA;
+		c.valid = false;
+
+		double localTleaf = Tleaf;
+		if (Double.isNaN(localTleaf)) localTleaf = Ta + 0.5;
+
+		if (isLeafGasExchangeTestScenario()) {
+			double observedPsi = inputWaterPotential;
+			c.waterPotentialBoundary = observedPsi;
+			c.waterPotential = observedPsi;
+			c.meanPreviousWaterPotential = observedPsi;
+			c.PLC_leaf = Math.min(0.99, Math.max(0.01, 1 / (1 + Math.exp(PLC_a * (observedPsi - PLC_b)))));
+			if (Double.isNaN(c.PLC_leaf)) c.PLC_leaf = PLC_leaf_pre;
+			c.Ka = Ka;
+			c.g0_leaf = g0 * (1 - c.PLC_leaf);
+			c.eq1_alpha = max(0, GSWpm * UNIT_CONVERSION_STOMATA - 1.6 * c.g0_leaf);
+			if (incPARm2 > LIGHT_THRESHOLD * fPAR) {
+				c.gs = 1.6 * c.g0_leaf + c.eq1_alpha * waterPotentialRes(c.waterPotential, eq1_a, eq1_b);
+				if (Double.isNaN(c.gs)) {
+					c.gs = c.g0_leaf;
+					c.PLC_leaf = 0;
+				}
+			} else {
+				c.gs = 1.6 * c.g0_leaf;
+			}
+			c.waterFlux = Math.max(1e6 * this.area * calcEP2(absm2, localTleaf, Ta, rh, windSpeed,
+						leafHeight_pesudo, leafWidth_pesudo, c.gs / UNIT_CONVERSION_STOMATA, ra),
+						1e-10);
+			if (Double.isNaN(c.waterFlux)) c.waterFlux = waterFluxPotential;
+			c.valid = !(Double.isNaN(c.waterFlux) || Double.isInfinite(c.waterFlux));
+			return c;
+		}
+
+		Organ parentOrgan = candidateParentOrgan();
+		if (parentOrgan != null) {
+			c.waterPotentialBoundary = parentOrgan.waterPotential;
+		} else {
+			c.waterPotentialBoundary = inputWaterPotential;
+		}
+
+		double actualWaterFlux = waterFluxPotential * fWaterFluxCandidate;
+		float[] localWaterPotentialPreArray = new float[waterPotential_preArray.length];
+		for (int j = 0; j < waterPotential_preArray.length; j++) {
+			localWaterPotentialPreArray[j] = waterPotential_preArray[j];
+		}
+		int localIndex = index;
+
+		for (int i = 1; i <= 2; i++) {
+			double meanWaterPotential = 0;
+			for (int j = 0; j < localWaterPotentialPreArray.length; j++) {
+				meanWaterPotential += localWaterPotentialPreArray[j];
+			}
+			meanWaterPotential /= localWaterPotentialPreArray.length;
+			c.meanPreviousWaterPotential = meanWaterPotential;
+
+			c.PLC_leaf = Math.min(0.99, Math.max(0.01, 1 / (1 + Math.exp(PLC_a * (meanWaterPotential - PLC_b)))));
+			if (Double.isNaN(c.PLC_leaf)) c.PLC_leaf = PLC_leaf_pre;
+
+			c.Ka = Math.max(this.calcLeafConductance(actualWaterFlux) * (1 - c.PLC_leaf), Gxlmin);
+
+			double upperPsi = candidateXylemWaterPotential;
+			if (Double.isNaN(upperPsi) || Double.isInfinite(upperPsi)) upperPsi = c.waterPotentialBoundary;
+			c.waterPotential = Math.min(upperPsi, Math.max(-4, c.waterPotentialBoundary - actualWaterFlux / c.Ka));
+			if (Double.isNaN(c.waterPotential)) c.waterPotential = waterPotential_pre;
+
+			localWaterPotentialPreArray[localIndex] = ((float) c.waterPotential + (float) meanWaterPotential) / 2;
+			localIndex = (localIndex + 1) % localWaterPotentialPreArray.length;
+		}
+
+		if (incPARm2 > LIGHT_THRESHOLD * fPAR) {
+			c.g0_leaf = g0 * (1 - c.PLC_leaf);
+			c.eq1_alpha = max(0, GSWpm * UNIT_CONVERSION_STOMATA - 1.6 * c.g0_leaf);
+			PlantBase pb = candidatePlantBase();
+			boolean candidateWaterLogging = (pb != null && pb.waterLogging);
+
+			if (!candidateWaterLogging) {
+				if (stomataWaterResFunction == WATER_POTENTIAL_ONLY) {
+					c.gs = 1.6 * c.g0_leaf + c.eq1_alpha * waterPotentialRes(c.waterPotential, eq1_a, eq1_b);
+				} else if (stomataWaterResFunction == WATER_POTENTIAL_AND_ABA) {
+					c.gs = 1.6 * c.g0_leaf + c.eq1_alpha * Math.exp(candidateABA * eq1_beta * Math.exp(eq1_delta * c.waterPotential));
+				} else {
+					c.gs = 1.6 * c.g0_leaf + c.eq1_alpha * waterPotentialRes(c.waterPotential, eq1_a, eq1_b);
+				}
+			} else {
+				c.gs = 1.6 * c.g0_leaf + fWaterFluxCandidate * c.eq1_alpha;
+			}
+
+			if (Double.isNaN(c.gs)) {
+				c.gs = c.g0_leaf;
+				c.PLC_leaf = 0;
+			}
+		} else {
+			c.g0_leaf = g0 * (1 - c.PLC_leaf);
+			c.eq1_alpha = 0;
+			c.gs = 1.6 * c.g0_leaf;
+		}
+
+		c.waterFlux = Math.max(1e6 * this.area * calcEP2(absm2, localTleaf, Ta, rh, windSpeed,
+					leafHeight_pesudo, leafWidth_pesudo, c.gs / UNIT_CONVERSION_STOMATA, ra),
+					1e-10);
+		if (Double.isNaN(c.waterFlux)) c.waterFlux = waterFluxPotential;
+		c.valid = !(Double.isNaN(c.waterFlux) || Double.isInfinite(c.waterFlux)
+			|| Double.isNaN(c.waterPotential) || Double.isInfinite(c.waterPotential));
+		return c;
+	}
+
+	public void commitActualTranspirationCandidate(LeafWaterCandidate c) {
+		if (c == null) return;
+
+		if(plantBaseID <= 0) {
+			PlantBase pb = first((* this (<--)+ PlantBase*));
+			if(pb != null) this.plantBaseID = pb.getId();
+		}
+		if (parentID <= 0) {
+			GrowingOrgan parentOrgan = (GrowingOrgan) first((* this (<--)+ Internode*));
+			if (parentOrgan != null) this.parentID = parentOrgan.nodeID;
+		}
+
+		this.waterPotential_b = c.waterPotentialBoundary;
+		this.waterPotential = c.waterPotential;
+		this.waterPotential_pre = (float) c.waterPotential;
+		this.PLC_leaf = c.PLC_leaf;
+		this.PLC_leaf_pre = c.PLC_leaf;
+		this.Ka = c.Ka;
+		this.g0_leaf = c.g0_leaf;
+		this.eq1_alpha = (float) c.eq1_alpha;
+		this.gs = c.gs;
+		this.waterFlux = c.waterFlux;
+
+		if (isLeafGasExchangeTestScenario()) {
+			Arrays.fill(waterPotential_preArray, (float) c.waterPotential);
+			index = 0;
+		} else {
+			waterPotential_preArray[index] = ((float) c.waterPotential + (float) c.meanPreviousWaterPotential) / 2;
+			index = (index + 1) % waterPotential_preArray.length;
+		}
+
+		if (debug) {
+			checkForNaN(printFlag,
+				"area", this.area,
+				"absm2", absm2,
+				"Tleaf", Tleaf,
+				"Ta", Ta,
+				"rh", rh,
+				"windSpeed", windSpeed,
+				"gs", gs,
+				"NIGHT_TRANSPIRATION", NIGHT_TRANSPIRATION,
+				"PLC_leaf", PLC_leaf,
+				"ra", ra,
+				"leafHeight_pesudo", leafHeight_pesudo,
+				"leafWidth_pesudo", leafWidth_pesudo,
+				"finalTrans", waterFlux
+			);
+		}
+	}
+
+	void calcActualTranspiration() {
+		PlantBase pb = candidatePlantBase();
+		double candidateFWaterFlux = (pb != null) ? pb.f_waterFlux : 0.0;
+		double candidateXylemWaterPotential = (pb != null) ? pb.xylemWaterPotential : inputWaterPotential;
+		double candidateABA = (pb != null) ? pb.ABA : 0.0;
+		LeafWaterCandidate c = evalActualTranspirationCandidate(
+			candidateFWaterFlux,
+			candidateXylemWaterPotential,
+			candidateABA
+		);
+		commitActualTranspirationCandidate(c);
+	}
+
+	
+	/**
+	 * calcActualPhotosynthesisAndTranspiration Method
+	 * 
+	 * Overview:
+	 * This method calculates the actual net photosynthesis rate and transpiration for a plant organ.
+	 * 
+	 * Design Concepts:
+	 * - **Water Flux**: Calculates the water flux per unit area.
+	 * - **Stomatal Resistance**: Computes the actual stomatal resistance in seconds per meter (s/m).
+	 * - **Leaf Temperature**: Determines the new leaf temperature based on environmental factors.
+	 * - **Net Photosynthesis Rate**: Utilizes the Farquhar, von Caemmerer, and Fruit (FvCB) model to calculate the limiting net photosynthesis rate.
+	 * - **Actual Photosynthesis**: Adjusts the limiting net photosynthesis rate based on the ratio of potential to actual stomatal resistance.
+	 * 
+	 * @throws ArithmeticException if AlimActual becomes infinite or NaN.
+	 */
+	void calcActualPhotosynthesisAndTranspiration()
+	{ 
+		
+		//PlantBase pb = first((* this (<--)+ PlantBase *));
+		//PlantBase pb = first((* p:PlantBase, (p.plantNumber == this.plantNumber)*));
+		Ea = waterFlux/area/1e6; //EP * reductionFactor;
+		Ea_min = Math.min(Ea, Ea_min); 
+		//leaf-air temperature difference (delta T) and leaf temperature 
+		//actual stomata resistance
+		GSWa = gs/UNIT_CONVERSION_STOMATA; //m/s
+		RSWa = 1/GSWa;  //s/m
+		// //new Tleaf under Ea
+		Tleaf = calcTleaf(absm2,Ta,windSpeed,leafHeight_pesudo,leafWidth_pesudo,Ea); 
+		if(Double.isNaN(Tleaf)) Tleaf = Ta;
+		// new net photosynthesis rate
+		AlimResult = calcAlim(incPARm2,leafNcontent,Tleaf,rh, g0_leaf, this.fNSC, this.organType); 
+		
+		Alim = AlimResult[0];
+		GSWpm = Math.max(AlimResult[1], 1e-6);
+		Rd = AlimResult[2];
+		
+		float RSWpm = 1/GSWpm;
+		
+		double ratio = RSWpm >= RSWa ? 1 :  
+						(1.6 * RSWpm + 1.3*0.93*rbh(windSpeed,leafWidth_pesudo) + rt(windSpeed, leafHeight_pesudo))/
+						(1.6 * RSWa + 1.3*0.93*rbh(windSpeed,leafWidth_pesudo) + rt(windSpeed, leafHeight_pesudo));
+								
+		AlimActual = Alim * Math.min(1.0, ratio);
+	    
+		/*  if(Alim > 40 ) {
+		 	 println("AlimResult[0] " + AlimResult[0] + 
+					"RSWpm " + RSWpm + " RSWa " + RSWa + " temp " + Tleaf + " ratio " + ratio);
+		 
+		 } */
+		//for debugging whether infinitite appears  
+	/* 	if (Double.isInfinite(AlimActual)|| Double.isNaN(AlimActual)) {
+			println("rank: " + this.rank + "AlimActual is infinite" + "AlimResult[0]: " + AlimResult[0] + 
+					" RSWpm: " + RSWpm + " RSWa: " + RSWa);
+					AlimActual = 0;
+		}  */
+			
+		assimilatedCO2 = AlimActual * area * timeInterval; //umol co2
+		carbonAssimilation = MOL_C * assimilatedCO2 * ugTomg; //mg	
+		
+		
+		if(debug) {
+			checkForNaN(printFlag, 
+				"area", this.area, 
+				"height",leafHeight_pesudo,
+				"wind", windSpeed,
+				"leafWidth_pesudo",leafWidth_pesudo,
+/* 				"Alim", this.Alim,
+				"GSWpm",this.GSWpm,
+				"GSWa", GSWa,
+				"Rd", this.Rd, */
+				"rbh",rbh(windSpeed,leafWidth_pesudo),
+				"rt", rt(windSpeed, leafHeight_pesudo),
+				"carbonAssimilation", carbonAssimilation, 
+				"AlimActual", AlimActual, 
+				"ratio", ratio,
+				"carbon_nonStructure", carbon_nonStructure
+			);
+		}
+			
+			
+		
+		if(this.carbonAssimilation + this.carbon_nonStructure > this.carbon_structure) 
+			{
+				this.carbonAssimilation = Math.max(this.carbon_structure - this.carbon_nonStructure, 0);
+				
+				this.assimilatedCO2 =carbonAssimilation/MOL_C/ugTomg;
+				
+				this.Ea = assimilatedCO2/area/timeInterval/AlimActual * Ea;
+				this.waterFlux = this.Ea * area *1e6; 
+				
+				this.AlimActual = assimilatedCO2/area/timeInterval;
+				this.Alim = assimilatedCO2/area/timeInterval;
+				
+				println("warning exceeding leaf nonstructure storage");
+				
+				
+			}
+		//for sensitivity analysis this should be used, however for simulation I think this should be suppressed.
+		//g0_leaf = g0; // this will cancel the carryover effect of embolism on gs_min, suppress this the previous step's g0_leaf will be used in the following step and update again
+	} 
+	
+ 	/**
+	 * updateLeafStatusAtNight Method
+	 * Overview:
+	 * This method updates various leaf parameters to their nighttime values.
+	 */
+	void updateLeafStatusAtNight() 
+	{
+		Alim = 0; AlimActual = 0; assimilatedCO2 =0; carbonAssimilation = 0;
+		Tleaf = Ta; absm2 = 0;
+		EP = NIGHT_TRANSPIRATION; 
+		Ka = 5;
+		if(hourOfDay == sunriseTime) Ea_min = 1e-6;
+		Ea = Math.min(NIGHT_TRANSPIRATION * (1 - PLC_leaf), Ea_min); 
+		this.waterPotential_pre = waterPotential;
+		//if (printFlag) { println("  PLC_leaf " +  PLC_leaf); }
+		waterFlux =  1e6 * Ea * area;
+		waterFluxPotential = 1e6 * EP * area;
+		Rd = Rd(Ta, leafNcontent);
+		if(plantBaseID <= 0) {
+			PlantBase pb = first((* this (<--)+ PlantBase*));
+			if(pb != null) {
+				this.plantBaseID = pb.getId();
+			}
+		}
+		
+		//dynamic leaf nitrogen part
+		if(hourOfDay == 1) {
+			dailyUpdateLeafTraits();
+		}
+		
+		if (debug && printFlag && hourOfDay == 1) {
+			// e.g., per layer medians (collect as you iterate)
+			println("Layer medians: " +
+				"Na=" + this.leafNcontent + 
+				" LMA=" +this.LMA);
+		}
+	}
+	
+		/**
+	 * Tag each leaf with a canopy layer based on its height z.
+	 * LOW:  z <= height_low
+	 * MID:  height_low < z <= height_mid
+	 * UP:   height_mid  < z <= plantHeight
+	 *
+	 * Assumes: Leaf has fields z, plantNumber, and an int field `layer`.
+	 */
+	void assignLeafLayersByZ(double height_low, double height_mid) {
+			if (this.z <= height_low) {
+				this.layer = LAYER_LOW;
+			} else if (this.z <= height_mid) {
+				this.layer = LAYER_MID;
+			} else {
+				this.layer = LAYER_UP;
+			}
+	}
+
+	
+	void dailyUpdateLeafTraits() {
+		pushDailyPPFD();
+		if(step <= 2) assignLeafTraits(0, 10);
+		
+		if (day % 7 == 0 && hourOfDay == 1) {
+			PlantBase pb = getPlantBase();
+			double hLow = (pb == null || Double.isNaN(pb.height_low)) ? 0.5 : pb.height_low;
+			double hMid = (pb == null || Double.isNaN(pb.height_mid)) ? 1.0 : pb.height_mid;
+			this.assignLeafLayersByZ(hLow, hMid);
+		}
+		
+		// --------- PRIETO / other dynamic modes ----------
+		if (day >= 5 && nitrogenMode != null && nitrogenMode.contains("dynamic")) {
+			assignLeafTraits(tt, getPPFD10());
+		}
+
+    }
+
+/**
+ * Assigns per-leaf N (Na = g N m^-2) and SLA by canopy layer and mode.
+ * Modes (string-matched with contains()):
+ *  - "...fixed..."           : direct layer values (Narea_*, SLA_*), LMA = 1/(1000*SLA)
+ *  - "...dynamic...Prieto...":
+ *        Nm(t) = Nm0_layer + aN_slope * (TT - TT0)              // fraction g N g^-1 DM
+ *        LMA_prelock = aM*ln(PPFD10)+bM  (clamped)               // g m^-2
+ *        when leafAgeTT >= te_LMA_lockTT -> LMA_lock = LMA_prelock (freeze)
+ *        Use LMA_use = LMA_lock if locked, else LMA_prelock
+ *        Na = Nm * LMA_use ; SLA = 1/(1000*LMA_use)
+ *
+ * Requires (fields on this / context):
+ *  - int layer (LAYER_LOW/MID/UP)
+ *  - double leafNcontent (stores Na), double SLA, double LMA
+ *  - String nitrogenMode
+ *  - initialConditions.{Narea_*, SLA_*, Nmass0_*}
+ *  - aN_slope, Nm_min, Nm_max, aM, bM, LMA_min, LMA_max
+ *  - te_LMA_lockTT, boolean LMA_locked; double LMA_lock; double TT_birth; double TT_lock
+ *  - PlantBase with ageGdd, ageGdd_start
+ *  - optional flags: boolean debug, boolean printFlag
+ *
+ * @param thermalTime cumulative thermal time (°C·d) – used only if PlantBase is null
+ * @param PPFD10      10-day mean PAR (mol m^-2 d^-1) for pre-lock LMA regression
+ */
+void assignLeafTraits(double thermalTime, double PPFD10) {
+    // normalize incoming mode once (defensive)
+    String mode = (nitrogenMode == null) ? "" : nitrogenMode.trim();
+
+   /**
+	 * FIXED mode (layer inputs): read LMA_* and Narea_*; compute SLA = 1/(1000*LMA).
+	 * If LMA_* is missing/nonpositive, fall back to SLA_* (if provided) to compute LMA.
+	 * Optionally back-calc Nm = Na / LMA (fraction g g^-1) for debug/consistency.
+	 */
+	if (mode.contains("fixed")) {
+		double LMA_in, Na_in, SLA_calc;
+	
+		if (this.layer == LAYER_LOW) {
+			LMA_in = initialConditions.LMA_lower;      // g m^-2 (preferred)
+			Na_in  = initialConditions.Narea_lower;    // g N m^-2
+		} else if (this.layer == LAYER_MID) {
+			LMA_in = initialConditions.LMA_middle;
+			Na_in  = initialConditions.Narea_middle;
+		} else { // LAYER_UP
+			LMA_in = initialConditions.LMA_upper;
+			Na_in  = initialConditions.Narea_upper;
+		}
+	
+		// Guardrails
+		if (LMA_in <= 0.0) {
+			// final safety: use species default clamp mid-point if both LMA and SLA missing
+			LMA_in = 0.5 * (LMA_min + LMA_max);
+		}
+		if (LMA_in < LMA_min) LMA_in = LMA_min;
+		if (LMA_in > LMA_max) LMA_in = LMA_max;
+	
+		// Compute SLA from LMA; set Na directly
+		SLA_calc = 1.0 / (1000.0 * LMA_in);  // m^2 mg^-1
+		
+		this.LMA = LMA_in;
+		this.SLA = SLA_calc;
+		this.density = 1/SLA;
+		this.leafNcontent = Na_in;           // Na (g N m^-2) used by photosynthesis
+	
+		// Optional: back-calc Nm for consistency (not strictly needed by your pipeline)
+		this.Nm = Na_in / LMA_in;            // fraction g N g^-1 DM
+		
+		if (debug && printFlag) {
+			println("[assignLeafTraits:fixed] node=" + this.nodeID
+				+ " layer=" + this.layer
+				+ " LMA=" + (float)this.LMA
+				+ " SLA=" + (float)this.SLA
+				+ " Na="  + (float)this.leafNcontent
+				+ " Nm~"  + (float) Nm);   // inferred from Na/LMA
+		}
+		return;
+	}
+
+
+    // --------- any DYNAMIC mode ----------
+    if (mode.contains("dynamic")) {
+        // Optional: future branches
+        if (mode.contains("Prieto")) {
+            // 1) Thermal time and leaf age since birth
+            PlantBase pb = getPlantBase();
+            double TT  = (pb != null && !Double.isNaN(pb.ageGdd))       ? pb.ageGdd       : thermalTime;
+            double TT0 = (pb != null && !Double.isNaN(pb.ageGdd_start)) ? pb.ageGdd_start : 0.0;
+            double ageTT = TT - (Double.isNaN(TT_birth) ? TT0 : TT_birth);
+            if (Double.isNaN(ageTT) || ageTT < 0.0) ageTT = 0.0;
+
+            // 2) Nm(t): layer-specific intercept + linear decline; clamp; Nm is fraction (0.03 = 3%)
+            double Nm0 = (this.layer == LAYER_LOW) ? initialConditions.Nmass0_lower
+                        : (this.layer == LAYER_MID) ? initialConditions.Nmass0_middle
+                                                     : initialConditions.Nmass0_upper;
+            Nm = Nm0 + aN_slope * (TT - TT0);
+            if (Nm < Nm_min) Nm = Nm_min;
+            if (Nm > Nm_max) Nm = Nm_max;
+
+            // 3) LMA pre-lock via ln(PPFD10), clamp; lock when ageTT >= te_LMA_lockTT
+            double pp = (PPFD10 < 0.1) ? 0.1 : PPFD10;  // avoid ln(0)
+            double Lpre = aM * Math.log(pp) + bM;      // g m^-2
+            if (Lpre < LMA_min) Lpre = LMA_min;
+            if (Lpre > LMA_max) Lpre = LMA_max;
+
+            if (!LMA_locked && this.age >= this.te) {
+                LMA_lock   = Lpre;
+                LMA_locked = true;
+                TT_lock    = TT; // for debugging
+            }
+            double LMA_use = LMA_locked ? LMA_lock : Lpre;
+
+            // 4) Final traits
+            this.LMA          = LMA_use;
+
+            this.leafNcontent = Nm * LMA_use;          // Na
+
+            // --- DEBUG PRINT ---
+            if (debug && printFlag) {
+                println("[assignLeafTraits:dynPrieto] node=" + this.nodeID
+                    + " layer=" + this.layer
+                    + " TT=" + (int)TT
+                    + " ageTT=" + (int)ageTT
+                    + " Nm=" + (float)Nm
+                    + " LMA_use=" + (float)LMA_use
+                    + (LMA_locked ? " (LOCKED@" + (int)TT_lock + ")" : "")
+                    + " Na=" + (float)this.leafNcontent);
+            }
+            return;
+
+        } else if (mode.contains("Bertheloot")) {
+            // Placeholder for a future dynamic_Bertheloot implementation.
+            // For now, do nothing but emit a debug line so it’s visible.
+            if (debug && printFlag) {
+                println("[assignLeafTraits:dynBertheloot] node=" + this.nodeID
+                    + " layer=" + this.layer + " (not implemented yet)");
+            }
+            return;
+        }
+
+        // Unknown dynamic subtype: fall through to a safe no-op with a debug notice
+        if (debug && printFlag) {
+            println("[assignLeafTraits] dynamic mode detected but subtype not recognized: \"" + mode + "\"");
+        }
+        return;
+    }
+
+    // --- fallback: unknown mode ---
+    if (debug && printFlag) {
+        println("[assignLeafTraits] unknown nitrogenMode=\"" + mode + "\" (no changes applied)");
+    }
+}
+
+	
+	// fields
+	static final int PPFD_BUF_LEN = 10;
+	double[] ppfdBuf = new double[PPFD_BUF_LEN];
+	int ppfdIdx = 0, ppfdCount = 0;
+	double dailyPPFDmol = 0.0;     // accumulate through the day (mol m^-2 d^-1)
+	
+	// each hour (or sub-hour): accumulate incident PAR
+	void accumulateHourlyPPFD(double PAR_umol_m2_s, double hours) {
+		dailyPPFDmol += (PAR_umol_m2_s * 3600.0 * hours) / 1.0e6;
+	}
+	
+	// end-of-day
+	void pushDailyPPFD() {
+		ppfdBuf[ppfdIdx] = dailyPPFDmol;
+		ppfdIdx = (ppfdIdx + 1) % PPFD_BUF_LEN;
+		if (ppfdCount < PPFD_BUF_LEN) ppfdCount++;
+		dailyPPFDmol = 0.0; // reset for next day
+	}
+	
+	// getter used by assignLeafTraits
+	double getPPFD10() {
+		if (ppfdCount == 0) return 10.0; // safe default
+		double s = 0.0; for (int i = 0; i < ppfdCount; i++) s += ppfdBuf[i];
+		return s / (double) ppfdCount;
+	}
+	
+	
+	double LMA_fromPPFD(double PPFD10) {
+		if (PPFD10 < 0.1) PPFD10 = 0.1;                   // safe log
+		double L = aM * Math.log(PPFD10) + bM;            // g m^-2
+		if (L < LMA_min) L = LMA_min;
+		if (L > LMA_max) L = LMA_max;
+		return L;
+	}
+	
+    
+	
+	public void loadParameters() {}
+}

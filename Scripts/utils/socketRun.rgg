@@ -1,0 +1,178 @@
+import static main.*;
+import simRunBase.*;
+import static extraTools.*;
+import static globalParameters.*;
+import static absOrgan.*;
+import static leaf.*;
+import static shoot.*;
+import static outputTables.*;
+import static server.*;
+
+import de.grogra.pf.ui.Context;
+import de.grogra.graph.impl.GraphManager;
+import de.grogra.util.Lock;
+import de.grogra.pf.ui.util.LockProtectedCommand;
+import de.grogra.pf.ui.JobManager;
+import de.grogra.graph.impl.Edge;
+import de.grogra.persistence.Transaction;
+import de.grogra.graph.Graph;
+
+import java.util.Arrays;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.Map;
+
+import java.net.Socket;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+
+//public static optimization optInstance = new optimization();
+
+public class SimulationCommand extends LockProtectedCommand {
+	final GraphManager graph;
+
+	public SimulationCommand(GraphManager graph) {
+		super(graph, true, JobManager.ACTION_FLAGS);
+		this.graph = graph;
+	}
+
+	@Override
+	protected void runImpl(Object info, Context ctx, Lock lock) {
+        resetGraph(graph);
+        mainInstance.invokeInit();
+
+		SocketWrapper wrapper = (SocketWrapper) info;
+		Socket socket = wrapper.socket;
+		String body = wrapper.body;
+		ObjectMapper objectMapper = new ObjectMapper();
+		JsonNode args = objectMapper.readTree(body);
+		
+		String simResults = simulationRun(args, graph);
+
+		socket.getOutputStream().write(simResults.getBytes("UTF-8"));
+		wrapper.reader.close();
+		wrapper.writer.close();
+		socket.close();
+	}
+}
+
+static void setSimulationArgs(JsonNode args) {
+	/* GR_omega = args.get("gr_omega").floatValue();
+	GR_s = args.get("gr_s").floatValue();
+	
+	GAU_a = args.get("gau_a").floatValue();
+	GR_s = args.get("gr_s").floatValue();
+	GAU_w = args.get("gau_w").floatValue(); */
+}
+
+static Map getSimData(int indx) {
+	/* Dataset table = OUTPUT_TABLES[indx].resolve();
+	float[] simData = new float[table.getRowCount()];
+	float[] obsData = new float[table.getRowCount()];
+
+	int j = 0; 
+	for(int i = 0; i < simData.length; i++) {
+		if(table.getCell(i, 2).getX() > -1) {
+			obsData[j] = table.getCell(i, 2).getX();
+			simData[j] = table.getCell(i, 3).getX();
+			j++;
+		}
+	}
+
+	outputData.put("obs", obsData);
+	outputData.put("sim", simData); */
+	//The output table method is depressed, now we can read the simulated data from csv
+/* 		String syntheticDataFilePath = PATH_OUTPUT + "plant-level.csv";
+
+		// Create default schema with header to map headers in the synthetic data CSV file to JSON fields
+		CsvSchema csvSchema = CsvSchema
+			.emptySchema()
+			.withHeader();
+
+		// Get model output as synthetic data
+		syntheticDataList = (new CsvMapper()).readerFor(JsonNode.class)
+			.with(csvSchema)
+			.readValues(new File(syntheticDataFilePath))
+			.readAll();
+
+		applyValidationSettings(validationReader.getParams());
+
+ */
+	Map outputData = new HashMap();
+	return outputData;
+} 
+
+static String simulationRun(JsonNode args, GraphManager graph) {
+	Date currentDate;
+	currentDate = new Date(System.currentTimeMillis());
+	if (printFlag) { println("Start time: " + currentDate); }
+
+	setSimulationArgs(args);
+
+	mainInstance.runEnd(); 
+	
+	//output results
+	int[] tableInd = getTableInd();
+	String[] tableDescription = getTableDescription();
+	
+	Map outputs = new HashMap();
+	
+	for(int i = 0; i < tableInd.length - 1; i++) {
+		int index = tableInd[i];
+		String k = tableDescription[index];
+		Map simData = getSimData(i);
+		outputs.put(k, simData);
+	}
+
+	currentDate = new Date(System.currentTimeMillis());
+	if (printFlag) { println("End time: " + currentDate); }
+	String simResults = new ObjectMapper().writeValueAsString(outputs);
+	return simResults;
+}
+
+static public void resetGraph (GraphManager graph) {
+    Transaction xa = graph.getActiveTransaction ();
+    Node root = graph.getRoot ();
+    for (Edge e = root.getFirstEdge (), f; e != null; e = f)
+    {
+        f = e.getNext (root);
+        if (e.testEdgeBits (Graph.BRANCH_EDGE)
+            && (e.getTarget () instanceof RGGRoot))
+        {
+            e.remove (xa);
+        }
+    }
+    RGGRoot rr = new RGGRoot ();
+    root.addEdgeBitsTo (rr, Graph.BRANCH_EDGE, xa);
+    rr.addEdgeBitsTo (new Axiom (), Graph.SUCCESSOR_EDGE, xa);
+    xa.commitAll();
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

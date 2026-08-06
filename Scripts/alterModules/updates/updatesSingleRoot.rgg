@@ -1,0 +1,61 @@
+import static updatesBase.*;
+
+import static absOrgan.*;
+import static leaf.*;
+import static shoot.*;
+import static plantBase.*;
+import static charts.*;
+import static outputTables.*;
+import static environment.*;
+import static extraTools.*;
+import static globalParameters.*;
+import static plantParameters.*;
+import static modelOptions.*;
+import static initialConditions.*;
+import static phenology.*;
+import static soil.*;
+import static structuralVariation.*;
+import static berryYield.*;
+import static carbonTransport.*;
+import static rootSystem.*;
+import java.util.Arrays;
+
+public class UpdatesSingleRoot extends UpdatesService {
+    public void updates() {[
+        {
+            updateEnvironment();
+            updateSolarPosition(year, month, dayOfMonth, hourOfDay, 
+										latitude, longitude, elevation,airPressure, Ta);
+             if(hourOfDay == 0) {
+                day++;
+                if(inputEnvironmentCondition == false) dayOfYear++; 
+                }
+            tt = tt + (Ta - baseT)/24;
+             println(" Year " + year + " dayOfYear " + dayOfYear + " hourOfDay " + hourOfDay + "\n" 
+                 + " step " + step + " daytime " + daytime + " degree days, " + Math.round(tt * 100.0)/100.0);
+        }
+        s:Soil ::> { 
+			s.updateSoilWaterStatus();
+			//if (printFlag) { println("waterPotential of layer" + s.layer + ": " + s.waterPotential); }
+			//if (printFlag) { println("waterContent of layer" + s.layer + ": " + s.waterContent); }
+		}
+        
+        // calculate all organ ages
+        o:Organ ::> 
+        {
+            o.calcAge();
+            o.update3D();
+            
+        }
+        
+        rt:RootBase ::>  
+        {
+            rt.getPlantBase().leafArea = 0.2;
+            rt.updateInput();
+            rt.calcfluxAllocation();
+            rt.calcXylemWaterPotential(rt.plantWaterFlux, rt.f_flux);
+            rt.updateFineRootTurnoverAndExudation();
+            
+        }
+    ]}
+}

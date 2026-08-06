@@ -1,0 +1,401 @@
+import org.apache.commons.math3.analysis.solvers.*;
+import org.apache.commons.math3.analysis.UnivariateFunction;
+import org.apache.commons.math3.analysis.function.*;
+import org.apache.commons.math3.exception.NoBracketingException;
+import org.apache.commons.math3.exception.TooManyEvaluationsException;
+import org.apache.commons.math3.exception.NumberIsTooLargeException;
+
+import static plantBase.*;
+import static absOrgan.*;
+import static globalParameters.*;
+import static plantParameters.*;
+import static modelOptions.*;
+import static lightInterception.*;
+import static initialConditions.*;
+import static photosynthesisAndTranspiration.*;
+import static environment.*;
+import static extraTools.*;
+import static java.lang.Math.*;
+
+
+
+/**
+ * The `FieldBase` module serves as the central hub for managing field-wide variables and calculations
+ * in a crop field simulation. It aggregates and provides crucial information about the entire field,
+ * including leaf area index (LAI), absorbed radiation, biomass, and more. This module is instrumental
+ * in assessing the overall performance and status of the crop field, facilitating data aggregation
+ * and management at a field level.
+ *
+ * <p>The `FieldBase` module tracks various field-level metrics and variables, such as LAI, canopy absorbed radiation,
+ * biomass accumulation, and harvested yield. It plays a vital role in determining when to conclude the
+ * simulation and serves as a valuable source of information for monitoring the field's health and productivity.
+ *
+ * @author [Your Name]
+ * @version 1.0
+ */
+module FieldBase
+{
+/** True for the original field domain that may be reported to outputs. */
+boolean isReportable = true;
+/** Field instance identifier; original field = 0, clones > 0. */
+int fieldInstanceId = 0;
+/**
+ * Leaf Area Index (LAI) of the field.
+ */
+public static double lai;
+
+/**
+ * Mean leaf area per vine.
+ */
+static double leafAreaPerTree;
+
+/**
+ * Canopy absorbed radiation in umol/m2/s.
+ */
+static double hourlyAbsorbedRadiation;
+
+/**
+ * Canopy assimilated CO2 in umol CO2/m2/hour.
+ */
+double assimilatedCO2;
+
+/**
+ * Canopy assimilated CO2 in mg/m2/hour.
+ */
+double carbonAssimilation;
+
+/**
+ * Cumulative absorbed radiation in MJ/m2 (Note: Value factor 100 needs validation).
+ */
+double accumulatedRadiation;
+
+/**
+ * Fraction of global radiation absorbed by the canopy.
+ */
+public static double fabs;
+
+/**
+ * Fraction of PAR absorbed by the canopy.
+ */
+public static double fpar;
+
+
+/**
+ * Light extinction coefficient for Lambert-Beer equation.
+ */
+static double k;
+
+/**
+ * Biomass of focal plants in gr/m2.
+ */
+double biomass;
+
+/**
+ * Biomass of focal plants in the previous step in gr/m2.
+ */
+double biomassPre;
+
+/**
+ * Accumulated biomass of focal plants in gr/m2.
+ */
+double accBiomass;
+
+/**
+ * Mean dry mass of berries of focal plants in gr/vine.
+ */
+double fruitDryMassPerPlant;
+
+/**
+ * Mean fresh mass of berries of focal plants in gr/vine.
+ */
+double fruitFreshMassPerPlant;
+
+/**
+ * Mean dry mass of berries of focal plants in gr/ha.
+ */
+double fruitDryMassPerHa;
+
+/**
+ * Mean fresh mass of berries of focal plants in gr/ha.
+ */
+double fruitFreshMassPerHa;
+
+/**
+ * Biomass of reproductive organs of the entire field (focal + border) in gr/m2.
+ */
+double yldBorder;
+
+/**
+ * Flag indicating whether the field has been harvested.
+ */
+boolean harvested;
+
+	
+/**
+ * Determines whether it is time to stop the whole simulation.
+ * Checks if all focal plants have been harvested.
+ */
+	void updateHarvest() {
+		long n = count( (* pb:PlantBase, (pb.isReportable && pb.harvested == false) *));
+		if (n == 0) {
+			continueRunning = true;
+		}
+	}
+
+/**
+ * Calculates the Leaf Area Index (LAI) and mean leaf area per vine.
+ * <p>
+ * This method computes the LAI based on the sum of leaf area of focal plants
+ * without borders and calculates the mean leaf area per vine.
+ */
+	void updateLai() {
+		lai = sum((* pb:PlantBase, (pb.isReportable && pb.border == false) *)[leafArea]) / focalArea;
+		leafAreaPerTree = mean((* pb:PlantBase, (pb.isReportable && pb.border == false) *)[leafArea]);
+		//if (printFlag) { println(leafAreaPerTree); }
+	}
+	
+public static boolean shouldCalcLight() {
+	if ("photosynthesisTest".equals(special_scenario)) {
+		return true;
+	}
+	double threshold = leafPhotosynthesisFallbackLAI;
+	if (Double.isNaN(threshold) || Double.isInfinite(threshold) || threshold < 0.0) threshold = 1.0e-4;
+	if (enableLAILeafPhotosynthesisFallback && lai <= threshold) {
+		return false;
+	}
+	return lai > threshold;
+}
+
+public static boolean shouldUseLAILeafPhotosynthesisFallback() {
+	if (!enableLAILeafPhotosynthesisFallback) return false;
+	if ("photosynthesisTest".equals(special_scenario)) return false;
+	double threshold = leafPhotosynthesisFallbackLAI;
+	if (Double.isNaN(threshold) || Double.isInfinite(threshold) || threshold < 0.0) threshold = 1.0e-4;
+	if (lai > threshold) return false;
+	if (globalRadiation <= LIGHT_THRESHOLD) return false;
+	return true;
+}
+/**
+ * Calculates the absorbed radiation at the field level and related parameters.
+ * <p>
+ * This method computes the hourly absorbed radiation, assimilated CO2, carbon assimilation,
+ * and other related variables at the field level. It also calculates the fraction of absorbed radiation
+ * and the light extinction coefficient.
+ */
+	void updateAbsorbedRadiation() {
+		hourlyAbsorbedRadiation = sum((* pb:PlantBase, (pb.isReportable && pb.border == false) *)[hourlyAbsorbedRadiation])/focalArea;  // MJ/m2
+		assimilatedCO2 = sum((* pb:PlantBase, (pb.isReportable && pb.border == false) *)[assimilatedCO2])/focalArea;  //umolCO2 per hour m2
+		carbonAssimilation = sum((* pb:PlantBase, (pb.isReportable && pb.border == false) *)[carbonAssimilation])/focalArea;  //mgc per hour m2
+		fabs = globalRadiation > LIGHT_THRESHOLD ? 1e6*hourlyAbsorbedRadiation / (globalRadiation*timeInterval/WATT_TO_PPFD) : 0;   //betaAzimSdr[4][hourOfDay-sunriseTime]
+		fpar = globalRadiation > LIGHT_THRESHOLD ? sum((* pb:PlantBase, (pb.isReportable && pb.border == false) *)[fpar]) : 0;
+		k = lai > 1.0e-9 ? - Math.log(1-fpar) / lai : 0;  // leaf coextinction coefficient
+		accumulatedRadiation += sum((* pb:PlantBase, (pb.isReportable && pb.border == false) *)[accumulatedRadiation]) / focalArea;  //MJ
+		
+	}
+	
+/**
+ * Calculates the biomass of the field, including various components such as overall biomass, fruit dry mass,
+ * fruit fresh mass, and more.
+ * <p>
+ * This method computes the total biomass per unit area (from plants excluding border), as well as various other 
+ * biomass-related variables. It also calculates the fruit dry mass per vine, fruit fresh mass per vine, and 
+ * scales them to hectares.
+ */
+	void updateBiomass() {
+		   	 biomass = sum((* pb:PlantBase, (pb.isReportable && pb.border == false ) *)[biomass]) / focalArea;   //mg/m2  into t/ha
+		   	 if(step > 1) {accBiomass += (biomass - biomassPre);}
+		   	 
+			 fruitDryMassPerPlant =  mean((* pb:PlantBase, (pb.isReportable && pb.border == false ) *)[biomassFruit])*mgTogram/1000; //mg into gram, kilo gram per vine
+			 fruitFreshMassPerPlant = mean((* pb:PlantBase, (pb.isReportable && pb.border == false ) *)[freshWeightFruit])*mgTogram/1000; //mg into gram, kilo gram per vine
+			 fruitDryMassPerHa =  fruitDryMassPerPlant/ rowDistance/plantDistance /1e3* 1e4; //gram per vine into ton per hactor
+			 fruitFreshMassPerHa = fruitFreshMassPerPlant/ rowDistance/plantDistance/1e3 * 1e4; //gram per vine into ton per hactor
+			 biomassPre = biomass;
+	}
+	
+}
+
+
+/**
+ * The Tile module represents an individual soil tile within the simulation environment. It encapsulates
+ * essential attributes and functionality related to each tile, including its spatial location, dimensions,
+ * light absorption properties, and border status.
+ * 
+ * Each soil tile within the plot corresponds to a unique instance of this module. These tiles are essential
+ * for simulating light absorption, energy transfer, and other processes within the plant growth model.
+ * 
+ * @module Tile
+ */
+module Tile
+{
+ /**
+     * Indicates whether the tile is located at the border of the plot.
+     */
+    boolean border;
+    /** True for tiles belonging to the reportable/original field instance. */
+    boolean isReportable = true;
+    /** Field instance identifier; original field = 0, clones > 0. */
+    int fieldInstanceId = 0;
+
+    /**
+     * A unique identifier for the associated plant.
+     */
+    int plantNumber;
+    /**
+     * The row number within the plot.
+     */
+    int row;
+
+    /**
+     * The position within the plot.
+     */
+    int pos;
+    
+     /**
+     * The strip number within the plot.
+     */
+    int strip;
+    
+    /**
+     * The ID of the tile
+     */
+    int ID;
+    
+		/**
+	 * Length of the soil tile.
+	 */
+	double length;
+	
+	/**
+	 * Width of the soil tile.
+	 */
+	double width;
+	
+	/**
+	 * Calculated area of the soil tile (product of length and width).
+	 */
+	double area;
+		
+	/**
+	 * Total absorbed radiation by the soil tile (umol/s).
+	 */
+	double abs;
+	
+	/**
+	 * Absorbed radiation per unit area of the soil tile (umol/m2/s).
+	 */
+	double absm2;
+	/**
+	 * Fraction that represents the absorbed total radiation intensity.
+	 */
+	double fabs;
+	
+	 /**
+     * The amount of absorbed PAR (umol per second).
+     */
+    double absPAR;
+    
+    /**
+     * The amount of absorbed far red (umol per second).
+     */
+    double absFarRed;
+
+    /**
+     * Absorbed PAR per unit area (umol per square meter per second).
+     */
+    double absPARm2;
+
+    /**
+     * The fraction of hourly PAR intensity absorbed.
+     */
+    double fpar;
+    
+
+
+/**
+ * Represents an individual soil tile within the simulation environment.
+ *
+ * This module encapsulates essential attributes and functionality related to each tile, including its spatial location, dimensions, light absorption properties, and border status.
+ *
+ * @module Tile
+ */
+	void assignBorder(int row, int pos, int strip) {
+		if (strip == 1) {
+			if (row <= borderRows || pos <= borderPlants || pos > nrPlants - borderPlants) {
+				border = true;
+			}
+		}
+		if (strip > 1 && strip < nrStrips) {
+			if (pos <= borderPlants || pos > nrPlants - borderPlants) {
+				border = true;
+			}
+		}
+		if (strip == nrStrips) {
+			if (row > nrRows - borderRows || pos <= borderPlants || pos > nrPlants - borderPlants) {
+				border = true;
+			}
+		}
+	}
+
+/**
+ * Initializes the attributes of a soil tile.
+ *
+ * This method initializes the properties of a soil tile, including its plant number, row, position, strip, and physical dimensions (length, width, and area).
+ *
+ * @param i The plant number associated with the tile.
+ * @param row The row number where the tile is located.
+ * @param pos The position of the tile.
+ * @param strip The strip number of the tile.
+ * @param tileID The ID of the tile.
+ */
+	void initiate(int i, int row, int pos, int strip, int tileID)
+	{
+		plantNumber = i;		
+		this.row = row;
+		this.pos = pos;
+		this.strip = strip;
+		this.ID = tileID;
+		assignBorder(row,pos,strip);
+		length = rowDistance/nrTiles;
+		width = plantDistance/nrTiles;
+		area = rowDistance/nrTiles * plantDistance/nrTiles;
+	}
+	
+/**
+ * Calculates light absorption for the soil tile.
+ *
+ * This method computes the light absorption properties of a soil tile, including the total absorbed radiation (abs), absorbed radiation per unit area (absm2), and the fraction of hourly PAR intensity absorbed (fabs).
+ *
+ * If the area of the tile is greater than 0, the light absorption calculations are performed based on the use of the FluxLightModel. Otherwise, the values are set to 0.
+ */
+ 	void calcLight()
+	{
+		if (area <= 0 || isLightInterceptionStepPrepared() == false) {
+			abs = 0;
+			absm2 = 0;
+			absPAR = 0;
+			absFarRed = 0;
+			absPARm2 = 0;
+			fpar = 0;
+			fabs = 0;
+			return;
+		}
+		LightInterceptionResult result = getTileLightResult(this, area);
+		abs = result.abs;
+		absm2 = result.absm2;
+		absPAR = result.absPAR;
+		absFarRed = result.absFarRed;
+		absPARm2 = result.absPARm2;
+		fpar = result.fpar;
+		fabs = result.fabs;
+	}
+} 
+ ==> RL (-90) Translate(0,0,-0.5*rowDistance)
+Parallelogram(length,width).(setLayer(tileLayer), setShader(new AlgorithmSwitchShader(
+	new RGBAShader(globalRadiation > LIGHT_THRESHOLD ? fabs:0,
+					globalRadiation > LIGHT_THRESHOLD ? fabs:0,
+					globalRadiation > LIGHT_THRESHOLD ?(border?fabs:0):0),SelectedGroundShader))) 
+;
+
+
+// dummy module to keep simulation running
+module temp;

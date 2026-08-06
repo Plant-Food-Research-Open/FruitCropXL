@@ -1,0 +1,486 @@
+import static plantBase.*;
+import static budBase.*;
+import static budApple.*;
+import static shootBase.*;
+import static shoot.*;
+import static leaf.*;
+import static absOrgan.*;
+import static globalParameters.*;
+import static plantParameters.*;
+import static modelOptions.*;
+import static extraTools.*;
+import static archReader.*;
+
+/**
+ * Configuration builder for the apple bud planner.
+ *
+ * <p>This file resolves project-level plant parameters and model options into a
+ * single immutable configuration snapshot used by Stage-A bud planning and the
+ * T1 apex-potential preflight. It does not edit the graph; it only turns the
+ * many scattered knobs into one consistent {@link Cfg} for downstream code.</p>
+ */
+public final class BudPlannerConfig {
+
+  private BudPlannerConfig() {}
+
+  // ----------------------- Defaults & thresholds -----------------------------
+  static final double DEF_TARGET_POSTPRUNE_M2 = 23.0;
+  static final int    DEF_DESIRED_CROP_LOAD   = 500;
+  static final double DEF_SUMMER_PRUNE_FRAC   = 0.15;
+
+  static final double DEF_MEAN_LEAF_AREA_M2   = 0.0020; // 20 cm²
+  static final double DEF_LEAVES_PER_NODE     = 1.0;
+  static final double DEF_EXPECTED_PUSH_FRAC  = 1.0;
+
+  static final double DEF_GAMMA_SHAPE         = 1.30;
+  static final double DEF_GAMMA_SCALE         = 28.33;
+  static final String NODES_MODE_MEAN         = "mean";
+
+  static final int    DEF_START_NODE_MIN      = 4;
+  static final int    DEF_MIN_BRANCH_GAP      = 2;
+
+  // Upright grouping
+  static final int    DEF_UPRIGHT_ORDER       = 3;
+
+  // Crop/flower defaults
+  static final double DEF_F_BUD_FLORAL        = 0.88;
+  static final int    DEF_FLOWERS_PER_FLORAL  = 6;
+  static final double DEF_FRUIT_SET_PROB      = 0.50;
+  static final int    DEF_MAX_FRUITS_PER_BUD  = 5;
+  static final int    DEF_MAX_FRUITS_PER_UPRIGHT = 50;
+
+  // Safety
+  static final int    DEF_MAX_NEW_BUDS_ALLOW  = 4000;
+
+  // Strategy defaults
+  static final int    DEF_BUD_MANAGER_OPTION  = 1; // see describebudPlannerMode
+  static final int    DEF_BUDS_PER_METER      = 10;
+
+  // ------------------------------- Config -----------------------------------
+  /** Immutable configuration snapshot used by both T0 and T1 planners. */
+  public static final class Cfg {
+    // LA targets
+    public double expectedPrePruneLA_m2;
+    public double targetPostPrune_m2;
+    public double summerPruneFrac_cfg;
+    public double summerPruneFrac_eff;
+
+    // LA model
+    public double meanLeafArea_m2;
+    public double leavesPerNode;
+    public double expectedPushFrac;
+
+    // Nodes model
+    public double gammaShape;
+    public double gammaScale;
+    public String nodesMode;
+
+    // Placement
+    public int startNodeMin;
+    public int minBranchGap;
+    public int mainAxisOnly;        // {0,1}
+    public int placementOrderMin;
+
+    // Uprights
+    public int uprightOrder;        // order root anchor
+
+    // Fruit targets & per-bud expectation
+    public int    expectedFruitNumber;
+    public double fBudFloral;
+    public int    flowersPerFloral;
+    public double fruitSetProb;
+    public double fruitsPerFloralExp;
+    public int    maxFruitsPerBud;
+    public int    maxFruitsPerUpright;
+
+    // Safety / mode
+    public int  maxNewBudsAllow;
+    public boolean dryRun;
+
+    // Preflight aux
+    public double budDensityScale;
+
+    // Strategy
+    public int budTargetMode;      // 0..6 or 8 strategy selector (see describebudPlannerMode)
+    public int budNumberPerMeter;   // buds/m target (modes 0–3, 6, and 8)
+    public double minBudSpacingM;    // core bud spacing threshold on an axis (m)
+    public int allowAddOnSecondaryAxes; // legacy mode-6 fallback add switch {0,1}
+    public int spurOrder;            // spur bucket root axis order
+    public int spurChildOrder;       // child spur axis order grouped in the same bucket
+    public int maxBudsPerSpur;       // max buds per spur bucket (root + child orders)
+    public boolean removeFromChildFirst; // true => remove child-order buds first
+    public boolean addSpurUnitWhenAdding; // mode-1: prefer spur-centric add candidates
+    public double spurSpacingM;      // spur-root spacing for spur-centric adds (m)
+    public boolean enableSpurBalancer; // mode 0/1 spur-bucket pre-balancing switch
+
+    // --- NEW: whole-tree & grid targets for modes 4 and 5 ---
+    public int     totalBudTargetPerTree;   // mode 4: whole-tree cap (remove-only)
+
+    public int     gridNx;                  // mode 5: grid dimensions
+    public int     gridNz;
+    public double  gridXmin, gridXmax;
+    public double  gridZmin, gridZmax;
+    public double[] gridBudTargetsFlat;     // length = gridNx * gridNz (row-major: z-rows, x-cols)
+    public double[] uprightRegionBudTargetsFlat; // length = uprightCount * 3 (upright-major)
+
+    // --- NEW: twinning / apex-potential support -----------------------------
+
+    // Which twinning stage this cfg was built for (0=T0,1=T1,2=T2; for logging only)
+    public int twinningStage;
+
+    // For diagnostics: the configured DOYs for each twinning stage
+    public int twinningDOY_T0;
+    public int twinningDOY_T1;
+    public int twinningDOY_T2;
+
+    // T1 apex-potential knobs
+    public boolean enableApexPotentialT1;   // if false, T1 apex adjustment is a no-op
+    public double  apexPotentialScaleT1;    // simple multiplicative scale for mainNodes/branchPlan
+    public double  apexPotentialMaxRelDiff; // e.g. 0.30 → 30% gate for “big enough difference”
+  }
+
+  /**
+   * Build a resolved planner configuration from project parameters.
+   *
+   * <p>The returned snapshot is shared by Stage-A bud planning and T1 apex
+   * preflight, so all fallbacks and optional keys are resolved before any graph
+   * edits start.</p>
+   *
+   * @param dryRun when {@code true}, downstream planners should only log planned edits
+   * @param twinningStage stage tag used only for diagnostics
+   * @return resolved configuration snapshot
+   */
+  public static Cfg buildCfgFromProjectParams(boolean dryRun, int twinningStage) {
+
+    // Strategy (buds-per-meter)
+    int ppManagerOpt = modelOptions.budTargetMode;
+    int ppBudsPerM   = modelOptions.budNumberPerMeter;
+    int ppMain       = modelOptions.MgmtMainAxisOnly;
+    int ppOrder      = modelOptions.MgmtPlacementOrder;
+    int ppUpOrder    = modelOptions.MgmtUprightOrder;
+    int ppMaxNew     = modelOptions.MgmtMaxNewBudsAllow;
+
+    double ppMinBudSpacingM = 0.10;
+    int ppAllowSecondaryAdd = 1;
+    int ppSpurOrder = 4;
+    int ppSpurChildOrder = 5;
+    int ppMaxBudsPerSpur = 1;
+    boolean ppRemoveFromChildFirst = true;
+    boolean ppAddSpurUnitWhenAdding = true;
+    double ppSpurSpacingM = 0.10;
+    boolean ppEnableSpurBalancer = false;
+    try { ppMinBudSpacingM = modelOptions.minBudSpacingM; } catch(Throwable t){}
+    try { ppAllowSecondaryAdd = modelOptions.allowAddOnSecondaryAxes; } catch(Throwable t){}
+    try { ppSpurOrder = modelOptions.spurOrder; } catch(Throwable t){}
+    try { ppSpurChildOrder = modelOptions.spurChildOrder; } catch(Throwable t){}
+    try { ppMaxBudsPerSpur = modelOptions.maxBudsPerSpur; } catch(Throwable t){}
+    try { ppRemoveFromChildFirst = modelOptions.removeFromChildFirst; } catch(Throwable t){}
+    try { ppAddSpurUnitWhenAdding = modelOptions.addSpurUnitWhenAdding; } catch(Throwable t){}
+    try { ppSpurSpacingM = modelOptions.spurSpacingM; } catch(Throwable t){}
+    try { ppEnableSpurBalancer = modelOptions.enableSpurBalancer; } catch(Throwable t){}
+
+    // --- NEW: whole-tree bud target (mode 4) ---
+    int ppTotalBuds = 0;
+    try { ppTotalBuds = modelOptions.budNumberTargetPerTree; } catch(Throwable t){}
+
+    // --- NEW: grid config (mode 5) ---
+    int    ppNx   = 0, ppNz = 0;
+    double ppXmin = -1.5, ppXmax = 1.5;
+    double ppZmin = 0.0,  ppZmax = 4.5;
+    double[] ppGridBuds = null;
+    double[] ppUprightRegionBuds = null;
+
+    try { ppNx   = modelOptions.twinningNx;   } catch(Throwable t){}
+    try { ppNz   = modelOptions.twinningNz;   } catch(Throwable t){}
+    try { ppXmin = modelOptions.twinningXMin; } catch(Throwable t){}
+    try { ppXmax = modelOptions.twinningXMax; } catch(Throwable t){}
+    try { ppZmin = modelOptions.twinningZMin; } catch(Throwable t){}
+    try { ppZmax = modelOptions.twinningZMax; } catch(Throwable t){}
+    try { ppGridBuds = modelOptions.budNumberTargetsGrid; } catch(Throwable t){}
+    try { ppUprightRegionBuds = modelOptions.budNumberTargetsUprightRegion; } catch(Throwable t){}
+
+    // --- NEW: twinning DOYs + apex-potential knobs --------------------------
+    int ppTwDOY_T0 = 0, ppTwDOY_T1 = 0, ppTwDOY_T2 = 0;
+    boolean ppEnableApexT1 = false;
+    double  ppApexScaleT1  = 1.0;
+    double  ppApexMaxDiff  = 0.30;
+
+    try { ppTwDOY_T0     = modelOptions.twinningDOY_T0; } catch(Throwable t){}
+    try { ppTwDOY_T1     = modelOptions.twinningDOY_T1; } catch(Throwable t){}
+    try { ppTwDOY_T2     = modelOptions.twinningDOY_T2; } catch(Throwable t){}
+    try { ppEnableApexT1 = modelOptions.apexPotentialEnable_T1; } catch(Throwable t){}
+    try { ppApexScaleT1  = modelOptions.apexPotentialScale_T1; } catch(Throwable t){}
+    try { ppApexMaxDiff  = modelOptions.apexPotentialMaxDeviation_T1; } catch(Throwable t){}
+
+    // ---- DIRECT PP READS ----
+    double ppExpLA   = modelOptions.expectedLeafArea_prePrune;
+    double ppPostLA  = modelOptions.desiredLeafArea_postPrune;
+    double ppPrune   = modelOptions.leafPruningFraction;
+    int    ppFrExp   = modelOptions.expectedFruitNumber_prePrune;
+    int    ppCropLd  = modelOptions.desiredFruitNumber_postPrune;
+
+    double ppLeafA   = plantParameters.meanLeafArea_m2;
+    double ppGk      = plantParameters.GAMMA_SHAPE;
+    double ppGt      = plantParameters.GAMMA_SCALE;
+
+    int    ppStart   = plantParameters.ATTACH_START_NODE;
+    int    ppGap     = plantParameters.MIN_BRANCH_GAP;
+
+    double ppFbud    = plantParameters.FBUD_FLORAL;
+    int    ppFlowers = plantParameters.FLOWERS_PER_FLORAL;
+    double ppSetProb = plantParameters.FRUIT_SET_PROB;
+    int    ppFpb     = plantParameters.MAX_FRUITS_PER_BUD;
+    int    ppFpu     = plantParameters.MAX_FRUITS_PER_UPRIGHT;
+
+    double ppPush    = plantParameters.expectedPushFrac;
+
+    // ---- PP or DEF ----
+    double expectedPre_m2  = nz(ppExpLA, 0.0);
+    double desiredPost_m2  = nz(ppPostLA, DEF_TARGET_POSTPRUNE_M2);
+    double pruneCfg        = clamp01(nz(ppPrune, DEF_SUMMER_PRUNE_FRAC));
+
+    int expectedFruitNumber = (ppFrExp > 0) ? ppFrExp : nzi(ppCropLd, 0);
+
+    double meanLeafArea_m2 = nz(ppLeafA, DEF_MEAN_LEAF_AREA_M2);
+    double gShape          = nz(ppGk,   DEF_GAMMA_SHAPE);
+    double gScale          = nz(ppGt,   DEF_GAMMA_SCALE);
+
+    int startNodeMin   = Math.max(nzi(ppStart, DEF_START_NODE_MIN), DEF_START_NODE_MIN);
+    int minBranchGap   = Math.max(0, nzi(ppGap, DEF_MIN_BRANCH_GAP));
+
+    int mainAxisOnly       = (nzi(ppMain, 1) != 0) ? 1 : 0;
+    int placementOrderMin  = Math.max(1, nzi(ppOrder, 4));
+    int uprightOrder       = Math.max(1, nzi(ppUpOrder, DEF_UPRIGHT_ORDER));
+
+    double fBudFloral      = clamp01(nz(ppFbud, DEF_F_BUD_FLORAL));
+    int    flowersPerFloral= Math.max(0, nzi(ppFlowers, DEF_FLOWERS_PER_FLORAL));
+    double fruitSetProb    = clamp01(nz(ppSetProb, DEF_FRUIT_SET_PROB));
+    int    maxFruitsPerBud = Math.max(1, nzi(ppFpb, DEF_MAX_FRUITS_PER_BUD));
+    int    maxFruitsPerUpr = Math.max(1, nzi(ppFpu, DEF_MAX_FRUITS_PER_UPRIGHT));
+
+    double expectedPushFrac= nz(ppPush, DEF_EXPECTED_PUSH_FRAC);
+    int    maxNewBudsAllow = Math.max(0, nzi(ppMaxNew, DEF_MAX_NEW_BUDS_ALLOW));
+
+    // Accept all defined modes 0..8; otherwise fall back to default
+    int managerOpt;
+    switch (ppManagerOpt) {
+      case 0: case 1: case 2: case 3: case 4: case 5: case 6: case 8:
+        managerOpt = ppManagerOpt;
+        break;
+      default:
+        managerOpt = DEF_BUD_MANAGER_OPTION;
+        break;
+    }
+
+    int budsPerMeter = (ppBudsPerM > 0) ? ppBudsPerM : DEF_BUDS_PER_METER;
+    double minBudSpacingM = (ppMinBudSpacingM >= 0.0) ? ppMinBudSpacingM : 0.10;
+    int allowAddOnSecondaryAxes = (ppAllowSecondaryAdd != 0) ? 1 : 0;
+    int spurOrder = (ppSpurOrder > 0) ? ppSpurOrder : 4;
+    int spurChildOrder = (ppSpurChildOrder > 0) ? ppSpurChildOrder : 5;
+    int maxBudsPerSpur = (ppMaxBudsPerSpur >= 0) ? ppMaxBudsPerSpur : 1;
+    // Keep one-knob compatibility: if spur spacing is absent/invalid, use bud spacing.
+    double spurSpacingM = (ppSpurSpacingM >= 0.0) ? ppSpurSpacingM : minBudSpacingM;
+
+    // ---- Derive pruneEff if both LA targets provided ----
+    boolean haveExpected   = expectedPre_m2 > 0.0;
+    boolean havePost       = desiredPost_m2 > 0.0;
+    Double  derivedPrune   = null;
+
+    if (haveExpected && havePost) {
+      double frac = 1.0 - (desiredPost_m2 / Math.max(1e-9, expectedPre_m2));
+      derivedPrune = Double.valueOf(clamp(frac, 0.0, 0.95));
+    } else if (!haveExpected && havePost) {
+      expectedPre_m2 = desiredPost_m2 / Math.max(1e-9, (1.0 - pruneCfg));
+      haveExpected   = expectedPre_m2 > 0.0;
+    } else if (!havePost && haveExpected) {
+      desiredPost_m2 = expectedPre_m2 * (1.0 - pruneCfg);
+      havePost       = desiredPost_m2 > 0.0;
+    }
+    double pruneEff = (derivedPrune != null) ? derivedPrune.doubleValue() : pruneCfg;
+
+    // ---- Fruits per floral (expected) ----
+    double fruitsPerFloralExp = flowersPerFloral * fruitSetProb;
+    if (fruitsPerFloralExp <= 0.0) fruitsPerFloralExp = 1.0;
+
+    // ---- Banner ----
+    println("==========================================================");
+    println("[BudPlanner] PARAM SOURCES  (PP-only; DEF fallback)");
+    println("  expectedLeafArea_prePrune = " + round5(expectedPre_m2));
+    println("  desiredLeafArea_postPrune = " + round5(desiredPost_m2));
+    println("  summerPruneFrac (cfg/eff) = " + round5(pruneCfg) + " / " + round5(pruneEff));
+    println("  expectedFruitNumber       = " + expectedFruitNumber);
+    println("  meanLeafArea_m2           = " + round5(meanLeafArea_m2));
+    println("  GAMMA(k,θ)                = " + round5(gShape) + ", " + round5(gScale));
+    println("  Place(minRank,gap,order)  = " + startNodeMin + ", " + minBranchGap + ", " + placementOrderMin);
+    println("  Upright(order)            = " + uprightOrder);
+    println("  BudsAllow                 = " + maxNewBudsAllow);
+    println("  FloralFrac,Flowers,Set    = " + round5(fBudFloral) + ", " + flowersPerFloral + ", " + round5(fruitSetProb));
+    println("  Fruits/Bud cap, Upright   = " + maxFruitsPerBud + ", " + maxFruitsPerUpr);
+    println("  Strategy(option,buds/m)   = " + managerOpt + ", " + budsPerMeter);
+    println("  UprightRegionTargetsFlat  = " + ((ppUprightRegionBuds != null) ? String.valueOf(ppUprightRegionBuds.length) : "null"));
+    println("  MinBudSpacing(m)          = " + round5(minBudSpacingM));
+    println("  AddOnSecondaryAxes        = " + allowAddOnSecondaryAxes);
+    println("  SpurBalancer(enable)      = " + ppEnableSpurBalancer);
+    println("  SpurOrders(root,child)    = " + spurOrder + ", " + spurChildOrder);
+    println("  MaxBudsPerSpur            = " + maxBudsPerSpur);
+    println("  RemoveChildFirst          = " + ppRemoveFromChildFirst);
+    println("  AddSpurUnitWhenAdding     = " + ppAddSpurUnitWhenAdding);
+    println("  SpurSpacing(m)            = " + round5(spurSpacingM));
+    println("  expectedPushFrac          = " + round5(expectedPushFrac));
+    println("  dryRun                    = " + dryRun);
+    // --- NEW twinning/apex diag ---
+    println("  TwinningStage             = " + twinningStage
+         + " (DOY T0/T1/T2 = " + ppTwDOY_T0 + "/" + ppTwDOY_T1 + "/" + ppTwDOY_T2 + ")");
+    println("  ApexPotentialT1           = enable=" + ppEnableApexT1
+         + " scale=" + round5(ppApexScaleT1)
+         + " maxRelDiff=" + round5(ppApexMaxDiff));
+    println("==========================================================");
+
+    // ---- Build cfg ----
+    Cfg cfg = new Cfg();
+
+    cfg.expectedPrePruneLA_m2 = (expectedPre_m2 > 0.0) ? expectedPre_m2 : 0.0;
+    cfg.targetPostPrune_m2    = desiredPost_m2;
+    cfg.summerPruneFrac_cfg   = pruneCfg;
+    cfg.summerPruneFrac_eff   = pruneEff;
+
+    cfg.meanLeafArea_m2       = meanLeafArea_m2;
+    cfg.leavesPerNode         = DEF_LEAVES_PER_NODE;
+    cfg.expectedPushFrac      = expectedPushFrac;
+
+    cfg.gammaShape            = gShape;
+    cfg.gammaScale            = gScale;
+    cfg.nodesMode             = NODES_MODE_MEAN;
+
+    cfg.startNodeMin          = startNodeMin;
+    cfg.minBranchGap          = minBranchGap;
+
+    cfg.mainAxisOnly          = mainAxisOnly;
+    cfg.placementOrderMin     = placementOrderMin;
+    cfg.uprightOrder          = uprightOrder;
+
+    cfg.expectedFruitNumber   = Math.max(0, expectedFruitNumber);
+    cfg.fBudFloral            = fBudFloral;
+    cfg.flowersPerFloral      = flowersPerFloral;
+    cfg.fruitSetProb          = fruitSetProb;
+    cfg.fruitsPerFloralExp    = fruitsPerFloralExp;
+    cfg.maxFruitsPerBud       = maxFruitsPerBud;
+    cfg.maxFruitsPerUpright   = maxFruitsPerUpr;
+
+    cfg.maxNewBudsAllow       = maxNewBudsAllow;
+    cfg.dryRun                = dryRun;
+    cfg.budDensityScale       = 1.0;
+
+    cfg.budTargetMode        = managerOpt;
+    cfg.budNumberPerMeter     = budsPerMeter;
+    cfg.minBudSpacingM        = minBudSpacingM;
+    cfg.allowAddOnSecondaryAxes = allowAddOnSecondaryAxes;
+    cfg.spurOrder             = spurOrder;
+    cfg.spurChildOrder        = spurChildOrder;
+    cfg.maxBudsPerSpur        = maxBudsPerSpur;
+    cfg.removeFromChildFirst  = ppRemoveFromChildFirst;
+    cfg.addSpurUnitWhenAdding = ppAddSpurUnitWhenAdding;
+    cfg.spurSpacingM          = spurSpacingM;
+    cfg.enableSpurBalancer    = ppEnableSpurBalancer;
+
+    // NEW: whole-tree target (mode 4)
+    cfg.totalBudTargetPerTree = Math.max(0, ppTotalBuds);
+
+    // NEW: grid config (mode 5)
+    cfg.gridNx             = ppNx;
+    cfg.gridNz             = ppNz;
+    cfg.gridXmin           = ppXmin;
+    cfg.gridXmax           = ppXmax;
+    cfg.gridZmin           = ppZmin;
+    cfg.gridZmax           = ppZmax;
+    cfg.gridBudTargetsFlat = ppGridBuds;
+    cfg.uprightRegionBudTargetsFlat = ppUprightRegionBuds;
+
+    // NEW: twinning / apex-potential on cfg
+    cfg.twinningStage          = twinningStage;
+    cfg.twinningDOY_T0         = ppTwDOY_T0;
+    cfg.twinningDOY_T1         = ppTwDOY_T1;
+    cfg.twinningDOY_T2         = ppTwDOY_T2;
+    cfg.enableApexPotentialT1  = ppEnableApexT1;
+    cfg.apexPotentialScaleT1   = (ppApexScaleT1 > 0.0) ? ppApexScaleT1 : 1.0;
+    cfg.apexPotentialMaxRelDiff= (ppApexMaxDiff > 0.0)  ? ppApexMaxDiff : 0.30;
+
+    // quick LA debug
+    double nodesMean = cfg.gammaShape * cfg.gammaScale;
+    double perBudLA  = nodesMean * cfg.leavesPerNode * cfg.meanLeafArea_m2 * cfg.expectedPushFrac;
+    println("[BudPlanner] DEBUG: E[nodes]=" + round5(nodesMean)
+        + "  perBudLA=" + round5(perBudLA) + " m^2");
+
+    return cfg;
+  }
+
+  // ----------------------------- Small helpers ------------------------------
+
+  static double nz(double v, double def) {
+    return (v > 0.0) ? v : def;
+  }
+
+  static int nzi(int v, int def) {
+    return (v > 0) ? v : def;
+  }
+
+  static double clamp01(double x) {
+    if (x < 0.0) return 0.0;
+    if (x > 1.0) return 1.0;
+    return x;
+  }
+
+  static double clamp(double x, double lo, double hi) {
+    if (x < lo) return lo;
+    if (x > hi) return hi;
+    return x;
+  }
+
+  static double round3(double v) {
+    return Math.round(v * 1000.0) / 1000.0;
+  }
+
+  static double round5(double v) {
+    return Math.round(v * 100000.0) / 100000.0;
+  }
+
+  static int abs(int x) {
+    return (x < 0) ? -x : x;
+  }
+
+  /**
+   * budTargetMode:
+   * 0 based on budNumberPerMeter, only remove (no add)
+   *   with priority on dense zones, close-neighbor buds, and non-terminal sites
+   * 1 based on budNumberPerMeter, local remove/add rebalance in sparse/crowded zones (fast)
+   * 2 based on expected leaf area pre-prune; respect the RAW fruit floor (pre-prune)
+   *   (no density step)
+   * 3 constrained budNumberPerMeter first (remove-only), then LA & fruit
+   * 4 whole-tree total bud target per tree (remove+add on tree)
+   * 5 grid-based bud targets (remove+add per cell, fruit floor protected)
+   * 6 legacy density+spacing mode (includes expensive per-bud spacing cleanup)
+   * 8 per-upright 3-region density mode (bottom/middle/top; remove+add on-region)
+   */
+  public static String describebudPlannerMode(int opt) {
+    switch (opt) {
+      case 0:
+        return "density-only prioritized remove (dense/close/non-terminal)";
+      case 1:
+        return "density remove+add local rebalance (fast)";
+      case 2:
+        return "leaf-area target (capped by RAW fruit; no density step)";
+      case 3:
+        return "density remove-only prepass, then LA & fruit";
+      case 4:
+        return "whole-tree total bud target (remove+add on tree)";
+      case 5:
+        return "grid-based bud targets (remove+add per cell, fruit floor protected)";
+      case 6:
+        return "legacy density+spacing (slow; per-bud spacing cleanup)";
+      case 8:
+        return "upright 3-region density (bottom/middle/top; remove+add per region)";
+      default:
+        return "unknown";
+    }
+  }
+}

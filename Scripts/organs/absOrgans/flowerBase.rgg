@@ -1,0 +1,113 @@
+import org.apache.commons.math3.distribution.*;
+import static absOrgan.*;
+import static flowerApple.*;
+import static budBase.*;
+import static globalParameters.*;
+import static extraTools.*;
+import interfaces.*;
+
+public class FlowerServiceFactory {
+	public static Flower getService(String species) {
+
+		Flower service = null;
+
+		// Special scenario takes priority over species when choosing the correct updates service.
+		service = getServiceFromSpecies(species);
+		
+		return service;
+	}
+
+
+	private static Flower getServiceFromSpecies(String species) {
+		if (species.equals("apple")) 
+		{
+			if (printFlag) { println("flower service -- apple"); }
+			return new FlowerApple();
+		}
+		
+	}
+}
+
+public abstract class Flower extends GrowingOrgan implements IFlower,Configurable {
+	int color; 
+	float rH = 0;
+	float rL = 0;
+	float ageDAtFlowering; //record the ageD at flowering
+	//@parameter
+	int flowerNumberPerCluster; //for grapevine, when we do not simulate individual flower, we need this to account for total biomass
+	float floweringTD = 5; // for apple mixed buds: thermal time from bud burst / apex creation to bloom; for grape from budburst
+	float fruitingTD = 10; //for apple thermal time from full bloom to 30 days after full bloom / for grape from flowering to fruitset
+	double fruitingDaysAfterBloom = 30.0; // d, calendar-day threshold for apple Flower to FruitService conversion
+	public boolean mixedBudAppearanceDriven = false;
+	public long sourceApexID = 0L;
+	public int sourceRosetteTarget = 0;
+	public int sourceRosetteAppearanceRank = 0;
+	public double sourceApexAppearanceAge = Double.NaN;
+	public double sourceApexAppearanceAgeD = Double.NaN;
+	public double sourceApexAppearanceAgeGdd = Double.NaN;
+	/** True if bloom timing is controlled by source apex bud-burst age rather than flower-local age. */
+	public boolean bloomControlledByApexBudBurst = false;
+	/** Source apex age at bud burst, same unit as source apex age. */
+	public double sourceApexBirthAge = Double.NaN;
+	/** Source apex day age at bud burst, d. */
+	public double sourceApexBirthAgeD = Double.NaN;
+	/** Source apex GDD at bud burst, degree-days. */
+	public double sourceApexBirthAgeGdd = Double.NaN;
+	/** Source apex thermal time since bud burst at flower appearance, same unit as source apex age. */
+	public double sourceApexThermalSinceBudBurstAtAppearance = Double.NaN;
+	/** Bloom threshold from bud burst, same unit as source apex age. */
+	public double floweringTDFromBudBurst = 20.0;
+	/** Current source-apex thermal time since bud burst copied into the flower each step. */
+	public double sourceApexThermalSinceBudBurst = Double.NaN;
+	/** Current source-apex days since bud burst copied into the flower each step, d. */
+	public double sourceApexDaysSinceBudBurst = Double.NaN;
+	public double mixedBudBloomDelayAfterAppearance = Double.NaN;
+	public boolean mixedBudBloomDebugReporter = false;
+	
+	boolean hasFlowered = false;
+	float meanfruitletWeight = 450;  //mg, for apple 3000 mg, assume 15% dry weight. fruitlet weight at 30 days after flowering (change to thermal time afterwards)
+	float flowerWeight = 56;  //mg, for apple based on Palmer and Johnson, 2020
+	float CVFruitWeight = 0.1;
+	NormalDistribution fruit_nor;
+	/** Potential carbon demand for flower growth (mg C h-1). */
+	double carbonDemandPotential = 0;
+	/** Actual phloem-allocated carbon for flower growth (mg C h-1). */
+	double carbonAllocatedActual = 0;
+	/** Flower self-assimilated carbon used for growth (mg C h-1). */
+	double flowerSelfAssimC = 0;
+	/** Consecutive stress hours under low carbon satisfaction (h). */
+	int carbonStressHours = 0;
+	
+	double lastCarbonDropCheckAgeD = -9999.0;
+	int dropDay = -9999;
+	/** Carbon-limited drop flag; dropped flowers are inactive sinks. */
+	boolean dropped = false;
+	/**
+	 * Initiates the flower with parameters from an Apex.
+	 *
+	 * @param object containing apex information.
+	 */
+	public void initiate(ApexService a,int color, float rH, float rL) {};
+	
+	public boolean shouldFlower();	
+	public boolean shouldProduceFruit();
+	public void loadParameters() {};
+}
+
+public module FlowerCreator {
+    private String species;
+
+    public FlowerCreator(String species) {
+        this.species = species;
+    }
+
+    public Flower createFlower() {
+        return FlowerServiceFactory.getService(this.species);
+    }
+}
+
+// Usage
+/* FlowerCreator appleFlowerCreator = new FlowerCreator("apple");
+Flower fl1 = appleFlowerCreator.createFlower();
+Flower fl2 = appleFlowerCreator.createFlower();
+ */

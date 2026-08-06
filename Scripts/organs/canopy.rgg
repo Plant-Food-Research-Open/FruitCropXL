@@ -1,0 +1,200 @@
+import java.io.*;
+import java.lang.Math.*;
+import de.grogra.gpuflux.imp3d.spectral.IrregularSpectralCurve;
+import de.grogra.gpuflux.scene.experiment.Measurement;
+import de.grogra.xl.util.IntList; // for module Leaf
+import de.grogra.xl.util.FloatList; // for module Leaf
+import org.apache.commons.math3.geometry.euclidean.threed.Vector3D;
+
+import de.grogra.ray.physics.Spectrum;
+import de.grogra.ray.physics.Spectrum3d;
+import static globalParameters.*;
+import static modelOptions.*;
+import static initialConditions.*;
+import static initiationBase.*;
+import static leafShape.*;
+
+/*
+
+Canopy is a placeholder for the different rules that define position and orientation of the leaves inside the canopy
+
+*/
+module Canopy extends M {
+
+	// Geometric properties of the canopy
+	double length;
+	double width;
+	double height;
+	double depth;
+	double lengthBorder;
+	double widthBorder;
+
+	// Parameters for generation of leaves
+	double radius;
+	double[] angleDistribution;
+
+	
+	// updat canopy height
+	void updatHeight(){
+	
+	height = 2; 
+	
+	}
+	
+	// Constructor
+	public Canopy(double length_, double width_, double height_,double depth_, double fractionBorder_, double[] angleDistribution_, double radius_) {
+		length = length_;
+		width = width_;
+		height = height_;
+		depth = depth_;
+		lengthBorder = length*fractionBorder_;
+		widthBorder = width*fractionBorder_;
+		radius = radius_;
+		angleDistribution = angleDistribution_;
+	}
+	//assume the location is the central point of the translation
+	// Rule to generate the X position of a new leaf
+	public double generateX() {
+		 return random(0, length)-0.5*length;
+	}
+
+	// Rule to generate the Y position of a new leaf
+	public double generateY() {
+		 return random(0, width)-0.5*width;
+	}
+
+	// Rule to generate the Z position of a new leaf
+	public double generateZ() {
+		//int index = extraTools.random_int(1, heighta_tree.length);
+		//if (printFlag) { println("leafheight " + heighta_tree[index]); }
+		return(height);
+		 //return random(height-0.5*depth, height+0.5*depth);
+	}
+
+	// Rule to generate the declination angle (i.e. angle with the global z axis) of a new leaf
+	public double generateDeclination() {
+		int index = extraTools.random_int(1, angleDistribution.length);
+		//if (printFlag) { println("leafAngle " + leafAngle[index]); }
+		return(90 - angleDistribution[index]); //the angle from the dataset is the angle between the normal leaf vector and z axis
+		//if(angleDistribution == "spherical") {
+		// return Math.asin(random(0,1))*90/Math.PI;
+		//}
+	}
+
+	// Rule to generate the azimuth angle (i.e. angle relative to North) of a new leaf
+	public double generateAzimuth() {
+		 return random(0,360);
+	}
+
+	// Rule to generate the radius of a new leaf,
+	public double generateRadius() {
+		 return radius;
+	}
+
+	// Rule to check if a leaf defined by its Cartesian coordinates is in the border of the canopy
+	public boolean isBorder(double x, double y, double z) {
+		if( (x < lengthBorder) | (x > (length - lengthBorder)) | (y < widthBorder) | (y > (width - widthBorder))) {
+			return true;
+		} else {
+			return false;
+		}
+	}
+
+}
+
+public class FieldRandomCanopy {
+	double length;
+	double width;
+	double zmin;
+	double depth;
+	double fractionBorder;
+	double[] angleDistribution;
+	double meanLeafLength;
+
+	public FieldRandomCanopy(double length_,
+							 double width_,
+							 double zmin_,
+							 double depth_,
+							 double fractionBorder_,
+							 double[] angleDistribution_,
+							 double meanLeafLength_) {
+		length = length_;
+		width = width_;
+		zmin = zmin_;
+		depth = depth_;
+		fractionBorder = fractionBorder_;
+		angleDistribution = angleDistribution_;
+		meanLeafLength = meanLeafLength_;
+	}
+
+	public double generateX() {
+		return random(0, length) - 0.5 * length;
+	}
+
+	public double generateY() {
+		return random(0, width) - 0.5 * width;
+	}
+
+	public double generateZ() {
+		if (fieldCanopy_randomizeZWithinLayer) {
+			return random(zmin, zmin + depth);
+		}
+		return zmin;
+	}
+
+	public double generateDeclination() {
+		if (angleDistribution == null || angleDistribution.length == 0) return 45.0;
+		int index = extraTools.random_int(0, angleDistribution.length);
+		if (index < 0) index = 0;
+		if (index >= angleDistribution.length) index = angleDistribution.length - 1;
+		return 90.0 - angleDistribution[index];
+	}
+
+	public double generateAzimuth() {
+		return random(0, 360);
+	}
+
+	public double generateLeafLength() {
+		return random(0.5 * meanLeafLength, 1.5 * meanLeafLength);
+	}
+
+	public boolean isBorder(double x, double y) {
+		double xLimit = 0.5 * length - length * fractionBorder;
+		double yLimit = 0.5 * width - width * fractionBorder;
+		return Math.abs(x) > xLimit || Math.abs(y) > yLimit;
+	}
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,3788 @@
+/********************************************************************************
+	IMPORTS
+********************************************************************************/
+
+import java.io.*;
+import java.util.Set;
+import de.grogra.vecmath.Math2;
+import de.grogra.xl.lang.*;
+// File Reader
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileReader;
+import java.io.IOException;
+import java.util.Properties;
+import java.util.List;                            
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Map;
+import org.apache.commons.math3.geometry.euclidean.threed.Vector3D;
+import static absOrgan.*;
+import static leaf.*;
+import static shoot.*;
+import static plantBase.*;
+import static main.*;
+import static globalParameters.*;
+import static rootSystem.*;
+import static fruitBase.*;
+import static fineRoot.*;
+import static structuralRoot.*;
+import static budBase.*;
+import static shootBase.*;
+import static modelOptions.*;
+import static initialConditions.*;
+import static extraTools.*;
+//place to change when adding new data formate, add to the xnode row first
+import static aggregatedRoot.*;
+
+/**
+ * Workflow for architecture Reader
+ *
+ * The XEG Reader reconstructs plant architecture using hierarchical input data.
+ * It follows a modular pipeline to process raw data into a structured architecture model.
+ * 
+ * ### Steps and Related Functions:
+ * 
+ * #### 1. **Data Initialization**
+ *    - This step involves reading input files, mapping headers, and preparing the data structure for processing.
+ *    - Key Functions:
+ *        - `readFileFromPath(String filename)`: Reads raw data from input files into an array of strings.
+ *        - `setHeaders(String headers)`: Maps column headers in the input data to internal identifiers (e.g., `plant_id`, `organ_id`).
+ *        - `overrideHeaders()`: Overrides default headers if necessary for specific data formats.
+ *        - `createRow(Map headerMap, String row, String sep)`: Converts raw data rows into structured row objects.
+ *
+ * #### 2. **Row and Node Conversion**
+ *    - Converts each row of data into a `RowBase` object and then maps it to an `XNode`, which represents a single node in the plant structure.
+ *    - Key Functions:
+ *        - `RowBase.toRow()`: Converts raw row data into a structured `RowBase` object.
+ *        - `RowBase.get(String fieldName)`: Retrieves a field value from a row by its name.
+ *        - `RowBase.toXNode()`: Maps the row to a corresponding node (`XNode`) with attributes like coordinates, organ type, and parent-child relationships.
+ *
+ * #### 3. **Node Mapping**
+ *    - Organizes nodes into a hierarchical structure, allowing traversal and relationship management.
+ *    - Key Classes:
+ *        - `NodeMap`: A map that stores nodes (`XNode`) with their unique IDs.
+ *    - Key Functions:
+ *        - `NodeMap.addNode(XNode node)`: Adds a node to the map.
+ *        - `NodeMap.getNode(Object id)`: Retrieves a node by its unique identifier.
+ *        - `NodeMap.getKeySet()`: Returns all node IDs in the map.
+  *
+ * #### 4. **Data Processing**
+ *    - Reads and processes the input rows to build a hierarchical node map.
+ *    - Key Functions:
+ *        - `readData(String filename)`: Reads the input data and processes each row into structured objects.
+ *        - `initNodeMapWithID()`: Assigns unique IDs to nodes and initializes the node map.
+ *        - `assignApexNodes(int plantID)`: Identifies apex nodes, which are critical for dynamic growth simulations.
+ *        - `getOrganList(int plantID, int organID)`: Retrieves or creates a list of organs for a specific plant and organ ID.
+ *
+ * #### 5. **Architecture Initialization**
+ *    - Constructs the plant architecture by linking nodes into organs and assembling them hierarchically.
+ *    - Key Classes:
+ *        - `OrganFactoryBase`: Abstract factory for creating plant organs.
+ *        - `RootFactory`: Specialized factory for creating root structures.
+ *    - Key Functions:
+ *        - `OrganFactoryBase.create(XNode N)`: Creates a plant organ (`Organ`) from a node.
+ *        - `OrganFactoryBase.createNode(N)`: Creates a generic node (`OrganNode`).
+ *        - `initialiseArchitecture(Organ baseOrgan, IOrganFactory factory, NodeMap nm)`: Builds the full architecture starting from a base organ and a factory.
+ *        - `architectureRunner(IOrganFactory factory, NodeMap nm, int id, Node a, Organ baseOrgan)`: Recursively traverses the node map to construct the hierarchical architecture.
+ *
+ * #### 6. **Execution**
+ *    - Executes the full reconstruction pipeline, from reading data to building the architecture.
+ *    - Key Functions:
+ *        - `loadNodeMap(XEGDataReader reader, String fileName)`: Orchestrates the process of reading data and initializing the node map.
+ *        - `run()`: Main entry point for executing the XEG Reader workflow.
+ *        - `initiate()`: Triggers the workflow from data initialization to architecture construction.
+ * 
+ * ### Summary:
+ * This workflow provides a modular, extensible pipeline for reconstructing complex plant architectures from hierarchical input data. 
+ * By utilizing structured readers, row objects, and node maps, the system ensures flexibility and adaptability to various data formats and use cases.
+ *
+ * ### Example Usage:
+ * ```java
+ * String filePath = "path_to_data.csv";
+ * XEGDataReader reader = new XEGDataReader("input_directory", new XNodeRow());
+ * loadNodeMap(reader, filePath);
+ * ```
+ */
+
+ 
+/********************************************************************************
+	GLOBALS
+********************************************************************************/
+/** Factory for creating XNode objects. */
+public static IRowFactory xNodeFactory = new XNodeRow();
+
+/** Translation offsets for positioning the first trunk. */
+global double tx, ty, tz;
+
+/** Indicates whether the shoot initialization has been performed. */
+public static boolean shootsInitiated; 
+
+/** Post-read correction: extend first trunk if internode world-Z goes below ground. */
+global boolean fixNegativeZByExtendingTrunk = true;
+/** Numerical tolerance for negative Z check. */
+global double fixNegativeZ_eps = 1e-6;
+/** Debug prints for post-read correction. */
+global boolean fixNegativeZ_debug = true;
+/** Trace whether creation is using absolute/world placement during reconstruction. */
+global boolean fixNegativeZ_traceAbsolutePlacement = true;
+/** Placement fallback: clamp negative lateral displacement to avoid below-ground attachment. */
+global boolean clampNegativeLateralDisplacement = true;
+/** Strengthen first-trunk extension: delta = abs(minZ) * factor. */
+global double fixNegativeZ_trunkLengthFactor = 1.5;
+/** Final cleanup: skip internodes whose source z is below ground. */
+global boolean removeNegativeZInternodes = true;
+/** Robust grounding: shift non-root NodeMap z before build and during post-fix if still negative. */
+global boolean fixNegativeZ_shiftNodeMapZ = true;
+/** Optional world-lift fallback chain (anchor/base/non-root). */
+global boolean fixNegativeZ_enableTransformFallback = true;
+/** Optional last-resort non-root organ bulk-lift; disabled by default because it can destabilize transforms. */
+global boolean fixNegativeZ_enableNonRootOrganLiftFallback = false;
+/** Number of derive passes after trunk/global lift so transforms can settle. */
+global int fixNegativeZ_settleDerivePasses = 2;
+/** Deferred contexts for running post-read negative-Z fix after global init derive. */
+global ArrayList deferredNegativeZFixContexts = new ArrayList();
+/** Deferred contexts pending stage-2 fallback/prune check. */
+global ArrayList deferredNegativeZFixStage2Contexts = new ArrayList();
+
+
+// --- DEBUG counters ---
+static int dbgLeafBodyCreated = 0;
+static int dbgRosetteLeafBodyCreated = 0;
+static int dbgLeafStemCreated = 0;
+static int dbgLeafEndNodesSeen = 0;
+
+
+/**
+ * Record creation for a node id and warn if the same id is created twice.
+ */
+static void dbgRecordCreate(XNode n, String tag) {
+    if (n == null) return;
+    Integer key = Integer.valueOf(n.id);
+    Object prev = dbgCreatedById.get(key);
+    if (prev != null) {
+        println("[DUP_CREATE] id=" + n.id + " prev=" + prev + " now=" + tag + " organType=" + n.organType + " pid=" + n.pid);
+    } else {
+        dbgCreatedById.put(key, tag);
+    }
+}
+
+
+/********************************************* 
+				DATA READER
+************************************************/
+
+/** Interface for organ factories used to create plant organs from nodes. */
+interface IOrganFactory {
+
+    /**
+     * Creates an organ from a given XNode.
+     * 
+     * @param N The XNode representing the organ.
+     * @return A newly created organ.
+     */
+    Organ create(XNode N);
+
+    /**
+     * Creates a new organ node based on the provided XNode.
+     * 
+     * @param N The XNode used to initialize the organ node.
+     * @return A new organ node.
+     */
+    Organ createNode(XNode N);
+}
+
+/**
+ * Base class for organ factories, implementing common creation behavior.
+ * Can be extended by specific factories such as RootFactory or ShootFactory.
+ */
+abstract class OrganFactoryBase implements IOrganFactory {
+    
+    /** Plant identifier containing unique plant metadata. */
+    public PlantIdentifier pi;
+
+    /**
+     * Creates a generic organ node when no specific organ type is provided.
+     *
+     * @param N The XNode from which to create the organ node.
+     * @return A generic OrganNode instance.
+     */
+    public Organ createNode(XNode N) {
+        return new OrganNode();
+    }
+}
+
+/**
+ * Module representing a generic plant organ node.
+ * This is the base node for shoot and root meristems.
+ */
+module OrganNode() extends Organ {
+    {
+        // Default length initialization
+        this.length = 1e-10;
+    }
+}
+
+/**
+ * Module representing a shoot meristem, derived from OrganNode.
+ * Contains shoot-specific attributes such as breakout status and an associated XNode.
+ */
+module ShootMeristem extends OrganNode {
+
+    /** The associated XNode representing shoot-specific data. */
+    XNode N;
+
+    /** Indicates whether the shoot has broken out of dormancy. */
+    boolean hasBreakout = false;
+
+    /**
+     * Constructor initializing the ShootMeristem with an associated XNode.
+     *
+     * @param N The XNode containing shoot-specific data.
+     */
+    public ShootMeristem(XNode N) {
+        this.N = N;
+    }
+}
+
+/** Does this shoot-code string correspond to a vegetative shoot? */
+static boolean isVegetativeShootCode(String code) {
+    if (code == null) return false;
+    String norm  = code.trim();
+    String upper = norm.toUpperCase();
+
+    // 1) Strong patterns first
+    if (upper.contains("B_V")) return true;   // vegetative bud/shoot
+    if (upper.contains("F") || upper.contains("B_F")) return false;
+
+    // 2) Look at tokens after splitting
+    String[] splitValues = norm.split("[_\\.]");
+    if (splitValues.length > 2 && splitValues[2] != null) {
+        String tok = splitValues[2].toUpperCase();  // e.g. "V#1"
+        if (tok.contains("V")) return true;
+        if (tok.contains("F")) return false;
+    }
+
+
+    return false; // unknown => assume non-vegetative in this helper
+}
+
+
+/**
+ * Module representing a root meristem, derived from OrganNode.
+ * Specifically used for aggregated root data processing.
+ */
+module RootMeristem extends OrganNode {
+	//for the aggregated root node   
+	XRootNode N;
+    boolean hasBreakout = false;
+    
+	 public RootMeristem(XNode node) {
+			if (node instanceof XRootNode) {
+				this.N = (XRootNode) node;
+			} else {
+				// Handle the case where node is not an XRootNode
+				// For example, leave N as null or throw an exception
+				this.N = null; // or do nothing
+			}
+			hasBreakout = false;
+		}
+}
+
+
+/**
+	 * Tree factory for creating different organ type based on order levels
+	 * For order larger than four, there were different organ types corresponding to the same order
+	 */	
+class TreeFactory extends OrganFactoryBase { 
+	
+	private static double sanitizeAxisDiameter(double diameter) {
+		// ArchReader input may contain zero/near-zero axis diameters (legacy reconstruction artifacts).
+		// Keep a biologically plausible minimum to avoid near-zero biomass and unstable first-step C pools.
+		double minAxisDiameter = 2e-3; // m
+		if (Double.isNaN(diameter) || Double.isInfinite(diameter) || diameter < minAxisDiameter) {
+			return minAxisDiameter;
+		}
+		return diameter;
+	}
+	
+	
+	public Organ create(XNode N) {
+				 
+		/* Other columns can be accessed from the row object like this: */ 
+			 if(N.organType.contains("Trunk")) {
+			 	 	N.diameter = sanitizeAxisDiameter(N.diameter);
+			 	 	Trunk o = new Trunk();
+			 	 	o.initiate_pi(pi, N.length, N.diameter).fromXNode(N);
+					return o;
+			 }
+			  else if(N.organType.contains("Cordon") | N.organType.contains("Cane") | N.organType.contains("Arm")) {
+			 	 	N.diameter = sanitizeAxisDiameter(N.diameter);
+			 	 	Cordon o = new Cordon();
+			 	 	o.initiate_pi(pi, N.length, N.diameter).fromXNode(N);
+			 	 	//if (printFlag) { println("this. ageD: " + o.ageD); }
+					return o;
+			 }
+			 else if(N.organType.contains("Upright")|N.organType.contains("OldShoot")|
+			 	 	 N.organType.contains("oldShoot") | 
+			 		 N.organType.contains("Spur") | N.organType.contains("Dropper")) {
+			 	 	N.diameter = sanitizeAxisDiameter(N.diameter);
+			 	 	Cordon o = new Cordon();
+					o.initiate_pi(pi, N.length, N.diameter).fromXNode(N);
+					return o; 
+			 }
+		 else if(isBudEndNode(N)) {
+			  	// Pure bud endpoint: keep available for geometry only, not as a second physiological bud.
+			  	return new OrganNode();
+	   }
+		 else if(N.organType.contains("Bud")) {
+				BudService o = new BudCreator(species).createBud();
+				//if (printFlag) { println("bud " + N.organType); }
+				o.initiate_pi(pi, N.organType).fromXNode(N);
+/* 				o.xin = N.start.x;
+				o.yin = N.start.y;
+				o.zin = N.start.z; */
+				//println("N.start.x " + N.start.x);
+				return o;
+				}
+			else if(N.organType.contains("AnnualShoot") | N.organType.equals("Shoot")) {
+					Internode o = new Internode();
+					N.diameter = sanitizeAxisDiameter(N.diameter);
+					o.initiate_pi(pi, N.length, N.diameter).fromXNode(N);
+					if(isVegetativeShootCode(N.organType)) {
+						o.shootType = "_V";
+					
+				} else {
+					o.shootType = "_F";
+				} 
+				
+				return o;
+				}
+		else if(N.organType.contains("LeafSTEM") | N.organType.contains("RosetteLeafSTEM") ) {
+				 dbgLeafStemCreated++;
+				 dbgRecordCreate(N, "LeafSTEM");
+				Petiole o = new Petiole();
+				//if (printFlag) { println("petiole.length" + N.length); }
+				o.initiate_pi(pi, N.length, N.diameter).fromXNode(N);
+				return o;
+				}
+		else if(N.organType.contains("LeafBODY") | N.organType.contains("RosetteLeafBODY")) {
+				 dbgLeafBodyCreated++;
+				 dbgRecordCreate(N, "LeafBODY");
+				Leaf o = new Leaf();
+				o.initiate_pi(pi, N.length, N.diameter).fromXNode(N);
+				//if(N.organType.contains("Rosette")) if (printFlag) { println("RosetteLeafBODY: length: " + N.length); }
+				return o;
+				}
+
+		else if(N.organType.contains("FruitSTEM")) {
+				Petiole o = new Petiole();
+				o.initiate_pi(pi, N.length, N.diameter).fromXNode(N);
+				
+				return o;
+				}
+		else if(N.organType.contains("FruitBODY")) {
+				if(main.FRUIT_CREATOR.usesVirtualFruitService()) {
+					FruitService o = main.FRUIT_CREATOR.createFruit(FruitService.originalParametersFactory, FruitService.DELTA);
+					o.initiate_pi(pi, N.length, N.diameter).fromXNode(N);
+					//println("fruit ID:" + o.ID + " " + N.id);
+					
+					return o;
+				} else {
+					FruitService o = main.FRUIT_CREATOR.createFruit();
+					o.initiate_pi(pi, N.length, N.diameter).fromXNode(N);
+					return o;
+				}
+		}
+		else if (N.organType != null &&
+				(N.organType.indexOf("LeafEND") >= 0
+			  	|| N.organType.indexOf("RosetteLeafEND") >= 0
+			  	|| N.organType.indexOf("FruitEND") >= 0)) {
+			  		dbgLeafEndNodesSeen++;
+			  	// Pure endpoint: do not create a physiological organ; avoid falling into default Internode.
+			  	return new OrganNode();
+	   }
+	   else {
+				return new OrganNode();
+				}
+		}
+	public Organ createNode(XNode N) {
+		return new ShootMeristem(N);
+	}
+
+	public TreeFactory(RootBase rb) {
+		this.pi = rb.pi;
+	}
+}
+
+
+class RootFactory extends OrganFactoryBase { 
+	public Organ create(XNode N) {
+		String ot = (N == null || N.organType == null) ? "" : N.organType.toLowerCase();
+		
+		/* Other columns can be accessed from the row object like this: */ 
+		  if(ot.indexOf("fineroot") >= 0) {
+				FineRoot o = new FineRoot();
+				o.initiate_pi(pi, N.length, N.diameter).fromXNode(N);
+				return o;
+			} 
+		 else if(ot.indexOf("structuralroot") >= 0) {
+		 	    //if (printFlag) { println(pi.plantNumber + "hi" + " N.length " + N.length); }
+		 	 	StructuralRoot o = new StructuralRoot();
+		 	 	
+		 	 	o.initiate_pi(pi, N.length, N.diameter).fromXNode(N);
+				return o;
+				}
+		 else if(ot.indexOf("grid") >= 0) {
+		 	//if (printFlag) { println(pi.plantNumber + "hi" + " N.length " + N.length); }
+				RootMeristem o = new RootMeristem(N);		 		
+				o.hasBreakout = true;
+				o.pi = this.pi;
+				
+				return o; 
+		 	}				
+		 else {
+				StructuralRoot o = new StructuralRoot();
+		 	 	o.initiate_pi(pi, N.length, N.diameter).fromXNode(N);
+				return o;
+				}
+		}
+	
+	public Organ createNode(XNode N) {
+		return new RootMeristem(N); 	 
+	}
+
+	public RootFactory(RootBase rb) {
+		this.pi = rb.pi;
+	}
+}
+
+
+
+
+/* ##################################### Process data from plant reconstruction files #########################################*/
+
+
+interface IRowFactory {
+	RowBase createRow(Map headerMap, String row, String sep);
+}
+
+/**
+ * Parent module for modules that read, process and store digitalized lidar data
+ * name compatible with Ella's previous code on data reconstruction
+ */	
+abstract module ReconstructionDataReader implements IRowFactory
+{
+	
+	private String filename;
+	protected String pathInput;
+	protected String sep = ",";
+	protected Map headerMap = new HashMap();
+	protected Map rowMap = new HashMap();
+	protected IRowFactory rowFactory;
+
+	// Return a Vector3D constructed by parsing the coordinates in the given string
+	private static Vector3D getCoordVector(String coordString)
+	{
+		String[] splitString = coordString.split(" ");
+		double[] coordArray = new double[splitString.length];
+			
+		for (int i = 0; i < coordArray.length; i++) {
+			coordArray[i] = Double.parseDouble(splitString[i]);
+		}
+			
+		Vector3D coordVector = new Vector3D(coordArray);
+		return coordVector;
+	}
+ 
+	// Open and read the parameter file into an array of strings
+	protected static String[] readFile(String filename) throws IOException 
+	{
+		String path = PATH_INPUT + filename;
+		File file = new File(path);
+		StringBuffer sb = new StringBuffer();
+		BufferedReader inFile = new BufferedReader(new FileReader(file.getAbsolutePath()));
+		String line = "";
+		while ((line = inFile.readLine()) != null) {
+			sb.append(line+";");
+		}				
+		inFile.close();
+		String data = sb.toString();
+		String[] dataArr = data.split(";");
+		return dataArr;
+	}
+
+	protected String[] readFileFromPath(String filename) throws IOException 
+	{
+		String path = this.pathInput + filename;	
+		File file = new File(path);
+
+		if(!file.exists() || file.isDirectory()) { 
+			throw new IOException(String.format("File does not exist: %s", this.pathInput  + filename));
+		}
+
+		StringBuffer sb = new StringBuffer();
+		BufferedReader inFile = new BufferedReader(new FileReader(file.getAbsolutePath()));
+		String line = "";
+		while ((line = inFile.readLine()) != null) {
+			sb.append(line + "\n");
+		}
+						
+		inFile.close();
+		String data = sb.toString();
+		String[] dataArr = data.split("\n");
+		return dataArr;
+	}
+
+	// Read parameters from data file into arrays which will be accessed during initiation
+	public void readData(String filename) 
+	{	
+		String[] dataArr = readFileFromPath(filename);
+		List organList;
+		RowBase row;
+
+		setHeaders(dataArr[0]);
+		overrideHeaders();
+
+		for(int i = 1; i < dataArr.length; i++) { 
+			row = createRow(headerMap, dataArr[i], sep);
+			organList = getOrganList(row.plantID, row.organID);			
+			organList.add(row);
+		}
+	}
+	//put the first row of the data or the column header into headerMap 
+	public void setHeaders(String headers) {
+		String[] headerArr = headers.split(sep);
+		for(int i = 0; i < headerArr.length; i++) { 
+			String header = headerArr[i].toLowerCase().trim();
+			// Compatibility: some architecture CSVs quote headers (e.g. "id","parent",...)
+			// and some editors prepend a UTF-8 BOM to the first header token.
+			if ((header.length() > 0) && (header.charAt(0) == '\ufeff')) {
+				header = header.substring(1).trim();
+			}
+			if ((header.length() >= 2) && header.startsWith("\"") && header.endsWith("\"")) {
+				header = header.substring(1, header.length() - 1).trim();
+			}
+			headerMap.put(header, i);
+		}
+	}
+	//get rowMap
+	public Map getRowMap() {
+		return rowMap;
+	}
+	//get PlantMap by plantID
+	public Map getPlantMap(int plantID) {
+		Map plantMap = (HashMap) rowMap.get(plantID);
+		if (plantMap == null) {
+			plantMap = new HashMap();
+			rowMap.put(plantID, plantMap);
+		}
+		return plantMap;
+	}
+	//get organ list by plant id and organ id, can add new rows through organList.add(row)
+	public List getOrganList(int plantID, int organID) {
+		Map plantMap = getPlantMap(plantID);		
+		List organList = (ArrayList) plantMap.get(organID);
+		if(organList == null) {
+			organList = new ArrayList();
+			plantMap.put(organID, organList);
+		}
+		return organList;
+	}
+	//constructor, not in use
+	public ReconstructionDataReader(String pathInput, IRowFactory rowFactory) {
+		this.pathInput = pathInput;
+		this.rowFactory = rowFactory;
+	}
+	
+	//this is a method in the XNodeRow
+	//get the information from the row and convert it into a rowBase
+	public RowBase createRow(Map headerMap, String row, String sep) {
+		return rowFactory.createRow(headerMap, row, sep);
+	}
+	////constructor, not in use
+	public ReconstructionDataReader setRowFactory(IRowFactory rowFactory) {
+		this.rowFactory = rowFactory;
+		return this;
+	}
+
+	protected void overrideHeaders() {}
+}
+
+
+
+/**
+ * details the information contains in each row
+ * contains all the methods for extracting the information from a row string
+ */
+abstract class RowBase implements IRowFactory {
+	
+	//identifiers
+	int id;
+	int pid;  //parent id
+	int plantID = 0;
+	int organID = 0;
+	
+	protected String sep = ",";
+	protected Map headerMap;
+	protected String[] splitRow;
+
+	
+
+	
+	public int getHeader(String indxName) {
+		//if (printFlag) { println( "indxName " + indxName); }
+		//if (printFlag) { println(indxName + " " + headerMap.get(indxName)); }
+		String headerKey = indxName;
+		if (headerKey != null) {
+			headerKey = headerKey.toLowerCase().trim();
+		}
+		Integer headerIndex = (Integer) headerMap.get(headerKey);
+		if ((headerIndex == null) && (headerKey != null) && (headerKey.length() > 0)) {
+			headerIndex = (Integer) headerMap.get("\"" + headerKey + "\"");
+		}
+		if (headerIndex == null) {
+			throw new RuntimeException("Missing architecture CSV header '" + indxName
+					+ "' in archReader (available=" + headerMap.keySet() + ")");
+		}
+		return headerIndex.intValue();
+	}
+
+	public String get(String indxName) {
+		int indx = getHeader(indxName);
+		return splitRow[indx];
+	}
+	
+	public int getInt(String indxName) {
+		int indx = getHeader(indxName);
+		return Integer.parseInt(splitRow[indx]);
+	}
+
+	public double getDouble(String indxName) {
+		int indx = getHeader(indxName);
+		return Double.parseDouble(splitRow[indx]);
+	}
+	public String getString(String indxName) {
+		int indx = getHeader(indxName);
+		return splitRow[indx];
+	}
+
+ 	 public double[] getCoordinates(String indxName) {
+		int indx = getHeader(indxName);
+		String[] coordinates = splitRow[indx].split(" ");
+
+		double[] c = new double[coordinates.length];
+		for (int i = 0; i < coordinates.length; i++) {
+			c[i] = Double.parseDouble(coordinates[i]);
+		}
+		return c;
+	}  
+ 	// Return a Vector3D constructed by parsing the coordinates in the given string
+	protected Vector3D getCoordVector(String coordString)
+	{
+		String[] splitString = coordString.split(" ");
+		double[] coordArray = new double[splitString.length];
+			
+		for (int i = 0; i < coordArray.length; i++) {
+			coordArray[i] = Double.parseDouble(splitString[i]);
+		}
+			
+		Vector3D coordVector = new Vector3D(coordArray);
+		return coordVector;
+	} 
+
+	public String[] split(String row) {
+		return row.split(sep);
+	}
+
+
+	public RowBase() {}
+
+	public RowBase(Map headerMap, String row, String sep) {
+		this.headerMap = headerMap;
+		splitRow = this.split(row);
+		this.sep = sep;
+	}
+
+	// Convert raw row to row object
+	RowBase toRow() { return this; }
+}
+
+
+/*********************************************** 
+
+	XEG Reader
+	* Reads object coordinates from a CSV file.
+	* Initialises the system based upon these coordinates.
+	* Mandatory columns:
+		* Order: The object order within the system config.
+		* Parent: The object parent ID, in reference to the row ID.
+			* The system root has a row ID of -1.
+		* Diameter: The object diameter.
+		* x, y, and z: The 3D coordinate columns.
+	* Optional columns:
+		* ID: Unique ID per row starting from 1.
+
+************************************************/
+
+module XEGDataReader extends ReconstructionDataReader {
+	protected Map nm = new HashMap();
+	int maxNodeID = 0; // Tracks the maximum node ID
+	
+	public NodeMap getNodeMap(int plantID) {
+		NodeMap nodes = (NodeMap) nm.get(plantID);
+		if(nodes == null) {
+			nodes = new NodeMap();
+			nm.put(plantID, nodes);
+		}
+		return nodes;
+	}
+
+/* 	public void initNodeMap() {
+		for(Object k : rowMap.keySet()) {
+			int plantID = (Integer) k;
+			Map plantMap = getPlantMap(plantID);
+			NodeMap nodes = getNodeMap(plantID);
+
+			for (List rowList : plantMap.values()) {
+				for (XNodeRow row : rowList) {
+					XNode node = row.toXNode();
+					nodes.addNode(node);
+				}
+			}	
+			assignApexNodes(plantID);
+		}
+	} */
+
+	
+
+	/**
+	 * Create node object for construction based on row information
+	 * add ID to each node and add node to the NodeMap
+	 */	
+	public void initNodeMapWithID() {
+	  for (Object k : rowMap.keySet()) {
+		int plantID = (Integer) k;
+		Map plantMap = getPlantMap(plantID);
+		NodeMap nodes = getNodeMap(plantID);
+	
+		maxNodeID = 0;
+	
+		for (List rowList : plantMap.values()) {
+		  for (Object obj : rowList) {
+			XNodeRow row = (XNodeRow) obj;
+	
+			// USE CSV IDs (do NOT renumber)
+			int csvId = row.getInt("id");
+			int csvPid = row.getInt("parent");
+	
+			XNode node = row.toXNode();
+			node.id = csvId;
+			node.pid = csvPid;   // ensure consistent (in case toXNode didn’t set it)
+	
+			row.id = csvId;
+			row.pid = csvPid;
+	
+			nodes.addNode(node);
+			if (csvId > maxNodeID) maxNodeID = csvId;
+		  }
+		}
+		assignApexNodes(plantID);
+		println("[NM] plantID=" + plantID + " nodes.size=" + nodes.size());
+int shown = 0;
+for (Object kk : nodes.getKeySet()) {
+    if (shown++ >= 5) break;
+    XNode t = nodes.getNode(kk);
+    println("[NM] sample id=" + kk + " pid=" + (t==null ? "null" : ""+t.pid) + " type=" + (t==null ? "null" : t.organType));
+}
+
+	  }
+	}
+
+
+
+/**
+ * assign apex node
+ * apex node can grow out in future and make the plants grow dynamics
+ */	
+	protected void assignApexNodes(int plantID) {
+		Map plantMap = getPlantMap(plantID);
+		NodeMap nodes = getNodeMap(plantID);
+
+		for (List rowList : plantMap.values()) { 
+			/* 	
+				We designate the second to last XNode as the apex because
+				the very last node is not used to create an organ.
+			*/
+			int arraySize = rowList.size() -2;
+			if(arraySize <= 0) { continue; }
+			RowBase apexRow = (RowBase) rowList.get(arraySize);
+			XNode node = nodes.getNode(apexRow.id);
+			node.isApex = true;
+		}
+	}
+
+	public XEGDataReader(String pathInput, IRowFactory rowFactory) {
+		//super calls the parent constructor
+		super(pathInput, rowFactory); 
+	}
+}
+
+static void loadNodeMap(XEGDataReader reader, String fileName) {
+	reader.readData(fileName);
+	reader.initNodeMapWithID();
+}
+
+
+
+//map of XNode
+
+
+class NodeMap implements Serializable {
+    Map r = new HashMap();
+
+    public void addNode(XNode n) { r.put(Integer.valueOf(n.id), n); }
+
+    public XNode getNode(Object id) { return (XNode) r.get(id); }
+
+    // FIX: return a Set so foreach iterates correctly
+    public Set getKeySet() { return r.keySet(); }
+
+    public int size() { return r.size(); }
+}
+
+
+public static Point3d minus(Point3d a, Point3d b) {
+	return new Point3d(a.x - b.x, a.y - b.y, a.z - b.z);
+}
+
+static boolean isEndNode(XNode n) {
+    if (n == null || n.organType == null) return false;
+    String t = n.organType;
+    return isBudEndNode(n)
+        || (t.indexOf("LeafEND") >= 0)
+        || (t.indexOf("RosetteLeafEND") >= 0)
+        || (t.indexOf("FruitEND") >= 0);
+}
+
+static boolean isBudEndNode(XNode n) {
+    if (n == null || n.organType == null) return false;
+    String t = n.organType.toLowerCase();
+    return (t.indexOf("end_bud") >= 0) || (t.indexOf("budend") >= 0);
+}
+
+
+/**
+ * It's trivial to reconstruct the current root system implementation because there is a clear organ config.
+ * RootSystem -> StructuralRoot -> FineRoot -> RootApex
+ * With some organs, there is no such config. So the challenge is to pass the appropriate baseOrgan node
+ * in such a way that the entire tree will be reconstructed for all of the different organ types.
+ * 
+ * Alternatively, it should be possible to pass a PlantLocation object instead of a base organ.
+ */
+
+//Initialise architecture from node map.
+/* public static void initialiseArchitecture(Organ baseOrgan, IOrganFactory factory, NodeMap nm) {
+	int root = 0;
+	for(Object i : nm.getKeySet()) {
+		int pid = nm.getNode(i).pid;
+		XNode parent = nm.getNode(pid);
+		XNode child  = nm.getNode(i);
+		if(pid != -1) { //point of origin, first point
+			boolean sameOrgan = (parent.organID == child.organID); // you need organID on XNode
+			boolean sameOrder = parent.order == child.order;
+			boolean axialNext = (sameOrder && sameOrgan) && (child.segment == parent.segment + 1);
+		
+			if (axialNext || isEndNode(child)) {
+			  parent.apChild = child.id;
+			} else {
+			  parent.addChild(child.id);
+			}
+		}else {
+			root = nm.getNode(i).id;
+		}
+		
+	}
+
+	//adding a branching in a makes the root and shoot in different branches, 
+	//and not influencing each others positions
+	Node a = new Node();
+	[ baseOrgan ==> [a]; ]
+	derive();
+	architectureRunner(factory, nm, root, a, baseOrgan);
+	
+} 
+ */
+/**
+ * Reset all topology and traversal state in the NodeMap.
+ *
+ * <p>This method MUST be called before rebuilding architecture topology.
+ * It clears all previously constructed parent–child relationships and
+ * traversal flags to prevent duplicated traversal paths.</p>
+ *
+ * <p>Specifically, for every {@link XNode} it:</p>
+ * <ul>
+ *   <li>Clears axial continuation ({@code apChild})</li>
+ *   <li>Clears lateral children list ({@code childs})</li>
+ *   <li>Resets traversal flag ({@code initialised = false})</li>
+ * </ul>
+ *
+ * <p>Failure to reset these fields will cause nodes (especially leaves)
+ * to be traversed multiple times, leading to duplicated organs.</p>
+ *
+ * @param nm the {@link NodeMap} containing all XNodes for a plant
+ */
+static void resetLinks(NodeMap nm) {
+    for (Object k : nm.getKeySet()) {
+        int id = (Integer) k;
+        XNode n = nm.getNode(id);
+        if (n == null) continue;
+
+        n.apChild = 0;
+
+        if (n.childs == null) n.childs = new ArrayList();
+        else n.childs.clear();
+
+        n.initialised = false;
+    }
+}
+
+/**
+ * Initialise architecture topology and start recursive reconstruction.
+ *
+ * <p>Workflow:</p>
+ * <ol>
+ *   <li>Reset all topology state (child lists, apChild, initialised flags).</li>
+ *   <li>Link all nodes as lateral children using CSV {@code pid}.</li>
+ *   <li>Assign deterministic axial continuation for shoot axes using
+ *       {@code sameOrgan && sameOrder && nextSegment}.</li>
+ *   <li>Rewire leaf internals so {@code LeafBODY -> LeafEND} is axial and not also lateral.</li>
+ *   <li>(Optional) Diagnostics (e.g., leaf indegree checks).</li>
+ *   <li>Run recursive {@code architectureRunner} starting from root.</li>
+ * </ol>
+ *
+ * @param baseOrgan the base organ to attach reconstructed architecture to (e.g., PlantBase or RootBase)
+ * @param factory   organ factory used to instantiate Organ modules from XNodes
+ * @param nm        node map holding all XNodes for a plant
+ */
+public static void initialiseArchitecture(Organ baseOrgan, IOrganFactory factory, NodeMap nm) {
+    int root = 1;
+
+    resetBuildCaches();
+    resetLinks(nm);
+
+   int[] ids = sortedNodeIds(nm);
+
+	for (int ii=0; ii<ids.length; ii++) {
+		int id = ids[ii];
+		XNode child = nm.getNode(Integer.valueOf(id));
+		if (child == null) continue;
+	
+		int pid = child.pid;
+		if (pid == -1) { root = id; continue; }
+	
+		XNode parent = nm.getNode(Integer.valueOf(pid));
+		if (parent == null) continue;
+	
+		if (parent.childs == null) parent.childs = new ArrayList();
+		parent.addChild(child.id);
+	}
+	
+	for (Object k : nm.getKeySet()) {
+		XNode p = nm.getNode(k);
+		if (p != null && p.childs != null && p.childs.size() > 1) {
+			java.util.Collections.sort(p.childs);
+		}
+    }
+	// 0) clear any apChild (if resetLinks doesn't already)
+	    
+    clearApChild(nm);
+	// 1) Old-format direct-child continuation (works when pid encodes chain)
+	assignAxialChainsDirectChild_Strict(nm, 0.20, 70.0);
+	
+	assignAxialChainsByPidAxisSegment(nm, 70.0);
+
+	// 3) Optional last-resort heuristic (only if you still have apChild gaps)
+	// assignAxialChainsRobust(nm);
+
+
+	//dbgApChildStats(nm);
+
+    //dbgMultiAxialCandidates(nm, 50);
+
+    
+    //dbgSharpBends(nm, 60.0, 80);    // try 45 / 60 / 90
+//
+  rewireLeaves(nm, 10);
+  rewireFruits(nm, 10);
+
+    
+    // 1) Find likely fold locations (angle-based)
+	// Collect + print only top suspects
+	//dbgCollectSharpBends(nm, 60.0, 30, 0.20, 3.0);
+	//dbgPrintTopBends(nm, 10, 25);
+	
+	// 2) For those fold nodes, dump their axial chain(s)
+	//dbgDumpApChain(nm, /*startId or list*/, /*maxLen*/);
+	
+	// 3) Global scan for suspicious geometry jumps along apChild
+	//dbgAxialJumps(nm, 0.20, 80);   // threshold in meters for your scale
+
+    if (fixNegativeZ_shiftNodeMapZ) {
+        double nmMinZ = computeNodeMapNonRootMinStartZ(nm);
+        if (nmMinZ < -fixNegativeZ_eps) {
+            double dz = -nmMinZ;
+            int moved = shiftNodeMapNonRootZ(nm, dz);
+            if (fixNegativeZ_debug && debug) {
+                println("[fixNegativeZ] preBuild nodeMapLiftZ=" + dz
+                        + " movedNodes=" + moved
+                        + " newNodeMapMinStartZ=" + computeNodeMapNonRootMinStartZ(nm));
+            }
+        }
+    }
+
+// then build
+
+    // anchor under the *existing* baseOrgan (RootBase or PlantBase)
+	Node a = new Node();
+	
+	// KEEP baseOrgan, only add child anchor under it
+	[ b:baseOrgan ==> b [a]; ]
+	derive();
+	
+	architectureRunner(factory, nm, root, a, root);
+    registerDeferredPostReadNegativeZFix(baseOrgan, a, nm, root);
+
+}
+
+
+
+/**
+ * Enforce leaf internal wiring:
+ *   LeafSTEM -(lateral)-> LeafBODY
+ *   LeafBODY -(axial)->   LeafEND
+ *
+ * This prevents LeafEND being treated as a lateral branch and/or stealing apChild.
+ */
+static boolean isLeafPetiole(XNode n) {
+    if (n == null || n.organType == null) return false;
+    String t = n.organType;
+    return t.indexOf("LeafSTEM") >= 0 || t.indexOf("Petiole") >= 0;
+}
+
+static boolean isLeafBlade(XNode n) {
+    if (n == null || n.organType == null) return false;
+    String t = n.organType;
+    return t.indexOf("LeafBODY") >= 0 || t.indexOf("Blade") >= 0 || t.indexOf("Lamina") >= 0;
+}
+
+static boolean isLeafEnd(XNode n) {
+    if (n == null || n.organType == null) return false;
+    String t = n.organType;
+    return t.indexOf("LeafEND") >= 0 || t.indexOf("RosetteLeafEND") >= 0;
+}
+
+/**
+ * Rewire leaf internals robustly:
+ *  (1) Petiole/LeafSTEM -> Blade/Body as apChild if present
+ *  (2) Blade/Body -> End as apChild if present
+ * Also removes apChild from childs to avoid double traversal.
+ */
+/**
+ * PID-based leaf rewiring:
+ *   LeafSTEM.apChild = LeafBODY (where LeafBODY.pid == LeafSTEM.id)
+ *   LeafBODY.apChild = LeafEND  (where LeafEND.pid  == LeafBODY.id)
+ *
+ * This assumes pid is correct. It does NOT use organID (except you may add it to debug prints).
+ */
+static void rewireLeaves(NodeMap nm, int maxDbg) {
+    if (nm == null) return;
+
+    int stemSeen = 0, stemWired = 0, bodySeen = 0, bodyWired = 0;
+    int stemMissingBody = 0, bodyMissingEnd = 0;
+
+    // 1) LeafSTEM -> LeafBODY
+    for (Object k : nm.getKeySet()) {
+        XNode stem = nm.getNode(k);
+        if (!isLeafStem(stem)) continue;
+        stemSeen++;
+
+        if (stem.childs == null || stem.childs.isEmpty()) {
+            stemMissingBody++;
+            if (stemMissingBody <= maxDbg) {
+                println("[LEAF_PID] LeafSTEM has no childs id=" + stem.id + " pid=" + stem.pid + " type=" + safeType(stem));
+            }
+            continue;
+        }
+
+        int bodyId = 0;
+        for (Object cidObj : stem.childs) {
+            if (cidObj == null) continue;
+            int cid = ((Integer) cidObj).intValue();
+            XNode c = nm.getNode(Integer.valueOf(cid));
+            if (c == null) continue;
+            if (c.pid != stem.id) continue;
+            if (isLeafBody(c)) { bodyId = c.id; break; }
+        }
+
+        if (bodyId != 0) {
+            stem.apChild = bodyId;
+            removeChildId(stem.childs, bodyId);
+            stemWired++;
+        } else {
+            stemMissingBody++;
+            if (stemMissingBody <= maxDbg) {
+                println("[LEAF_PID] LeafSTEM missing LeafBODY child id=" + stem.id
+                    + " childs=" + stem.childs.size()
+                    + " pid=" + stem.pid);
+            }
+        }
+    }
+
+    // 2) LeafBODY -> LeafEND
+    for (Object k2 : nm.getKeySet()) {
+        XNode body = nm.getNode(k2);
+        if (!isLeafBody(body)) continue;
+        bodySeen++;
+
+        if (body.childs == null || body.childs.isEmpty()) {
+            bodyMissingEnd++;
+            if (bodyMissingEnd <= maxDbg) {
+                println("[LEAF_PID] LeafBODY has no childs id=" + body.id + " pid=" + body.pid + " type=" + safeType(body));
+            }
+            continue;
+        }
+
+        int endId = 0;
+        for (Object cidObj : body.childs) {
+            if (cidObj == null) continue;
+            int cid = ((Integer) cidObj).intValue();
+            XNode c = nm.getNode(Integer.valueOf(cid));
+            if (c == null) continue;
+            if (c.pid != body.id) continue;
+            if (isLeafEnd(c)) { endId = c.id; break; }
+        }
+
+        if (endId != 0) {
+            body.apChild = endId;
+            removeChildId(body.childs, endId);
+            bodyWired++;
+        } else {
+            bodyMissingEnd++;
+            if (bodyMissingEnd <= maxDbg) {
+                println("[LEAF_PID] LeafBODY missing LeafEND child id=" + body.id
+                    + " childs=" + body.childs.size()
+                    + " pid=" + body.pid);
+            }
+        }
+    }
+
+    println("[LEAF_PID] stemSeen=" + stemSeen + " stemWired=" + stemWired + " stemMissingBody=" + stemMissingBody
+        + " bodySeen=" + bodySeen + " bodyWired=" + bodyWired + " bodyMissingEnd=" + bodyMissingEnd);
+}
+
+
+
+
+
+// ---- helpers you already have (keep as-is) ----
+// resetLinks(nm)
+// removeChildId(List childs, int id)
+// isEndNode(XNode n)
+// isLeafStem/isLeafBody/isLeafEnd
+// resetBuildCaches()  (clears dbgAttachById + dbgExpandedById etc.)
+
+static boolean isLeafStem(XNode n) {
+    if (n == null || n.organType == null) return false;
+    String t = n.organType;
+    return (t.indexOf("LeafSTEM") >= 0) || (t.indexOf("RosetteLeafSTEM") >= 0);
+}
+
+static boolean isLeafBody(XNode n) {
+    if (n == null || n.organType == null) return false;
+    String t = n.organType;
+    return (t.indexOf("LeafBODY") >= 0) || (t.indexOf("RosetteLeafBODY") >= 0);
+}
+
+/**
+ * Removes a child id from a raw {@link List} safely (remove by value, not index).
+ *
+ * @param childs list of child ids (Integers)
+ * @param id     child id to remove
+ */
+static void removeChildId(List childs, int id) {
+    if (childs == null) return;
+    childs.remove((Object) Integer.valueOf(id));
+}
+
+
+
+static void debugLeafBodyIndegree(NodeMap nm, int maxPrint) {
+    Map indeg = new HashMap(); // Integer -> Integer
+
+    for (Object k : nm.getKeySet()) {
+        int pid = (Integer) k;
+        XNode p = nm.getNode(pid);
+        if (p == null) continue;
+
+        if (p.apChild != 0) {
+            Integer c = Integer.valueOf(p.apChild);
+            Integer v = (Integer) indeg.get(c);
+            indeg.put(c, Integer.valueOf(v == null ? 1 : v.intValue() + 1));
+        }
+
+        for (Object cidObj : p.childs) {
+            Integer c = (Integer) cidObj;
+            Integer v = (Integer) indeg.get(c);
+            indeg.put(c, Integer.valueOf(v == null ? 1 : v.intValue() + 1));
+        }
+    }
+
+    int bad = 0;
+    int printed = 0;
+    for (Object k : nm.getKeySet()) {
+        int id = (Integer) k;
+        XNode n = nm.getNode(id);
+        if (!isLeafBody(n)) continue;
+
+        Integer v = (Integer) indeg.get(Integer.valueOf(id));
+        if (v != null && v.intValue() > 1) {
+            bad++;
+            if (printed < maxPrint) {
+                printed++;
+                println("[LeafBODY indeg>1] id=" + id + " indeg=" + v + " pid=" + n.pid + " type=" + n.organType);
+            }
+        }
+    }
+
+    println("[LeafBODY indeg>1] total=" + bad);
+}
+
+// -----------------------------------------------------------------------------
+// FINAL traversal + creation
+// Fixes: "only one node" by traversing apChild AND laterals.
+// Requires: getAttachNode / putAttachNode / isEndNode / isBudNode / closestPointOnSegment / clamp
+// -----------------------------------------------------------------------------
+
+/**
+ * Entry point for recursive reconstruction.
+ *
+ * <p>Finds a reference child to define length/direction and then delegates
+ * to {@link #callArchitectureRunner(IOrganFactory, NodeMap, int, Node, XNode, XNode, Organ)}.</p>
+ *
+ * @param factory organ factory
+ * @param nm node map
+ * @param id start node id
+ * @param a attachment node in GroIMP graph
+ * @param ignoredBaseOrgan not used (kept for compatibility)
+ */
+/**
+ * Choose a reference child for geometry (length + direction).
+ * - Prefer apChild if present.
+ * - Otherwise choose a deterministic "axial fallback" child:
+ *   1) same order + next segment (segment+1), closest distance
+ *   2) else closest child by distance
+ */
+static XNode pickReferenceChild(NodeMap nm, XNode N) {
+    if (nm == null || N == null) return null;
+    boolean allowEnd = allowEndAsGeomRef(N);
+
+    // 1) Real axial
+    if (N.apChild != 0) {
+        XNode ap = nm.getNode(Integer.valueOf(N.apChild));
+        if (ap != null) return ap;
+    }
+
+    // 2) Fallback: pick best candidate from lateral children
+    if (N.childs == null || N.childs.isEmpty()) return null;
+
+    XNode best = null;
+    double bestDist = Double.POSITIVE_INFINITY;
+
+    // (a) Prefer "next segment on same order"
+    for (Object cidObj : N.childs) {
+        if (cidObj == null) continue;
+        XNode c = nm.getNode(cidObj);
+        if (c == null || (isEndNode(c) && !allowEnd)) continue;
+
+        boolean nextSeg = (c.order == N.order) && (c.segment == N.segment + 1);
+        if (!nextSeg) continue;
+
+        if (N.start != null && c.start != null) {
+            double d = N.start.distance(c.start);
+            if (d < bestDist) { bestDist = d; best = c; }
+        } else {
+            // if no coords, still allow deterministic pick by id
+            if (best == null || c.id < best.id) best = c;
+        }
+    }
+
+    if (best != null) return best;
+
+    // (b) Otherwise closest child in space
+    best = null;
+    bestDist = Double.POSITIVE_INFINITY;
+    for (Object cidObj : N.childs) {
+        if (cidObj == null) continue;
+        XNode c = nm.getNode(cidObj);
+        if (c == null || (isEndNode(c) && !allowEnd)) continue;
+
+        if (N.start != null && c.start != null) {
+            double d = N.start.distance(c.start);
+            if (d < bestDist) { bestDist = d; best = c; }
+        } else {
+            if (best == null || c.id < best.id) best = c;
+        }
+    }
+    return best;
+}
+
+
+public static void architectureRunner(IOrganFactory factory, NodeMap nm, int id, Node a, int rootId) {
+    if (factory == null || nm == null || a == null) return;
+
+    XNode N = nm.getNode(Integer.valueOf(id));
+    if (N == null) return;
+
+    // -----------------------------------------------------------------
+    // Special case: dummy root row (e.g., id=1 pid=-1 type="")
+    // Do NOT create an organ; just traverse children from anchor node 'a'.
+    // -----------------------------------------------------------------
+    if (id == rootId && isRootPlaceholder(N)) {
+
+        // guard against re-traversal
+        if (isExpanded(N.id)) return;
+        setExpanded(N.id);
+
+        // Prefer apChild first
+        if (N.apChild != 0) {
+            XNode ap = nm.getNode(Integer.valueOf(N.apChild));
+            if (ap != null && !isEndNode(ap)) {
+                architectureRunner(factory, nm, ap.id, a, rootId);
+            }
+        }
+
+        // Then laterals
+        if (N.childs != null) {
+            for (Object cidObj : N.childs) {
+                if (cidObj == null) continue;
+                int cid = ((Integer) cidObj).intValue();
+
+                // avoid double call if apChild is also in childs
+                if (N.apChild != 0 && cid == N.apChild) continue;
+
+                XNode child = nm.getNode(Integer.valueOf(cid));
+                if (child == null || isEndNode(child)) continue;
+
+                architectureRunner(factory, nm, child.id, a, rootId);
+            }
+        }
+        return;
+    }
+
+    // -----------------------------------------------------------------
+    // Normal nodes: pick ONE refChild (geometry reference) and call once.
+    // Traversal of axial + laterals happens inside callArchitectureRunner.
+    // -----------------------------------------------------------------
+    XNode refChild = pickReferenceChild(nm, N);
+    if (refChild == null) {
+        if (isRootGridNode(N)) {
+            refChild = createTerminalRootGridRef(N);
+            if (refChild != null) {
+                callArchitectureRunner(factory, nm, id, a, N, refChild, rootId);
+            }
+            return;
+        }
+        // Terminal node: cannot infer length/direction; skip creation here.
+        // (If you later want terminal creation, we can add a tiny default length.)
+        return;
+    }
+
+    callArchitectureRunner(factory, nm, id, a, N, refChild, rootId);
+}
+
+// -----------------------------------------------------------------------------
+// Updated runner
+// -----------------------------------------------------------------------------
+private static void callArchitectureRunner(
+        IOrganFactory factory, NodeMap nm, int id, Node a,
+        XNode N, XNode refChild, int rootId) {
+
+    if (factory == null || nm == null || a == null) return;
+    if (N == null) return;
+    Point3d anchorLoc = safeLocation(a);
+    if (removeNegativeZInternodes && N.order > 1 && anchorLoc != null && anchorLoc.z < -fixNegativeZ_eps) {
+        if (fixNegativeZ_debug && debug) {
+            println("[fixNegativeZ] skip by negative parent anchor id=" + N.id
+                    + " pid=" + N.pid + " type=" + safeType(N)
+                    + " anchorZ=" + anchorLoc.z);
+        }
+        return;
+    }
+    if (shouldSkipNegativeInternode(N)) {
+        if (fixNegativeZ_debug && debug) {
+            println("[fixNegativeZ] skip negative internode id=" + N.id
+                    + " pid=" + N.pid + " type=" + safeType(N)
+                    + " z=" + (N.start == null ? "na" : "" + N.start.z));
+        }
+        return;
+    }
+    if (N.childs == null) N.childs = new ArrayList();
+
+    
+	// Geometry reference ONLY (length + direction)
+	XNode geomRef = null;
+	boolean allowEnd = allowEndAsGeomRef(N);
+	
+	if (N.apChild != 0) {
+		XNode ap = nm.getNode(Integer.valueOf(N.apChild));
+		if (ap != null && ap.start != null && (!isEndNode(ap) || allowEnd)) {
+			geomRef = ap;
+		}
+	}
+	if (geomRef == null) {
+		if (refChild != null && refChild.start != null && (!isEndNode(refChild) || allowEnd)) {
+			geomRef = refChild;
+		}
+	}
+	if (geomRef == null || N.start == null || geomRef.start == null) return;
+	
+
+    // 1) CREATE ONCE
+    Node ca = getContNode(N.id);
+    Organ o = getOrganObj(N.id);
+
+    if (ca == null || o == null) {
+    	double L = N.start.distance(geomRef.start);
+    	if (L > 1) L = 1;
+    	N.length = (float) L;
+
+        o = factory.create(N);
+        if (o == null) return;
+
+        Vector3d dir = new Vector3d(N.start.x - geomRef.start.x,
+                                    N.start.y - geomRef.start.y,
+                                    N.start.z - geomRef.start.z);
+        double d2 = dir.x*dir.x + dir.y*dir.y + dir.z*dir.z;
+        if (d2 > 1e-12) o.setDirection(dir);
+
+        ca = new Node();
+
+        TMatrix4d inver = new TMatrix4d();
+        try {
+            inver.set((Matrix4d) (o[transform]));
+            inver.invert();
+        } catch (Throwable t) {
+            // identity is fine as fallback
+        }
+
+        Organ cn = factory.createNode(N);
+        if (cn != null) cn.setNewTransform(inver);
+
+        [ a ==> o cn ca; ]
+        derive();
+
+        putOrganObj(N.id, o);
+        putContNode(N.id, ca);
+        putInver(N.id, inver);
+    }
+
+    // 2) EXPAND ONCE
+    if (isExpanded(N.id)) return;
+    setExpanded(N.id);
+
+    // 2.1) Axial continuation: ONLY apChild
+    if (N.apChild != 0) {
+        XNode ap = nm.getNode(Integer.valueOf(N.apChild));
+        if (ap != null && !isEndNode(ap) && !shouldSkipNegativeInternode(ap)) {
+        	if (isBudNode(ap)) assignBudAxisPathFromParent(N, ap, true);
+            architectureRunner(factory, nm, ap.id, ca, rootId);
+        }
+    }
+
+    // 2.2) Laterals
+    TMatrix4d inver = getInver(N.id);
+
+    // use apChild for displacement axis if present, else geomRef
+    XNode axisForDis = geomRef;
+    if (N.apChild != 0) {
+        XNode ap = nm.getNode(Integer.valueOf(N.apChild));
+        if (ap != null && ap.start != null && !isEndNode(ap)) axisForDis = ap;
+    }
+
+    for (Object cidObj : N.childs) {
+        if (cidObj == null) continue;
+        int cid = ((Integer) cidObj).intValue();
+
+        if (N.apChild != 0 && cid == N.apChild) continue;
+
+        XNode child = nm.getNode(Integer.valueOf(cid));
+        if (child == null || isEndNode(child)) continue;
+        if (isBudNode(child)) assignBudAxisPathFromParent(N, child, false);
+        if (shouldSkipNegativeInternode(child)) {
+            if (fixNegativeZ_debug && debug) {
+                println("[fixNegativeZ] skip negative lateral id=" + child.id
+                        + " pid=" + child.pid + " type=" + safeType(child)
+                        + " z=" + (child.start == null ? "na" : "" + child.start.z));
+            }
+            continue;
+        }
+        BudSurfacePlacement budPlacement = null;
+        BudPlacementDecision budDecision = null;
+        float dis = computeDisplacement(N, axisForDis, child);
+        if (isBudNode(child) && isCordonLikeWoodNode(N)) {
+            budDecision = decideArchitectureBudPlacement(nm, N, child);
+            println("[ArchBud]"
+                + " candidateId=" + child.id
+                + " axisId=" + nodeAxisDebugId(N)
+                + " cordonId=" + cordonDebugId(N)
+                + " siteId=" + N.id
+                + " terminalSiteId=" + (budDecision == null || budDecision.terminalSite == null ? -1 : budDecision.terminalSite.id)
+                + " reason=" + (budDecision == null ? "kept" : budDecision.reason));
+            if (budDecision != null && budDecision.skip) continue;
+            budPlacement = computeBudSurfacePlacement(nm, N, axisForDis, child);
+            if (budPlacement != null) dis = budPlacement.axialDis;
+        }
+        if (N.id == 2 || N.pid == 1) {
+        		dis = 0f;
+        	}
+        if (budPlacement == null && clampNegativeLateralDisplacement && child != null && child.order > 1 && dis < 0f) {
+            dis = 0f;
+        }
+
+        Node xa = new Node();
+        Organ cn2 = factory.createNode(N);
+        if (cn2 != null && inver != null) cn2.setNewTransform(inver);
+
+        if (budPlacement != null) {
+            Point3d localShift = budShiftToLocalFrame(inver, budPlacement.worldShift);
+            // Buds are anchored on the wood surface so early organs do not start inside the support axis.
+            [ o ==> o [M(dis) cn2 Translate(localShift.x, localShift.y, localShift.z) xa]; ]
+        } else {
+            [ o ==> o [M(dis) cn2 xa]; ]
+        }
+        derive();
+        if (removeNegativeZInternodes && child.order > 1) {
+            Point3d xaLoc = safeLocation(xa);
+            if (xaLoc != null && xaLoc.z < -fixNegativeZ_eps) {
+                if (fixNegativeZ_debug && debug) {
+                    println("[fixNegativeZ] skip by negative lateral anchor id=" + child.id
+                            + " pid=" + child.pid + " type=" + safeType(child)
+                            + " anchorZ=" + xaLoc.z);
+                }
+                continue;
+            }
+        }
+
+        architectureRunner(factory, nm, child.id, xa, rootId);
+    }
+}
+
+
+/**
+ * Create organ for node N exactly once; return its cached attachment node.
+ * Uses refChild only to define N.length and direction.
+ */
+static Node ensureNodeCreated(IOrganFactory factory, NodeMap nm, Node a,
+                             XNode N, XNode refChild, Organ baseOrgan) {
+
+    Node attach = getAttachNode(N.id);
+    if (N.initialised && attach != null) return attach;
+
+    // define geometry from N -> refChild
+    N.length = N.start.distance(refChild.start);
+
+    Node ca = new Node();
+
+    Organ o;
+    if (baseOrgan == null) {
+        o = factory.create(N);
+    } else {
+        o = baseOrgan;
+    }
+
+    N.initialised = true;
+
+    
+    // (I explicitly asked to use N.start-refChild.start)
+    o.setDirection(N.start-refChild.start);
+
+    // Continuation node orientation
+    TMatrix4d inver = new TMatrix4d();
+    inver.set((Matrix4d) (o[transform]));
+    inver.invert();
+
+    Organ cn = factory.createNode(N);
+    cn.setNewTransform(inver);
+
+    [ a ==> o cn ca; ]
+    derive();
+
+    putAttachNode(N.id, ca);
+    return ca;
+}
+
+
+
+static Node createOnce(IOrganFactory factory, Node a, XNode N, XNode refChild) {
+    // Compute length
+    N.length = N.start.distance(refChild.start);
+
+    Organ o = factory.create(N);
+    if (o == null) {
+        println("[ARCH] factory.create returned null for id=" + N.id + " type=" + N.organType);
+        return null;
+    }
+
+    // Mark created
+    N.initialised = true;
+
+    // Your required direction convention:
+    o.setDirection(N.start - refChild.start);
+
+    Node ca = new Node();
+
+    Object tr = o[transform];
+    if (tr == null) {
+        // Avoid crashing; still attach.
+        println("[ARCH] o[transform] is null for id=" + N.id + " type=" + N.organType + " (attach without cn)");
+        [ a ==> o ca; ]
+        derive();
+        putAttachNode(N.id, ca);
+        return ca;
+    }
+
+    TMatrix4d inver = new TMatrix4d();
+    inver.set((Matrix4d) tr);
+    inver.invert();
+
+    Organ cn = factory.createNode(N);
+    cn.setNewTransform(inver);
+
+    [ a ==> o cn ca; ]
+    derive();
+
+    putAttachNode(N.id, ca);
+    return ca;
+}
+
+//############################## HELPERS ################################//
+
+
+// -----------------------------------------------------------------------------
+// FINAL: safe creation + traversal without breaking branches
+// - N.initialised means: "organ for this node has been CREATED"
+// - We DO NOT return early when N.initialised==true
+// - We cache the attachment node (continuation) per XNode id in dbgAttachById
+// - We expand (traverse children) only once using a separate expanded-map
+//   (no need to modify XNode class)
+// -----------------------------------------------------------------------------
+
+// created/attach cache already exists:
+// static Map dbgAttachById = new HashMap(); // Integer -> Node
+// add this expanded guard:
+// -----------------------------------------------------------------------------
+// Helpers + caches (keep in archReader.rgg)
+// -----------------------------------------------------------------------------
+
+/** Stores the GroIMP attachment node (continuation node) for each XNode id. */
+static Map dbgAttachById = new HashMap(); // Integer -> Node
+
+/** Guard to avoid expanding/traversing a node more than once (prevents cycles). */
+static Map dbgExpandedById = new HashMap(); // Integer -> Boolean
+
+/** Optional: track duplicate create attempts */
+static Map dbgCreatedById = new HashMap(); // Integer -> String
+
+// --- runner debug ---
+static int dbgCreate = 0;
+static int dbgExpand = 0;
+static int dbgSkipEnd = 0;
+static int dbgSkipNoRef = 0;
+static int dbgSkipNullNode = 0;
+static int dbgSkipMissingChild = 0;
+
+static int dbgPrintLimit = 80;   // print first N create/expand lines
+
+static Map dbgContById  = new HashMap(); // Integer -> Node (ca)
+static Map dbgOrganById = new HashMap(); // Integer -> Organ (o)
+static Map dbgInverById = new HashMap(); // Integer -> TMatrix4d
+
+static List dbgSuspectIds = new ArrayList();   // Integer ids
+static Map  dbgSuspectScore = new HashMap();   // Integer -> Double
+
+
+static void dbgResetSuspects() {
+    dbgSuspectIds.clear();
+    dbgSuspectScore.clear();
+}
+
+
+static Node  getContNode(int id)      { return (Node)  dbgContById.get(Integer.valueOf(id)); }
+static Organ getOrganObj(int id)      { return (Organ) dbgOrganById.get(Integer.valueOf(id)); }
+static TMatrix4d getInver(int id)     { return (TMatrix4d) dbgInverById.get(Integer.valueOf(id)); }
+
+static void putContNode(int id, Node n)   { dbgContById.put(Integer.valueOf(id), n); }
+static void putOrganObj(int id, Organ o)  { dbgOrganById.put(Integer.valueOf(id), o); }
+static void putInver(int id, TMatrix4d m) { dbgInverById.put(Integer.valueOf(id), m); }
+
+static void resetBuildCaches() {
+    dbgAttachById.clear();
+    dbgExpandedById.clear();
+    dbgCreatedById.clear();
+    dbgContById.clear();
+    dbgOrganById.clear();
+    dbgInverById.clear();
+}
+
+
+/**
+ * Safe id access for debug printing.
+ *
+ * @param n node
+ * @return n.id or -999 if null
+ */
+static int safeId(XNode n) {
+    return (n == null) ? -999 : n.id;
+}
+
+/**
+ * Safe organType access for debug printing.
+ *
+ * @param n node
+ * @return organType or "null"
+ */
+static String safeType(XNode n) {
+    if (n == null || n.organType == null) return "null";
+    return n.organType;
+}
+
+static boolean isInternodeForNegativeZFix(XNode n) {
+    if (n == null) return false;
+    return isAxisType(n);
+}
+
+static boolean shouldSkipNegativeInternode(XNode n) {
+    if (!removeNegativeZInternodes) return false;
+    if (n == null) return false;
+    if (!isAxisType(n)) return false;
+    if (n.start == null) return false;
+    if (isRootLikeTypeString(n.organType)) return false;
+    // keep the trunk/main axis; clean up mainly laterals and derived axes
+    if (n.order <= 1) return false;
+    return n.start.z < -fixNegativeZ_eps;
+}
+
+static boolean isTrunkLikeNode(XNode n) {
+    if (n == null || n.organType == null) return false;
+    String t = n.organType;
+    if (t.indexOf("Trunk") >= 0) return true;
+    // fallback to main-axis metadata when explicit trunk label is absent
+    return n.order <= 1;
+}
+
+static boolean isRootLikeTypeString(String t) {
+    if (t == null) return false;
+    String lower = t.toLowerCase();
+    return (lower.indexOf("root") >= 0) || (lower.indexOf("grid") >= 0);
+}
+
+static boolean isRootGridNode(XNode n) {
+    if (n == null || n.organType == null) return false;
+    return n.organType.toLowerCase().indexOf("grid") >= 0;
+}
+
+static XNode createTerminalRootGridRef(XNode n) {
+    if (n == null || n.start == null) return null;
+    double dz = 0.1;
+    if (n instanceof XRootNode) {
+        XRootNode rn = (XRootNode) n;
+        if (rn.cellDZ > 0.0 && !Double.isNaN(rn.cellDZ)) dz = rn.cellDZ;
+        else if (rn.soildepth > 0.0 && !Double.isNaN(rn.soildepth)) dz = rn.soildepth;
+    } else if (n.length > 0.0f && !Float.isNaN(n.length)) {
+        dz = n.length;
+    }
+    XNode ref = new XNode();
+    ref.id = -n.id;
+    ref.pid = n.id;
+    ref.plantID = n.plantID;
+    ref.order = n.order;
+    ref.organType = n.organType;
+    ref.segment = n.segment + 1;
+    ref.start = new Point3d(n.start.x, n.start.y, n.start.z - dz);
+    return ref;
+}
+
+static boolean isNodeMapGroundingShiftEligible(XNode n) {
+    if (n == null) return false;
+    if (n.start == null) return false;
+    if (isRootPlaceholder(n)) return false;
+    if (isRootLikeTypeString(n.organType)) return false;
+    return true;
+}
+
+static double computeNodeMapNonRootMinStartZ(NodeMap nm) {
+    if (nm == null) return 0.0;
+    double minZ = Double.POSITIVE_INFINITY;
+    for (Object k : nm.getKeySet()) {
+        XNode n = nm.getNode(k);
+        if (!isNodeMapGroundingShiftEligible(n)) continue;
+        if (n.start.z < minZ) minZ = n.start.z;
+    }
+    if (minZ == Double.POSITIVE_INFINITY) return 0.0;
+    return minZ;
+}
+
+static int shiftNodeMapNonRootZ(NodeMap nm, double dz) {
+    if (nm == null) return 0;
+    if (Math.abs(dz) <= fixNegativeZ_eps) return 0;
+    int moved = 0;
+    for (Object k : nm.getKeySet()) {
+        XNode n = nm.getNode(k);
+        if (!isNodeMapGroundingShiftEligible(n)) continue;
+        n.start.z = n.start.z + dz;
+        moved++;
+    }
+    return moved;
+}
+
+static Point3d safeLocation(Node g) {
+    if (g == null) return null;
+    try {
+        return location(g);
+    } catch (Throwable t) {
+        return null;
+    }
+}
+
+static void applyNonRootOrganZShiftLive(double dz) {
+    if (Math.abs(dz) <= fixNegativeZ_eps) return;
+    [ o:Organ ::> {
+        if (!isRootLikeTypeString(o.organType)) {
+            shiftOrganWorldZ(o, dz);
+        }
+    } ]
+}
+
+static double computeLiveNonRootMinWorldZ() {
+    final double[] minz = new double[] { Double.POSITIVE_INFINITY };
+    [ o:Organ ::> {
+        if (!isRootLikeTypeString(o.organType)) {
+            Point3d p = null;
+            Point3d e = null;
+            try { p = location(o); } catch (Throwable t) {}
+            try { e = endlocation(o); } catch (Throwable t) {}
+            if (p != null && p.z < minz[0]) minz[0] = p.z;
+            if (e != null && e.z < minz[0]) minz[0] = e.z;
+        }
+    } ]
+    if (minz[0] == Double.POSITIVE_INFINITY) return 0.0;
+    return minz[0];
+}
+
+static void shiftOrganWorldZ(Organ o, double dz) {
+    if (o == null) return;
+    if (Math.abs(dz) <= fixNegativeZ_eps) return;
+    try {
+        // Persistent world translation in the graph (more stable than direct matrix edits here).
+        [ p:Organ, (p == o) ==> M((float) dz) p; ]
+    } catch (Throwable t) {
+        if (fixNegativeZ_debug && debug) {
+            println("[fixNegativeZ] WARN shiftOrganWorldZ failed dz=" + dz + " err=" + t);
+        }
+    }
+}
+
+static void shiftGraphObjectWorldZ(Object obj, double dz) {
+    if (obj == null) return;
+    if (Math.abs(dz) <= fixNegativeZ_eps) return;
+    if (obj instanceof Organ) {
+        shiftOrganWorldZ((Organ) obj, dz);
+        return;
+    }
+    if (obj instanceof Node) {
+        Node n = (Node) obj;
+        [ p:Node, (p == n) ==> M((float) dz) p; ]
+    }
+}
+
+static void applyBaseOrganZShift(Organ baseOrgan, double dz) {
+    if (baseOrgan == null) return;
+    if (Math.abs(dz) <= fixNegativeZ_eps) return;
+    shiftGraphObjectWorldZ(baseOrgan, dz);
+    runFixNegativeZDerivePasses("afterBaseOrganLift");
+}
+
+static void runFixNegativeZDerivePasses(String tag) {
+    if (fixNegativeZ_settleDerivePasses < 1) return;
+    for (int i = 0; i < fixNegativeZ_settleDerivePasses; i++) {
+        derive();
+    }
+    if (fixNegativeZ_debug && debug && fixNegativeZ_settleDerivePasses > 1) {
+        println("[fixNegativeZ] derivePasses(" + tag + ")=" + fixNegativeZ_settleDerivePasses);
+    }
+}
+
+static void applyAnchorLift(Node anchor, double dz) {
+    if (anchor == null) return;
+    if (Math.abs(dz) <= fixNegativeZ_eps) return;
+    shiftGraphObjectWorldZ(anchor, dz);
+    runFixNegativeZDerivePasses("afterAnchorLift");
+}
+
+static void dbgWarnIneffectiveWorldLift(String tag, double before, double after, double dz) {
+    if (!fixNegativeZ_debug || !debug) return;
+    if (dz <= fixNegativeZ_eps) return;
+    double gain = after - before;
+    if (gain < 0.5 * dz) {
+        println("[fixNegativeZ] WARN worldLift ineffective tag=" + tag
+                + " before=" + before + " after=" + after + " dz=" + dz);
+    }
+}
+
+/**
+ * Compute minimum world-Z across an internode's representative endpoints:
+ * base organ location and its continuation node location.
+ */
+static double internodeMinWorldZById(int id) {
+    Organ o = getOrganObj(id);
+    Node ca = getContNode(id);
+    Point3d po = safeLocation(o);
+    Point3d pc = safeLocation(ca);
+    // Fallback for cases where continuation node is missing (common for some trunk states).
+    if (pc == null && o != null) {
+        try { pc = endlocation(o); } catch (Throwable t) {}
+    }
+
+    double z = Double.POSITIVE_INFINITY;
+    if (po != null && po.z < z) z = po.z;
+    if (pc != null && pc.z < z) z = pc.z;
+    return z;
+}
+
+static boolean isRemovedInternodeOrgan(Organ o) {
+    if (o == null) return true;
+    if (o.length <= fixNegativeZ_eps) return true;
+    if (o.diameter <= 0f) return true;
+    return false;
+}
+
+/**
+ * Average world-Z from internode endpoints, used for deterministic fallback ranking.
+ */
+static double internodeAvgWorldZById(int id) {
+    Organ o = getOrganObj(id);
+    Node ca = getContNode(id);
+    Point3d po = safeLocation(o);
+    Point3d pc = safeLocation(ca);
+
+    if (po != null && pc != null) return 0.5 * (po.z + pc.z);
+    if (po != null) return po.z;
+    if (pc != null) return pc.z;
+    return Double.POSITIVE_INFINITY;
+}
+
+/**
+ * Build summary map:
+ *  minZ(double), minId(int)
+ */
+static Map computeInternodeMinWorldZ(NodeMap nm) {
+    Map out = new HashMap();
+    double minZ = Double.POSITIVE_INFINITY;
+    int minId = -1;
+
+    if (nm != null) {
+        for (Object k : nm.getKeySet()) {
+            int id = ((Integer) k).intValue();
+            XNode n = nm.getNode(Integer.valueOf(id));
+            if (!isInternodeForNegativeZFix(n)) continue;
+            Organ o = getOrganObj(id);
+            if (isRemovedInternodeOrgan(o)) continue;
+
+            double z = internodeMinWorldZById(id);
+            if (z < minZ) {
+                minZ = z;
+                minId = id;
+            }
+        }
+    }
+
+    if (minZ == Double.POSITIVE_INFINITY) minZ = 0.0;
+    out.put("minZ", Double.valueOf(minZ));
+    out.put("minId", Integer.valueOf(minId));
+    return out;
+}
+
+/**
+ * Deterministically find the first trunk internode.
+ * Priority:
+ *  1) trunk-like/main-axis nodes (prefer those attached to root)
+ *  2) axis nodes attached to root with smallest min world-Z
+ *  3) any axis node with smallest average world-Z
+ */
+static XNode findFirstTrunkInternode(NodeMap nm, int rootId) {
+    if (nm == null) return null;
+
+    XNode best = null;
+    int bestId = Integer.MAX_VALUE;
+
+    // Pass 1: trunk-like nodes directly attached to root, choose lowest id.
+    for (Object k : nm.getKeySet()) {
+        int id = ((Integer) k).intValue();
+        XNode n = nm.getNode(Integer.valueOf(id));
+        if (!isInternodeForNegativeZFix(n)) continue;
+        if (!isTrunkLikeNode(n)) continue;
+        if (n.pid != rootId) continue;
+        if (id < bestId) {
+            best = n;
+            bestId = id;
+        }
+    }
+    if (best != null) return best;
+
+    // Pass 1b: trunk-like nodes anywhere, choose lowest id.
+    best = null;
+    bestId = Integer.MAX_VALUE;
+    for (Object k : nm.getKeySet()) {
+        int id = ((Integer) k).intValue();
+        XNode n = nm.getNode(Integer.valueOf(id));
+        if (!isInternodeForNegativeZFix(n)) continue;
+        if (!isTrunkLikeNode(n)) continue;
+        if (id < bestId) {
+            best = n;
+            bestId = id;
+        }
+    }
+    if (best != null) return best;
+
+    // Pass 2: root-attached axis with smallest min world-Z
+    best = null;
+    double bestMinZ = Double.POSITIVE_INFINITY;
+    bestId = Integer.MAX_VALUE;
+    for (Object k : nm.getKeySet()) {
+        int id = ((Integer) k).intValue();
+        XNode n = nm.getNode(Integer.valueOf(id));
+        if (!isInternodeForNegativeZFix(n)) continue;
+        if (n.pid != rootId) continue;
+
+        double z = internodeMinWorldZById(id);
+        if (z < bestMinZ || (z == bestMinZ && id < bestId)) {
+            best = n;
+            bestMinZ = z;
+            bestId = id;
+        }
+    }
+    if (best != null) return best;
+
+    // Pass 3: global lowest average world-Z axis
+    XNode bestAvgNode = null;
+    double bestAvg = Double.POSITIVE_INFINITY;
+    int bestAvgId = Integer.MAX_VALUE;
+    for (Object k : nm.getKeySet()) {
+        int id = ((Integer) k).intValue();
+        XNode n = nm.getNode(Integer.valueOf(id));
+        if (!isInternodeForNegativeZFix(n)) continue;
+
+        double avg = internodeAvgWorldZById(id);
+        if (avg < bestAvg || (avg == bestAvg && id < bestAvgId)) {
+            bestAvg = avg;
+            bestAvgId = id;
+            bestAvgNode = n;
+        }
+    }
+    return bestAvgNode;
+}
+
+static void assertNoNegativeInternodeZ(NodeMap nm, double eps) {
+    if (!fixNegativeZ_debug || !debug) return;
+    int cnt = 0;
+    int maxPrint = 20;
+    for (Object k : nm.getKeySet()) {
+        int id = ((Integer) k).intValue();
+        XNode n = nm.getNode(Integer.valueOf(id));
+        if (!isInternodeForNegativeZFix(n)) continue;
+
+        Organ o = getOrganObj(id);
+        if (isRemovedInternodeOrgan(o)) continue;
+        Node ca = getContNode(id);
+        Point3d po = safeLocation(o);
+        Point3d pc = safeLocation(ca);
+        double zmin = internodeMinWorldZById(id);
+        if (zmin < -eps) {
+            cnt++;
+            if (cnt <= maxPrint) {
+                println("[fixNegativeZ] VIOLATION id=" + id + " type=" + safeType(n)
+                        + " zmin=" + zmin
+                        + " start=" + fmtPoint(po)
+                        + " end=" + fmtPoint(pc));
+            }
+        }
+    }
+    if (cnt > 0) {
+        println("[fixNegativeZ] violations=" + cnt + " (eps=" + eps + ")");
+    }
+}
+
+static void removeRemainingNegativeInternodes(NodeMap nm) {
+    if (!removeNegativeZInternodes) return;
+    if (nm == null) return;
+    int removed = 0;
+    for (Object k : nm.getKeySet()) {
+        int id = ((Integer) k).intValue();
+        XNode n = nm.getNode(Integer.valueOf(id));
+        if (n == null) continue;
+        if (!isAxisType(n)) continue;
+        if (isRootLikeTypeString(n.organType)) continue;
+        if (n.order <= 1) continue;
+
+        double zmin = internodeMinWorldZById(id);
+        if (zmin >= -fixNegativeZ_eps) continue;
+
+        Organ o = getOrganObj(id);
+        if (o != null) {
+            o.length = 0f;
+            o.diameter = 0f;
+            removed++;
+        }
+        n.length = 0f;
+        n.diameter = 0f;
+    }
+    if (fixNegativeZ_debug && debug) {
+        println("[fixNegativeZ] removedRemainingNegativeInternodes=" + removed);
+    }
+}
+
+static Map runNegativeZPrecheck(NodeMap nm) {
+    Map before = computeInternodeMinWorldZ(nm);
+    double minZ = ((Double) before.get("minZ")).doubleValue();
+    int minId = ((Integer) before.get("minId")).intValue();
+    if (fixNegativeZ_debug && debug) {
+        println("[fixNegativeZ] minInternodeWorldZ=" + minZ + " worstInternode=" + minId);
+        println("[fixNegativeZ] liveNonRootMinWorldZ(before)=" + computeLiveNonRootMinWorldZ());
+    }
+    return before;
+}
+
+static Map runFirstTrunkLengthStage(NodeMap nm, int rootId, double minZ) {
+    Map out = new HashMap();
+    out.put("applied", Boolean.FALSE);
+    out.put("minZAfter", Double.valueOf(minZ));
+
+    XNode firstTrunk = findFirstTrunkInternode(nm, rootId);
+    if (firstTrunk == null) {
+        if (fixNegativeZ_debug && debug) println("[fixNegativeZ] WARN no first trunk candidate found; skip");
+        return out;
+    }
+
+    int tid = firstTrunk.id;
+    Organ trunk = getOrganObj(tid);
+    Node tca = getContNode(tid);
+    if (trunk == null) {
+        if (fixNegativeZ_debug && debug) println("[fixNegativeZ] WARN first trunk has no organ instance id=" + tid + "; skip");
+        return out;
+    }
+
+    Point3d p0 = safeLocation(trunk);
+    Point3d p1 = safeLocation(tca);
+    double oldLen = trunk.length;
+    if (fixNegativeZ_debug && debug) {
+        println("[fixNegativeZ] firstTrunk id=" + tid
+                + " startZ=" + (p0 == null ? "na" : "" + p0.z)
+                + " endZ=" + (p1 == null ? "na" : "" + p1.z)
+                + " length=" + oldLen);
+    }
+
+    // Increase first trunk length first (without altering direction).
+    double delta = (-minZ) * fixNegativeZ_trunkLengthFactor;
+    trunk.length = (float) (oldLen + delta);
+    firstTrunk.length = (float) (firstTrunk.length + delta);
+    runFixNegativeZDerivePasses("afterTrunkLength");
+
+    Map after = computeInternodeMinWorldZ(nm);
+    double minZ2 = ((Double) after.get("minZ")).doubleValue();
+    if (fixNegativeZ_debug && debug) {
+        println("[fixNegativeZ] applied delta=" + delta
+                + " newFirstTrunkLength=" + trunk.length
+                + " newMinInternodeWorldZ=" + minZ2);
+        println("[fixNegativeZ] liveNonRootMinWorldZ(afterTrunk)=" + computeLiveNonRootMinWorldZ());
+    }
+
+    out.put("applied", Boolean.TRUE);
+    out.put("minZAfter", Double.valueOf(minZ2));
+    return out;
+}
+
+static double combinedGroundingMinZ(NodeMap nm) {
+    if (nm == null) return 0.0;
+    Map m = computeInternodeMinWorldZ(nm);
+    return ((Double) m.get("minZ")).doubleValue();
+}
+
+static void runNegativeZPostStages(Organ baseOrgan, Node anchor, NodeMap nm, double minZ2) {
+    if (nm == null) return;
+
+    double minNow = combinedGroundingMinZ(nm);
+    if (fixNegativeZ_debug && debug) {
+        double liveNow = computeLiveNonRootMinWorldZ();
+        println("[fixNegativeZ] postStage entry minInternodeWorldZ=" + minNow
+                + " liveNonRootMinWorldZ=" + liveNow
+                + " combinedMinWorldZ=" + minNow
+                + " minAfterTrunk=" + minZ2);
+    }
+
+    if (minNow >= -fixNegativeZ_eps) {
+        if (fixNegativeZ_debug && debug) println("[fixNegativeZ] postStage skip; already non-negative");
+        return;
+    }
+
+    if (!fixNegativeZ_enableTransformFallback) {
+        if (fixNegativeZ_debug && debug) {
+            println("[fixNegativeZ] transform fallback disabled; using prune-only post stage");
+        }
+        removeRemainingNegativeInternodes(nm);
+        if (fixNegativeZ_debug && debug) {
+            Map afterPrune = computeInternodeMinWorldZ(nm);
+            double minZ4 = ((Double) afterPrune.get("minZ")).doubleValue();
+            println("[fixNegativeZ] after prune newMinInternodeWorldZ=" + minZ4
+                    + " liveNonRootMinWorldZ=" + computeLiveNonRootMinWorldZ());
+        }
+        assertNoNegativeInternodeZ(nm, fixNegativeZ_eps);
+        return;
+    }
+
+    if (minNow < -fixNegativeZ_eps) {
+        double before = minNow;
+        double dz = -minNow;
+        if (fixNegativeZ_debug && debug) {
+            println("[fixNegativeZ] worldLift anchor dz=" + dz);
+        }
+        applyAnchorLift(anchor, dz);
+        minNow = combinedGroundingMinZ(nm);
+        dbgWarnIneffectiveWorldLift("anchor", before, minNow, dz);
+        if (fixNegativeZ_debug && debug) {
+            println("[fixNegativeZ] after anchor worldLift minNow=" + minNow
+                    + " liveNonRootMinWorldZ=" + computeLiveNonRootMinWorldZ());
+        }
+    }
+
+    if (minNow < -fixNegativeZ_eps) {
+        double before = minNow;
+        double dz = -minNow;
+        if (fixNegativeZ_debug && debug) {
+            println("[fixNegativeZ] worldLift baseOrgan dz=" + dz);
+        }
+        applyBaseOrganZShift(baseOrgan, dz);
+        minNow = combinedGroundingMinZ(nm);
+        dbgWarnIneffectiveWorldLift("baseOrgan", before, minNow, dz);
+        if (fixNegativeZ_debug && debug) {
+            println("[fixNegativeZ] after baseOrgan worldLift minNow=" + minNow
+                    + " liveNonRootMinWorldZ=" + computeLiveNonRootMinWorldZ());
+        }
+    }
+
+    if (minNow < -fixNegativeZ_eps && fixNegativeZ_enableNonRootOrganLiftFallback) {
+        double before = minNow;
+        double dz = -minNow;
+        if (fixNegativeZ_debug && debug) {
+            println("[fixNegativeZ] worldLift nonRootOrgan dz=" + dz);
+        }
+        applyNonRootOrganZShiftLive(dz);
+        runFixNegativeZDerivePasses("afterNonRootOrganLift");
+        minNow = combinedGroundingMinZ(nm);
+        dbgWarnIneffectiveWorldLift("nonRoot", before, minNow, dz);
+        if (fixNegativeZ_debug && debug) {
+            println("[fixNegativeZ] after nonRoot worldLift minNow=" + minNow
+                    + " liveNonRootMinWorldZ=" + computeLiveNonRootMinWorldZ());
+        }
+    } else if (minNow < -fixNegativeZ_eps && fixNegativeZ_debug && debug) {
+        println("[fixNegativeZ] nonRoot worldLift disabled; skipping bulk transform shift");
+    }
+
+    if (minNow < -fixNegativeZ_eps) {
+        removeRemainingNegativeInternodes(nm);
+        if (fixNegativeZ_debug && debug) {
+            Map afterPrune = computeInternodeMinWorldZ(nm);
+            double minZ4 = ((Double) afterPrune.get("minZ")).doubleValue();
+            println("[fixNegativeZ] after prune newMinInternodeWorldZ=" + minZ4
+                    + " liveNonRootMinWorldZ=" + computeLiveNonRootMinWorldZ());
+        }
+    } else if (fixNegativeZ_debug && debug) {
+        println("[fixNegativeZ] prune skipped; grounding already non-negative");
+    }
+
+    assertNoNegativeInternodeZ(nm, fixNegativeZ_eps);
+}
+
+static Map applyPostReadNegativeZFixStage1(NodeMap nm, int rootId) {
+    Map out = new HashMap();
+    out.put("runPostStage", Boolean.FALSE);
+    out.put("minZAfterTrunk", Double.valueOf(0.0));
+
+    if (!fixNegativeZByExtendingTrunk) return out;
+    if (nm == null) return out;
+
+    if (fixNegativeZ_debug && debug) println("[fixNegativeZ] enabled");
+
+    Map before = runNegativeZPrecheck(nm);
+    double minZ = ((Double) before.get("minZ")).doubleValue();
+
+    if (minZ >= -fixNegativeZ_eps) return out;
+
+    Map trunkStage = runFirstTrunkLengthStage(nm, rootId, minZ);
+    boolean applied = ((Boolean) trunkStage.get("applied")).booleanValue();
+    if (!applied) {
+        return out;
+    }
+    double minZ2 = ((Double) trunkStage.get("minZAfter")).doubleValue();
+    out.put("runPostStage", Boolean.TRUE);
+    out.put("minZAfterTrunk", Double.valueOf(minZ2));
+    return out;
+}
+
+static void applyPostReadNegativeZFixStage2(Organ baseOrgan, Node anchor, NodeMap nm, Map stage1) {
+    if (!fixNegativeZByExtendingTrunk) return;
+    if (nm == null) return;
+    if (stage1 == null) return;
+
+    Object runObj = stage1.get("runPostStage");
+    if (!(runObj instanceof Boolean)) return;
+    if (!((Boolean) runObj).booleanValue()) return;
+
+    Object minObj = stage1.get("minZAfterTrunk");
+    if (!(minObj instanceof Double)) return;
+    double minZ2 = ((Double) minObj).doubleValue();
+
+    runNegativeZPostStages(baseOrgan, anchor, nm, minZ2);
+}
+
+static void registerDeferredPostReadNegativeZFix(Organ baseOrgan, Node anchor, NodeMap nm, int rootId) {
+    if (!fixNegativeZByExtendingTrunk) return;
+    if (nm == null) return;
+    Map ctx = new HashMap();
+    ctx.put("baseOrgan", baseOrgan);
+    ctx.put("anchor", anchor);
+    ctx.put("nm", nm);
+    ctx.put("rootId", Integer.valueOf(rootId));
+    deferredNegativeZFixContexts.add(ctx);
+}
+
+static void runDeferredPostReadNegativeZFixesStage1() {
+    if (!fixNegativeZByExtendingTrunk) return;
+    if (deferredNegativeZFixContexts == null || deferredNegativeZFixContexts.size() == 0) return;
+    for (Object obj : deferredNegativeZFixContexts) {
+        if (!(obj instanceof Map)) continue;
+        Map ctx = (Map) obj;
+        Organ baseOrgan = (Organ) ctx.get("baseOrgan");
+        Node anchor = (Node) ctx.get("anchor");
+        NodeMap nm = (NodeMap) ctx.get("nm");
+        Object ridObj = ctx.get("rootId");
+        if (!(ridObj instanceof Integer)) continue;
+        int rootId = ((Integer) ridObj).intValue();
+
+        Map stage1 = applyPostReadNegativeZFixStage1(nm, rootId);
+        Object runObj = (stage1 == null) ? null : stage1.get("runPostStage");
+        if (!(runObj instanceof Boolean)) continue;
+        if (!((Boolean) runObj).booleanValue()) continue;
+
+        Map postCtx = new HashMap();
+        postCtx.put("baseOrgan", baseOrgan);
+        postCtx.put("anchor", anchor);
+        postCtx.put("nm", nm);
+        deferredNegativeZFixStage2Contexts.add(postCtx);
+    }
+    deferredNegativeZFixContexts.clear();
+}
+
+static void runDeferredPostReadNegativeZFixesStage2IfNeeded() {
+    if (!fixNegativeZByExtendingTrunk) return;
+    if (deferredNegativeZFixStage2Contexts == null || deferredNegativeZFixStage2Contexts.size() == 0) return;
+    for (Object obj : deferredNegativeZFixStage2Contexts) {
+        if (!(obj instanceof Map)) continue;
+        Map ctx = (Map) obj;
+        Organ baseOrgan = (Organ) ctx.get("baseOrgan");
+        Node anchor = (Node) ctx.get("anchor");
+        NodeMap nm = (NodeMap) ctx.get("nm");
+        if (nm == null) continue;
+
+        Map now = computeInternodeMinWorldZ(nm);
+        double minInternodeNow = ((Double) now.get("minZ")).doubleValue();
+        double minZNow = minInternodeNow;
+        if (fixNegativeZ_debug && debug) {
+            double minLive = computeLiveNonRootMinWorldZ();
+            println("[fixNegativeZ] deferredStage2 precheck minInternodeWorldZ="
+                    + minInternodeNow
+                    + " liveNonRootMinWorldZ=" + minLive
+                    + " combinedMinWorldZ=" + minZNow);
+        }
+        if (minZNow < -fixNegativeZ_eps) {
+            runNegativeZPostStages(baseOrgan, anchor, nm, minZNow);
+        }
+    }
+    deferredNegativeZFixStage2Contexts.clear();
+}
+
+
+/**
+ * Returns an existing attachment node for a node id if it exists.
+ *
+ * @param id xnode id
+ * @return previously stored attachment Node, or null
+ */
+static Node getAttachNode(int id) {
+    return (Node) dbgAttachById.get(Integer.valueOf(id));
+}
+
+/**
+ * Stores the attachment node for a node id.
+ *
+ * @param id xnode id
+ * @param n attachment node
+ */
+static void putAttachNode(int id, Node n) {
+    dbgAttachById.put(Integer.valueOf(id), n);
+}
+
+static boolean isExpanded(int id) {
+    Object v = dbgExpandedById.get(Integer.valueOf(id));
+    return (v != null) && ((Boolean) v).booleanValue();
+}
+static void setExpanded(int id) {
+    dbgExpandedById.put(Integer.valueOf(id), Boolean.TRUE);
+}
+
+
+// ---------- local formatting ----------
+static String fmtPoint(Point3d p) {
+    if (p == null) return "null";
+    return String.format("(%.3f, %.3f, %.3f)", p.x, p.y, p.z);
+}
+
+static double clamp(double v, double lo, double hi) {
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
+
+/** Convert (A - B) into a Vector3d for setDirection(). */
+static Vector3d vecMinus(Point3d A, Point3d B) {
+    if (A == null || B == null) return new Vector3d(0, 0, 0);
+    return new Vector3d(A.x - B.x, A.y - B.y, A.z - B.z);
+}
+
+final class BudSurfacePlacement {
+    float axialDis;
+    Point3d worldShift;
+    BudSurfacePlacement(float d, Point3d s) {
+        axialDis = d;
+        worldShift = s;
+    }
+}
+
+final class BudPlacementDecision {
+    boolean skip;
+    String reason;
+    XNode terminalSite;
+    BudPlacementDecision(boolean s, String r, XNode t) {
+        skip = s;
+        reason = r;
+        terminalSite = t;
+    }
+}
+
+static boolean isCordonLikeWoodNode(XNode n) {
+    if (n == null || n.organType == null) return false;
+    String t = n.organType;
+    return t.indexOf("Cordon") >= 0
+        || t.indexOf("oldShoot") >= 0
+        || t.indexOf("OldShoot") >= 0
+        || t.indexOf("Upright") >= 0
+        || t.indexOf("Spur") >= 0
+        || t.indexOf("Dropper") >= 0;
+}
+
+static int cordonDebugId(XNode n) {
+    if (n == null) return -1;
+    try { return n.axis2ID; } catch (Throwable t) { return -1; }
+}
+
+static int nodeAxisDebugId(XNode n) {
+    int axis = axisIdByOrder(n);
+    if (axis > 0) return axis;
+    return -1;
+}
+
+static XNode previousSameOrderAxisNode(NodeMap nm, XNode n) {
+    if (nm == null || n == null) return null;
+    int pid = n.pid;
+    int guard = 0;
+    while (pid > 0 && guard++ < 2000) {
+        XNode p = nm.getNode(Integer.valueOf(pid));
+        if (p == null) break;
+        if (isAxisType(p) && p.order == n.order) return p;
+        pid = p.pid;
+    }
+    return null;
+}
+
+static XNode followingCordonOnSameAxisNode(NodeMap nm, XNode n) {
+    if (nm == null || n == null) return null;
+    if (!isCordonLikeWoodNode(n)) return null;
+
+    if (n.apChild > 0) {
+        XNode ap = nm.getNode(Integer.valueOf(n.apChild));
+        if (ap != null && isCordonLikeWoodNode(ap) && ap.order == n.order) return ap;
+    }
+
+    if (n.childs == null) return null;
+    int axis = axisIdByOrder(n);
+    for (Object cidObj : n.childs) {
+        if (cidObj == null) continue;
+        XNode c = nm.getNode(cidObj);
+        if (c == null || !isCordonLikeWoodNode(c)) continue;
+        if (c.order != n.order) continue;
+        if (c.segment != n.segment + 1) continue;
+        int cAxis = axisIdByOrder(c);
+        if (axis > 0 && cAxis > 0 && cAxis != axis) continue;
+        return c;
+    }
+    return null;
+}
+
+static XNode terminalCordonOnSameAxisNode(NodeMap nm, XNode n) {
+    if (nm == null || n == null) return null;
+    XNode cur = n;
+    int guard = 0;
+    while (cur != null && guard++ < 2000) {
+        XNode nxt = followingCordonOnSameAxisNode(nm, cur);
+        if (nxt == null || nxt == cur) break;
+        cur = nxt;
+    }
+    return cur;
+}
+
+static boolean hasBudChildOnSite(NodeMap nm, XNode site) {
+    if (nm == null || site == null || site.childs == null) return false;
+    for (Object cidObj : site.childs) {
+        if (cidObj == null) continue;
+        XNode c = nm.getNode(cidObj);
+        if (isBudNode(c)) return true;
+    }
+    return false;
+}
+
+static XNode downstreamBudSiteOnSameAxis(NodeMap nm, XNode site) {
+    if (nm == null || site == null) return null;
+    XNode cur = followingCordonOnSameAxisNode(nm, site);
+    int guard = 0;
+    while (cur != null && guard++ < 2000) {
+        if (hasBudChildOnSite(nm, cur)) return cur;
+        cur = followingCordonOnSameAxisNode(nm, cur);
+    }
+    return null;
+}
+
+static Point3d cappedPointAlongAxis(Point3d a, Point3d b, double cap) {
+    if (a == null || b == null) return b;
+    double segLen = a.distance(b);
+    if (segLen <= cap || segLen < 1e-9) return b;
+    double t = cap / segLen;
+    return new Point3d(
+        a.x + (b.x - a.x) * t,
+        a.y + (b.y - a.y) * t,
+        a.z + (b.z - a.z) * t
+    );
+}
+
+static Point3d resolveBudSupportPoint(NodeMap nm, XNode parent, XNode refChild, XNode child) {
+    if (parent == null || parent.start == null) return null;
+
+    if (refChild != null && refChild.start != null && refChild != child) {
+        return cappedPointAlongAxis(parent.start, refChild.start, 0.20);
+    }
+
+    XNode prev = previousSameOrderAxisNode(nm, parent);
+    if (prev != null && prev.start != null) {
+        Vector3d axis = vec(prev.start, parent.start);
+        if (axis != null) {
+            double len2 = axis.lengthSquared();
+            if (len2 > 1e-12) {
+                axis.normalize();
+                double ext = parent.length;
+                if (Double.isNaN(ext) || Double.isInfinite(ext) || ext <= 0.0) ext = 0.05;
+                if (ext > 0.20) ext = 0.20;
+                return new Point3d(
+                    parent.start.x + axis.x * ext,
+                    parent.start.y + axis.y * ext,
+                    parent.start.z + axis.z * ext
+                );
+            }
+        }
+    }
+
+    if (child != null && child.start != null) return cappedPointAlongAxis(parent.start, child.start, 0.20);
+    return null;
+}
+
+static double clampUnit(double v) {
+    return clamp(v, 0.0, 1.0);
+}
+
+static double budAxisVerticalBlend(Point3d a, Point3d b) {
+    Vector3d axis = vec(a, b);
+    if (axis == null || axis.lengthSquared() < 1e-12) return 0.0;
+    axis.normalize();
+    return clampUnit((Math.abs(axis.z) - 0.55) / 0.30);
+}
+
+static Vector3d projectBudReferenceToPlane(Vector3d axis, Vector3d ref) {
+    if (axis == null || ref == null) return null;
+    Vector3d out = new Vector3d(ref.x, ref.y, ref.z);
+    double dot = axis.dot(ref);
+    out.x -= axis.x * dot;
+    out.y -= axis.y * dot;
+    out.z -= axis.z * dot;
+    if (out.lengthSquared() < 1e-12) return null;
+    out.normalize();
+    return out;
+}
+
+static Vector3d stableBudLateral(Vector3d axis, Vector3d dorsal, int seed) {
+    Vector3d side = new Vector3d();
+    if (axis == null || axis.lengthSquared() < 1e-12) axis = new Vector3d(0, 0, 1);
+    if (dorsal != null && dorsal.lengthSquared() >= 1e-12) {
+        side.cross(axis, dorsal);
+    }
+    if (side.lengthSquared() < 1e-12) {
+        Vector3d ref = projectBudReferenceToPlane(axis, new Vector3d(1, 0, 0));
+        if (ref == null) ref = projectBudReferenceToPlane(axis, new Vector3d(0, 1, 0));
+        if (ref != null) side.cross(axis, ref);
+    }
+    if (side.lengthSquared() < 1e-12) side.set(0, 1, 0);
+    else side.normalize();
+    if ((seed & 1) == 0) side.scale(-1.0);
+    return side;
+}
+
+static Vector3d stableBudSurfaceNormal(Point3d a, Point3d b, int seed) {
+    Vector3d axis = vec(a, b);
+    if (axis == null || axis.lengthSquared() < 1e-12) axis = new Vector3d(0, 0, 1);
+    else axis.normalize();
+
+    Vector3d dorsal = projectBudReferenceToPlane(axis, new Vector3d(0, 0, 1));
+    if (dorsal == null) dorsal = projectBudReferenceToPlane(axis, new Vector3d(1, 0, 0));
+    if (dorsal == null) dorsal = projectBudReferenceToPlane(axis, new Vector3d(0, 1, 0));
+    if (dorsal == null) dorsal = new Vector3d(0, 1, 0);
+    else dorsal.normalize();
+
+    Vector3d side = stableBudLateral(axis, dorsal, seed);
+    double verticalBlend = budAxisVerticalBlend(a, b);
+    double dorsalW = (1.0 - verticalBlend) * 1.00 + verticalBlend * 0.35;
+    double lateralW = (1.0 - verticalBlend) * 0.30 + verticalBlend * 0.90;
+
+    Vector3d out = new Vector3d(
+        dorsal.x * dorsalW + side.x * lateralW,
+        dorsal.y * dorsalW + side.y * lateralW,
+        dorsal.z * dorsalW + side.z * lateralW
+    );
+    if (out.lengthSquared() < 1e-12) out = new Vector3d(dorsal.x, dorsal.y, dorsal.z);
+    if (out.lengthSquared() < 1e-12) out = new Vector3d(side.x, side.y, side.z);
+    out.normalize();
+    return out;
+}
+
+static Vector3d biasBudRadialTowardDorsal(Vector3d radial, Point3d a, Point3d b, int seed) {
+    Vector3d preferred = stableBudSurfaceNormal(a, b, seed);
+    if (radial == null || radial.lengthSquared() < 1e-12) return preferred;
+
+    Vector3d axis = vec(a, b);
+    if (axis == null || axis.lengthSquared() < 1e-12) return preferred;
+    axis.normalize();
+
+    Vector3d dorsal = projectBudReferenceToPlane(axis, new Vector3d(0, 0, 1));
+    if (dorsal == null) dorsal = projectBudReferenceToPlane(axis, new Vector3d(1, 0, 0));
+    if (dorsal == null) dorsal = projectBudReferenceToPlane(axis, new Vector3d(0, 1, 0));
+    if (dorsal == null) return preferred;
+
+    Vector3d side = stableBudLateral(axis, dorsal, seed);
+    Vector3d out = new Vector3d(radial.x, radial.y, radial.z);
+    out.normalize();
+
+    double verticalBlend = budAxisVerticalBlend(a, b);
+    double minDorsal = (1.0 - verticalBlend) * 0.35;
+    double sideCap = (1.0 - verticalBlend) * 0.88 + verticalBlend * 0.98;
+    double dorsalDot = out.dot(dorsal);
+    double sideDot = Math.abs(out.dot(side));
+
+    if (dorsalDot >= minDorsal && sideDot <= sideCap) return out;
+
+    double mix = (dorsalDot < minDorsal) ? 0.65 : 0.35;
+    out.x = out.x * (1.0 - mix) + preferred.x * mix;
+    out.y = out.y * (1.0 - mix) + preferred.y * mix;
+    out.z = out.z * (1.0 - mix) + preferred.z * mix;
+    if (out.lengthSquared() < 1e-12) return preferred;
+    out.normalize();
+    return out;
+}
+
+static double pointToSegmentDistance(Point3d p, Point3d a, Point3d b) {
+    if (p == null || a == null) return Double.POSITIVE_INFINITY;
+    if (b == null) return p.distance(a);
+    Point3d q = closestPointOnSegment(a, b, p);
+    if (q == null) return Double.POSITIVE_INFINITY;
+    return p.distance(q);
+}
+
+static boolean hasChildContinuationCordonNode(NodeMap nm, XNode site) {
+    if (nm == null || site == null || !isCordonLikeWoodNode(site)) return false;
+    if (site.start == null || site.childs == null) return false;
+
+    XNode follow = followingCordonOnSameAxisNode(nm, site);
+    Point3d support = resolveBudSupportPoint(nm, site, follow, null);
+    if (support == null) support = site.start;
+
+    double radius = site.diameter * 0.5;
+    if (Double.isNaN(radius) || Double.isInfinite(radius) || radius <= 0.0) radius = 0.005;
+    double tol = Math.max(0.01, radius);
+
+    for (Object cidObj : site.childs) {
+        if (cidObj == null) continue;
+        XNode c = nm.getNode(cidObj);
+        if (c == null || !isCordonLikeWoodNode(c)) continue;
+        if (c.order <= site.order) continue;
+        if (c.start == null) continue;
+        if (pointToSegmentDistance(c.start, site.start, support) <= tol) return true;
+    }
+    return false;
+}
+
+static BudPlacementDecision decideArchitectureBudPlacement(NodeMap nm, XNode site, XNode bud) {
+    if (nm == null || site == null || bud == null) return new BudPlacementDecision(false, "kept", null);
+    if (!isBudNode(bud) || !isCordonLikeWoodNode(site)) return new BudPlacementDecision(false, "kept", null);
+
+    XNode followingSite = followingCordonOnSameAxisNode(nm, site);
+    XNode terminalSite = terminalCordonOnSameAxisNode(nm, site);
+    XNode downstreamBudSite = downstreamBudSiteOnSameAxis(nm, site);
+    boolean childContinuation = hasChildContinuationCordonNode(nm, site);
+
+    if (followingSite != null) {
+        String reason = (terminalSite != null && downstreamBudSite == terminalSite)
+            ? "moved-to-terminal"
+            : "same-axis-continuation";
+        return new BudPlacementDecision(true, reason, terminalSite);
+    }
+    if (childContinuation) {
+        return new BudPlacementDecision(true, "child-cordon-continuation", terminalSite);
+    }
+    return new BudPlacementDecision(false, "kept", terminalSite);
+}
+
+static Point3d budShiftToLocalFrame(TMatrix4d inver, Point3d worldShift) {
+    if (worldShift == null) return new Point3d(0, 0, 0);
+    if (inver == null) return new Point3d(worldShift.x, worldShift.y, worldShift.z);
+
+    Point3d p0 = new Point3d(0, 0, 0);
+    Point3d p1 = new Point3d(worldShift.x, worldShift.y, worldShift.z);
+    try {
+        inver.transform(p0);
+        inver.transform(p1);
+        return new Point3d(p1.x - p0.x, p1.y - p0.y, p1.z - p0.z);
+    } catch (Throwable t) {
+        return new Point3d(worldShift.x, worldShift.y, worldShift.z);
+    }
+}
+
+static BudSurfacePlacement computeBudSurfacePlacement(NodeMap nm, XNode parent, XNode refChild, XNode child) {
+    if (nm == null || parent == null || child == null) return null;
+    if (parent.start == null || child.start == null) return null;
+
+    Point3d supportPoint = resolveBudSupportPoint(nm, parent, refChild, child);
+    if (supportPoint == null) return null;
+
+    Point3d proj = closestPointOnSegment(parent.start, supportPoint, child.start);
+    Vector3d radial = new Vector3d(child.start.x - proj.x, child.start.y - proj.y, child.start.z - proj.z);
+    if (radial.lengthSquared() < 1e-12) radial = stableBudSurfaceNormal(parent.start, supportPoint, child.id);
+    else {
+        radial.normalize();
+        if (isCordonLikeWoodNode(parent)) {
+            // Imported bud coordinates can land on the flank or underside; clamp them back toward the exposed
+            // top sector of the support wood while relaxing that clamp for near-vertical axes.
+            radial = biasBudRadialTowardDorsal(radial, parent.start, supportPoint, child.id);
+        }
+    }
+
+    double radius = parent.diameter * 0.5;
+    if (Double.isNaN(radius) || Double.isInfinite(radius) || radius <= 0.0) radius = 0.005;
+    // Bud origin is assumed to start at the axis centerline, so radius + a small clearance reaches the wood
+    // surface without leaving the imported bud intersecting the support cylinder.
+    double clearance = Math.max(8e-4, Math.min(2.0e-3, radius * 0.25));
+    double target = radius + clearance;
+
+    Point3d shift = new Point3d(radial.x * target, radial.y * target, radial.z * target);
+    float dis = (float) (proj.distance(parent.start) * -1.0);
+    if (dis < -0.10f) dis = -0.10f;
+
+    return new BudSurfacePlacement(dis, shift);
+}
+/**
+ * Axial placement of a lateral child along the current internode segment.
+ * Uses projection of child.start onto segment (N.start -> refChild.start).
+ * Returns negative distance from N.start (GroIMP convention in your code).
+ */
+static float computeDisplacement(XNode N, XNode refChild, XNode child) {
+    if (N == null || refChild == null || child == null) return 0f;
+    if (N.start == null || refChild.start == null || child.start == null) return 0f;
+
+    double segLen = N.start.distance(refChild.start);
+    if (segLen < 1e-9) return 0f;
+    
+    
+    // Virtual endpoint to cap projection segment to 0.10 m
+    double cap = 0.20;
+    Point3d B = refChild.start;
+
+    if (segLen > cap) {
+        double t = cap / segLen;
+        B = new Point3d(
+            N.start.x + (refChild.start.x - N.start.x) * t,
+            N.start.y + (refChild.start.y - N.start.y) * t,
+            N.start.z + (refChild.start.z - N.start.z) * t
+        );
+    }
+
+    Point3d proj = closestPointOnSegment(N.start, B, child.start);
+    float dis = (float) (proj.distance(N.start) * -1.0);
+
+    // still clamp displacement as final safety
+    if (dis < -0.10f) dis = -0.10f;
+    return dis;
+}
+
+
+static Point3d closestPointOnSegment(Point3d A, Point3d B, Point3d P) {
+    Point3d AB = new Point3d(B.x - A.x, B.y - A.y, B.z - A.z);
+    double ab2 = AB.x*AB.x + AB.y*AB.y + AB.z*AB.z;
+    if (ab2 < 1e-12) return new Point3d(A);
+
+    Point3d AP = new Point3d(P.x - A.x, P.y - A.y, P.z - A.z);
+    double t = (AP.x*AB.x + AP.y*AB.y + AP.z*AB.z) / ab2;
+    t = clamp(t, 0.0, 1.0);
+
+    return new Point3d(A.x + AB.x*t, A.y + AB.y*t, A.z + AB.z*t);
+}
+
+static boolean isBudNode(XNode n) {
+    if (n == null || n.organType == null) return false;
+    if (isBudEndNode(n)) return false;
+    String t = n.organType;
+    return (t.indexOf("Bud") >= 0) || (t.indexOf("bud") >= 0);
+}
+
+
+
+static void dbgTopologySummary(NodeMap nm, int rootId) {
+    int n = 0, ap = 0, lat = 0;
+    int rootLat = 0, rootAp = 0;
+
+    for (Object k : nm.getKeySet()) {
+        XNode x = nm.getNode(k);
+        if (x == null) continue;
+        n++;
+        if (x.apChild != 0) ap++;
+        if (x.childs != null) lat += x.childs.size();
+
+        if (x.id == rootId) {
+            rootAp = x.apChild;
+            rootLat = (x.childs == null ? -1 : x.childs.size());
+        }
+    }
+    println("[PF] topo: nodes=" + n + " apLinks=" + ap + " lateralEdges=" + lat
+            + " root.apChild=" + rootAp + " root.childs=" + rootLat);
+}
+
+
+static void debugPreflight(NodeMap nm, int maxPrint) {
+    int nullStart = 0, nullChilds = 0, missingPid = 0;
+    int printed = 0;
+
+    Map exists = new HashMap();
+    for (Object k : nm.getKeySet()) exists.put(k, Boolean.TRUE);
+
+    for (Object k : nm.getKeySet()) {
+        int id = (Integer) k;
+        XNode n = nm.getNode(id);
+        if (n == null) continue;
+
+        if (n.start == null) {
+            nullStart++;
+            if (printed++ < maxPrint) println("[PF] null start id=" + id + " pid=" + n.pid + " type=" + n.organType);
+        }
+        if (n.childs == null) {
+            nullChilds++;
+            if (printed++ < maxPrint) println("[PF] null childs id=" + id + " pid=" + n.pid + " type=" + n.organType);
+        }
+        if (n.pid != -1 && exists.get(Integer.valueOf(n.pid)) == null) {
+            missingPid++;
+            if (printed++ < maxPrint) println("[PF] missing pid target id=" + id + " pid=" + n.pid + " type=" + n.organType);
+        }
+    }
+
+    println("[PF] nullStart=" + nullStart + " nullChilds=" + nullChilds + " missingPid=" + missingPid);
+}
+
+static boolean isRootPlaceholder(XNode n) {
+    if (n == null) return false;
+    if (n.pid != -1) return false;
+    if (n.pid == -1) return true;
+
+    String t = (n.organType == null ? "" : n.organType.trim());
+    if (t.length() == 0) return true;
+
+    // Your files use "NA" for the dummy root row
+    String u = t.toUpperCase();
+    if (u.equals("NA") || u.equals("N/A") || u.equals("NULL")) return true;
+
+    // Extra safety: many formats mark the placeholder as organID==0 and order==0
+    // (only keep if it matches your conventions)
+    try {
+        if (n.organID == 0 && n.order == 0) return true;
+    } catch (Throwable ex) {}
+
+    return false;
+}
+
+
+static void dbgCountBases(String tag, int plantNumber) {
+    int cRB = 0;
+    int cPB = 0;
+    [ p:PlantBase ::> { cPB++; } ]
+    [ r:RootBase, (r.plantNumber == plantNumber) ::> { cRB++; } ]
+    println("[BASES] " + tag + " plant=" + plantNumber + " PlantBase=" + cPB + " RootBase(pn)=" + cRB);
+}
+
+static int[] sortedNodeIds(NodeMap nm) {
+    Object[] keys = nm.getKeySet().toArray();
+    int[] ids = new int[keys.length];
+    for (int i=0; i<keys.length; i++) ids[i] = ((Integer) keys[i]).intValue();
+    java.util.Arrays.sort(ids);
+    return ids;
+}
+static void dbgMultiAxialCandidates(NodeMap nm, int maxPrint) {
+    int printed = 0;
+    for (Object k : nm.getKeySet()) {
+        XNode p = nm.getNode(k);
+        if (p == null || p.childs == null) continue;
+
+        int cnt = 0;
+        for (Object cidObj : p.childs) {
+            XNode c = nm.getNode(cidObj);
+            if (c == null) continue;
+            if (isEndNode(c)) continue;
+
+            if (c.order == p.order && c.segment == p.segment + 1
+                && c.organID == p.organID) {   // IMPORTANT: relies on organID being set
+                cnt++;
+            }
+        }
+
+        if (cnt > 1 && printed++ < maxPrint) {
+            println("[AXIAL_AMBIG] pid=" + p.id
+                + " type=" + p.organType
+                + " organID=" + p.organID
+                + " order=" + p.order
+                + " seg=" + p.segment
+                + " candidates=" + cnt);
+        }
+    }
+}
+
+static boolean isAxisType(XNode n) {
+    if (n == null || n.organType == null) return false;
+    String t = n.organType;
+    return t.indexOf("Trunk") >= 0
+        || t.indexOf("Cordon") >= 0
+        || t.indexOf("Upright") >= 0
+        || t.indexOf("Dropper") >= 0
+        || t.indexOf("oldShoot") >= 0
+        || t.indexOf("OldShoot") >= 0
+        || t.indexOf("Spur") >= 0
+        || t.indexOf("AnnualShoot") >= 0
+        || t.equals("Shoot");
+}
+
+// Higher priority = more likely to be the axial continuation
+static int axisPriority(XNode child) {
+    if (child == null || child.organType == null) return -999;
+    String t = child.organType;
+    if (t.indexOf("oldShoot") >= 0 || t.indexOf("OldShoot") >= 0) return 50;       // continue old wood first
+    if (t.indexOf("AnnualShoot") >= 0 || t.equals("Shoot")) return 40;              // then new annual axis
+    if (t.indexOf("Trunk") >= 0) return 30;
+    if (t.indexOf("Cordon") >= 0 || t.indexOf("Upright") >= 0 || t.indexOf("Dropper") >= 0) return 20;
+    if (t.indexOf("Spur") >= 0) return 10;
+    return 0;
+}
+
+static Vector3d unitVec(Point3d from, Point3d to) {
+    if (from == null || to == null) return null;
+    Vector3d v = new Vector3d(to.x - from.x, to.y - from.y, to.z - from.z);
+    double n2 = v.x*v.x + v.y*v.y + v.z*v.z;
+    if (n2 < 1e-12) return null;
+    v.normalize();
+    return v;
+}
+
+
+
+// Map node.order -> axis identifier to keep continuation consistent across CSV variants.
+static int axisIdByOrder(XNode n) {
+    if (n == null) return -1;
+
+    int o = n.order;
+
+    // Only defined for 2..9 in current branch-path convention; do NOT clamp.
+    if (o < 2 || o > 9) return -1;
+
+    // Prefer lowercase first (if you standardize that way), then uppercase fallback.
+    try {
+        switch (o) {
+            case 2: return n.axis2ID;
+            case 3: return n.axis3ID;
+            case 4: return n.axis4ID;
+            case 5: return n.axis5ID;
+            case 6: return n.axis6ID;
+            case 7: return n.axis7ID;
+            case 8: return n.axis8ID;
+            case 9: return n.axis9ID;
+        }
+    } catch (Throwable t) {}
+
+    
+    return -1;
+}
+
+static int safeAttachmentRank(XNode parent) {
+	if (parent == null) return 1;
+	if (parent.segment > 0) return parent.segment;
+	return 1;
+}
+
+static void copyAxisPath(XNode src, XNode dst) {
+	if (src == null || dst == null) return;
+	dst.axis2ID = src.axis2ID;
+	dst.axis3ID = src.axis3ID;
+	dst.axis4ID = src.axis4ID;
+	dst.axis5ID = src.axis5ID;
+	dst.axis6ID = src.axis6ID;
+	dst.axis7ID = src.axis7ID;
+	dst.axis8ID = src.axis8ID;
+	dst.axis9ID = src.axis9ID;
+}
+
+static void assignBudAxisPathFromParent(XNode parent, XNode budNode, boolean terminalContinuation) {
+	if (parent == null || budNode == null) return;
+	copyAxisPath(parent, budNode);
+	int childOrder = parent.order + 1;
+	if (childOrder < 3) childOrder = 3;
+	if (childOrder > 9) childOrder = 9;
+	int attachRank = safeAttachmentRank(parent);
+
+	if (!terminalContinuation) {
+		if (childOrder == 3) budNode.axis3ID = attachRank;
+		else if (childOrder == 4) budNode.axis4ID = attachRank;
+		else if (childOrder == 5) budNode.axis5ID = attachRank;
+		else if (childOrder == 6) budNode.axis6ID = attachRank;
+		else if (childOrder == 7) budNode.axis7ID = attachRank;
+		else if (childOrder == 8) budNode.axis8ID = attachRank;
+		else budNode.axis9ID = attachRank;
+	}
+
+	if (printFlag || debug) {
+		println("[archReader][bud-axis] parentId=" + parent.id
+			+ " budNodeId=" + budNode.id
+			+ " terminal=" + terminalContinuation
+			+ " parentOrder=" + parent.order
+			+ " childOrder=" + childOrder
+			+ " attachRank=" + attachRank
+			+ " axis2=" + budNode.axis2ID
+			+ " axis3=" + budNode.axis3ID
+			+ " axis4=" + budNode.axis4ID
+			+ " axis5=" + budNode.axis5ID
+			+ " axis6=" + budNode.axis6ID
+			+ " axis7=" + budNode.axis7ID
+			+ " axis8=" + budNode.axis8ID
+			+ " axis9=" + budNode.axis9ID);
+	}
+}
+
+static void assignAxialChainsByPidAxisSegment(NodeMap nm, double maxTurnDeg) {
+
+    Map groups = new HashMap();
+
+    // collect siblings into groups
+    for (Object k : nm.getKeySet()) {
+        int id = ((Integer) k).intValue();
+        XNode n = nm.getNode(Integer.valueOf(id));
+        if (n == null) continue;
+
+        if (isEndNode(n)) continue;
+        if (isLeafAny(n)) continue;
+        if (!isAxisType(n)) continue;
+
+        if (n.pid <= 0) continue;
+        int axisId = axisIdByOrder(n);
+        if (axisId <= 0) continue;
+
+        String key = n.pid + ":" + n.order + ":" + axisId;
+
+        java.util.List lst = (java.util.List) groups.get(key);
+        if (lst == null) { lst = new java.util.ArrayList(); groups.put(key, lst); }
+        lst.add(Integer.valueOf(n.id));
+    }
+
+    // process each group
+    for (Object keyObj : groups.keySet()) {
+        String key = (String) keyObj;
+        java.util.List lst = (java.util.List) groups.get(key);
+        if (lst == null || lst.size() < 2) continue;
+
+        // sort by (segment asc, id asc) (your RGG-safe bubble sort)
+        for (int i = 0; i < lst.size(); i++) {
+            for (int j = i + 1; j < lst.size(); j++) {
+                int ida = ((Integer) lst.get(i)).intValue();
+                int idb = ((Integer) lst.get(j)).intValue();
+
+                XNode na = nm.getNode(Integer.valueOf(ida));
+                XNode nb = nm.getNode(Integer.valueOf(idb));
+
+                int sa = (na == null ? 999999 : na.segment);
+                int sb = (nb == null ? 999999 : nb.segment);
+
+                boolean swap = false;
+                if (sa > sb) swap = true;
+                else if (sa == sb && ida > idb) swap = true;
+
+                if (swap) {
+                    Object tmp = lst.get(i);
+                    lst.set(i, lst.get(j));
+                    lst.set(j, tmp);
+                }
+            }
+        }
+
+        // attachParent
+        int colon1 = key.indexOf(':');
+        int pid = Integer.parseInt(key.substring(0, colon1));
+        XNode attachParent = nm.getNode(Integer.valueOf(pid));
+
+        // track which nodes got chained (so we only detach those)
+        boolean[] chained = new boolean[lst.size()];
+        chained[0] = true;
+
+        for (int i = 0; i < lst.size() - 1; i++) {
+            int curId = ((Integer) lst.get(i)).intValue();
+            int nxtId = ((Integer) lst.get(i + 1)).intValue();
+
+            XNode cur = nm.getNode(Integer.valueOf(curId));
+            XNode nxt = nm.getNode(Integer.valueOf(nxtId));
+            if (cur == null || nxt == null) continue;
+
+            if (cur.apChild != 0) continue;
+            if (nxt.segment != cur.segment + 1) continue;
+
+            // incoming direction:
+            // if i>0 use (prev -> cur), else use (attachParent -> cur)
+            Vector3d vin = null;
+            if (i > 0) {
+                int prevId = ((Integer) lst.get(i - 1)).intValue();
+                XNode prev = nm.getNode(Integer.valueOf(prevId));
+                vin = (prev == null ? null : vec(prev.start, cur.start));
+            } else {
+                vin = (attachParent == null ? null : vec(attachParent.start, cur.start));
+            }
+
+            Vector3d vout = vec(cur.start, nxt.start);
+            double ang = (vin == null ? 0.0 : angleDeg(vin, vout));
+            if (vin != null && ang > maxTurnDeg) {
+                // reject this link, keep nxt as lateral under attachParent
+                continue;
+            }
+
+            cur.apChild = nxt.id;
+            chained[i + 1] = true;
+        }
+
+        // detach only nodes that are actually chained beyond the first
+        if (attachParent != null && attachParent.childs != null) {
+            for (int i = 1; i < lst.size(); i++) {
+                if (!chained[i]) continue; // not linked => keep as lateral
+                int sid = ((Integer) lst.get(i)).intValue();
+                removeChildId(attachParent.childs, sid);
+            }
+        }
+    }
+}
+
+
+
+
+static void clearApChild(NodeMap nm) {
+    if (nm == null) return;
+    for (Object k : nm.getKeySet()) {
+        XNode n = nm.getNode(k);
+        if (n == null) continue;
+        n.apChild = 0;
+    }
+}
+
+
+static void dbgApChildStats(NodeMap nm) {
+    if (nm == null) return;
+
+    int total = 0;
+    int withAp = 0;
+    int maxChilds = 0;
+
+    for (Object k : nm.getKeySet()) {
+        XNode n = nm.getNode(k);
+        if (n == null) continue;
+        total++;
+
+        if (n.apChild != 0) withAp++;
+        int cs = (n.childs == null ? 0 : n.childs.size());
+        if (cs > maxChilds) maxChilds = cs;
+    }
+
+    println("[DBG_AP] nodes=" + total
+        + " withApChild=" + withAp
+        + " frac=" + (total == 0 ? 0.0 : (withAp * 1.0 / total))
+        + " maxChilds=" + maxChilds);
+}
+
+
+static Vector3d vec(Point3d a, Point3d b) {
+    if (a == null || b == null) return null;
+    return new Vector3d(b.x - a.x, b.y - a.y, b.z - a.z);  // a -> b
+}
+
+static double dot(Vector3d u, Vector3d v) {
+    if (u == null || v == null) return 0.0;
+    return u.x*v.x + u.y*v.y + u.z*v.z;
+}
+
+static double norm(Vector3d u) {
+    if (u == null) return 0.0;
+    return Math.sqrt(u.x*u.x + u.y*u.y + u.z*u.z);
+}
+
+static double angleDeg(Vector3d u, Vector3d v) {
+    double nu = norm(u), nv = norm(v);
+    if (nu < 1e-12 || nv < 1e-12) return -1.0;
+    double c = dot(u, v) / (nu * nv);
+    if (c < -1.0) c = -1.0;
+    if (c >  1.0) c =  1.0;
+    return Math.acos(c) * 180.0 / Math.PI;
+}
+
+static String fmtP(Point3d p) {
+    if (p == null) return "null";
+    return "(" + p.x + "," + p.y + "," + p.z + ")";
+}
+
+
+static void dbgSharpBends(NodeMap nm, double angleThreshDeg, int maxPrint) {
+    int printed = 0;
+    int checked = 0;
+
+    for (Object k : nm.getKeySet()) {
+        int id = ((Integer) k).intValue();
+        XNode n = nm.getNode(Integer.valueOf(id));
+        if (n == null) continue;
+
+        // Only meaningful if we have both an incoming and outgoing segment
+        if (n.pid <= 0) continue;
+        if (n.apChild == 0) continue;
+
+        XNode p  = nm.getNode(Integer.valueOf(n.pid));
+        XNode ap = nm.getNode(Integer.valueOf(n.apChild));
+        if (p == null || ap == null) continue;
+
+        if (p.start == null || n.start == null || ap.start == null) continue;
+
+        Vector3d vin  = vec(p.start, n.start);      // pid -> n
+        Vector3d vout = vec(n.start, ap.start);     // n -> apChild
+
+        double ang = angleDeg(vin, vout);
+        if (ang < 0) continue;
+        checked++;
+
+        if (ang >= angleThreshDeg) {
+            // also report lengths (meters)
+            double lin  = p.start.distance(n.start);
+            double lout = n.start.distance(ap.start);
+
+            println("[BEND] id=" + n.id
+                + " type=" + safeType(n)
+                + " pid=" + n.pid
+                + " ap=" + n.apChild
+                + " order=" + n.order
+                + " seg=" + n.segment
+                + " angDeg=" + ang
+                + " lin=" + lin
+                + " lout=" + lout
+                + " p=" + fmtP(p.start)
+                + " n=" + fmtP(n.start)
+                + " ap=" + fmtP(ap.start));
+
+            printed++;
+            if (printed >= maxPrint) break;
+        }
+    }
+
+    println("[BEND] checked=" + checked + " printed=" + printed + " threshDeg=" + angleThreshDeg);
+}
+
+/**
+ * Collect only suspicious bends.
+ *
+ * Suspicious definition (tune):
+ *  - angleDeg >= threshDeg
+ *  - AND (lin or lout > maxStep) OR (len ratio very imbalanced)
+ *
+ * @param nm
+ * @param threshDeg e.g. 60
+ * @param maxKeep max suspects to keep (top by score)
+ * @param maxStep meters, e.g. 0.20
+ * @param ratioImbalance e.g. 3.0 means max(lin,lout)/min(lin,lout) >= 3 is suspicious
+ */
+static void dbgCollectSharpBends(NodeMap nm, double threshDeg, int maxKeep,
+                                 double maxStep, double ratioImbalance) {
+
+    dbgResetSuspects();
+
+    int checked = 0;
+
+    for (Object k : nm.getKeySet()) {
+        XNode n = nm.getNode(k);
+        if (n == null) continue;
+        if (n.pid <= 0) continue;
+        if (n.apChild == 0) continue;
+
+        XNode p  = nm.getNode(Integer.valueOf(n.pid));
+        XNode ap = nm.getNode(Integer.valueOf(n.apChild));
+        if (p == null || ap == null) continue;
+        if (p.start == null || n.start == null || ap.start == null) continue;
+
+        // vectors: incoming (p->n) and outgoing (n->ap)
+        Vector3d vin  = unitVec(p.start, n.start);
+        Vector3d vout = unitVec(n.start, ap.start);
+        if (vin == null || vout == null) continue;
+
+        // angle
+        double dot = vin.dot(vout);
+        if (dot > 1) dot = 1;
+        if (dot < -1) dot = -1;
+        double angDeg = Math.acos(dot) * 180.0 / Math.PI;
+
+        double lin  = p.start.distance(n.start);
+        double lout = n.start.distance(ap.start);
+
+        // length ratio
+        double minL = (lin < lout ? lin : lout);
+        double maxL = (lin > lout ? lin : lout);
+        double ratio = (minL < 1e-9 ? 999999.0 : maxL / minL);
+
+        boolean susp = (angDeg >= threshDeg) && (
+                          (lin > maxStep) || (lout > maxStep) || (ratio >= ratioImbalance)
+                       );
+
+        checked++;
+
+        if (!susp) continue;
+
+        // score: prioritize near-180 reversals + big step + big imbalance
+        double score = (angDeg - threshDeg) * 10.0 + (maxL / (maxStep + 1e-9)) * 50.0 + ratio * 5.0;
+
+        Integer idKey = Integer.valueOf(n.id);
+        dbgSuspectScore.put(idKey, Double.valueOf(score));
+        dbgSuspectIds.add(idKey);
+    }
+
+    // Keep only top maxKeep by score (RGG-safe bubble sort)
+    dbgSortSuspectsByScoreDesc(maxKeep);
+
+    println("[DBG_BENDS] checked=" + checked
+        + " suspectsKept=" + dbgSuspectIds.size()
+        + " threshDeg=" + threshDeg
+        + " maxStep=" + maxStep
+        + " ratioImbalance=" + ratioImbalance);
+}
+
+static void dbgSortSuspectsByScoreDesc(int maxKeep) {
+    // sort dbgSuspectIds by dbgSuspectScore descending
+    for (int i = 0; i < dbgSuspectIds.size(); i++) {
+        for (int j = i + 1; j < dbgSuspectIds.size(); j++) {
+            Integer ia = (Integer) dbgSuspectIds.get(i);
+            Integer ib = (Integer) dbgSuspectIds.get(j);
+
+            Double sa = (Double) dbgSuspectScore.get(ia);
+            Double sb = (Double) dbgSuspectScore.get(ib);
+            double a = (sa == null ? -1e100 : sa.doubleValue());
+            double b = (sb == null ? -1e100 : sb.doubleValue());
+
+            if (b > a) {
+                Object tmp = dbgSuspectIds.get(i);
+                dbgSuspectIds.set(i, dbgSuspectIds.get(j));
+                dbgSuspectIds.set(j, tmp);
+            }
+        }
+    }
+
+    // truncate
+    while (dbgSuspectIds.size() > maxKeep) {
+        dbgSuspectIds.remove(dbgSuspectIds.size() - 1);
+    }
+}
+
+
+static void dbgEndFolds(NodeMap nm, double angleThreshDeg, int maxPrint) {
+    int printed = 0;
+
+    for (Object k : nm.getKeySet()) {
+        int id = ((Integer) k).intValue();
+        XNode n = nm.getNode(Integer.valueOf(id));
+        if (n == null) continue;
+
+        if (n.pid <= 0) continue;
+        if (n.apChild == 0) continue;
+
+        XNode ap = nm.getNode(Integer.valueOf(n.apChild));
+        if (ap == null) continue;
+
+        // focus only: n -> ap is the last step on that axis
+        if (ap.apChild != 0) continue;
+
+        XNode p = nm.getNode(Integer.valueOf(n.pid));
+        if (p == null) continue;
+
+        if (p.start == null || n.start == null || ap.start == null) continue;
+
+        double ang = angleDeg(vec(p.start, n.start), vec(n.start, ap.start));
+        if (ang < 0) continue;
+
+        if (ang >= angleThreshDeg) {
+            println("[END_FOLD] id=" + n.id
+                + " type=" + safeType(n)
+                + " pid=" + n.pid
+                + " ap=" + n.apChild
+                + " angDeg=" + ang
+                + " p=" + fmtP(p.start)
+                + " n=" + fmtP(n.start)
+                + " ap=" + fmtP(ap.start));
+            if (++printed >= maxPrint) break;
+        }
+    }
+
+    println("[END_FOLD] printed=" + printed + " threshDeg=" + angleThreshDeg);
+}
+
+static void dbgDumpApChain(NodeMap nm, int startId, int maxSteps) {
+    XNode cur = nm.getNode(Integer.valueOf(startId));
+    int steps = 0;
+
+    println("[CHAIN] start=" + startId);
+
+    while (cur != null && steps < maxSteps) {
+        int ap = cur.apChild;
+        println("[CHAIN] step=" + steps
+            + " id=" + cur.id
+            + " type=" + safeType(cur)
+            + " pid=" + cur.pid
+            + " ap=" + ap
+            + " order=" + cur.order
+            + " seg=" + cur.segment
+            + " start=" + fmtP(cur.start));
+
+        if (ap == 0) break;
+        cur = nm.getNode(Integer.valueOf(ap));
+        steps++;
+    }
+}
+
+static void dbgAxialJumps(NodeMap nm, double jumpThresh, int maxPrint) {
+    int printed = 0;
+
+    for (Object k : nm.getKeySet()) {
+        XNode n = nm.getNode(k);
+        if (n == null || n.apChild == 0) continue;
+
+        XNode ap = nm.getNode(Integer.valueOf(n.apChild));
+        if (ap == null || n.start == null || ap.start == null) continue;
+
+        double d = n.start.distance(ap.start);
+        if (d >= jumpThresh) {
+            println("[JUMP] id=" + n.id + " -> " + ap.id
+                + " d=" + d
+                + " n=" + fmtP(n.start)
+                + " ap=" + fmtP(ap.start)
+                + " type=" + safeType(n));
+            if (++printed >= maxPrint) break;
+        }
+    }
+    println("[JUMP] printed=" + printed + " thresh=" + jumpThresh);
+}
+
+static void dbgPrintTopBends(NodeMap nm, int topN, int chainLen) {
+    int n = (topN < dbgSuspectIds.size() ? topN : dbgSuspectIds.size());
+    println("[DBG_BENDS] printing top " + n + " suspects");
+
+    for (int i = 0; i < n; i++) {
+        int id = ((Integer) dbgSuspectIds.get(i)).intValue();
+        XNode x = nm.getNode(Integer.valueOf(id));
+        if (x == null) continue;
+
+        Double sc = (Double) dbgSuspectScore.get(Integer.valueOf(id));
+        println("---- [SUSPECT " + (i+1) + "/" + n + "] id=" + id
+            + " score=" + (sc == null ? "null" : "" + sc.doubleValue())
+            + " type=" + safeType(x)
+            + " pid=" + x.pid
+            + " ap=" + x.apChild
+            + " order=" + x.order
+            + " seg=" + x.segment
+            + " axis=" + axisIdByOrder(x));
+
+        // local triplet print (p, n, ap)
+        dbgPrintTriplet(nm, x);
+
+        // dump chain around it
+        dbgDumpApChain(nm, id, chainLen);
+    }
+}
+
+static void dbgPrintTriplet(NodeMap nm, XNode n) {
+    if (n == null) return;
+    XNode p  = (n.pid > 0 ? nm.getNode(Integer.valueOf(n.pid)) : null);
+    XNode ap = (n.apChild != 0 ? nm.getNode(Integer.valueOf(n.apChild)) : null);
+
+    println("   p=" + (p==null? "null" : fmtPoint(p.start)) + " pid=" + (p==null? "?" : ""+p.id));
+    println("   n=" + fmtPoint(n.start));
+    println("  ap=" + (ap==null? "null" : fmtPoint(ap.start)) + " apId=" + (ap==null? "?" : ""+ap.id));
+}
+
+static boolean isAxisCandidate(XNode n) {
+    if (n == null) return false;
+    if (isEndNode(n)) return false;
+    if (isLeafAny(n)) return false;
+    return isAxisType(n); // your helper (Trunk/Cordon/oldShoot/AnnualShoot/etc.)
+}
+
+static double angleDeg3(Point3d prev, Point3d cur, Point3d nxt) {
+    if (prev == null || cur == null || nxt == null) return 180.0;
+
+    // incoming = cur - prev
+    Vector3d v1 = new Vector3d(cur.x - prev.x, cur.y - prev.y, cur.z - prev.z);
+
+    // outgoing = nxt - cur
+    Vector3d v2 = new Vector3d(nxt.x - cur.x, nxt.y - cur.y, nxt.z - cur.z);
+
+    double n1 = v1.x*v1.x + v1.y*v1.y + v1.z*v1.z;
+    double n2 = v2.x*v2.x + v2.y*v2.y + v2.z*v2.z;
+    if (n1 < 1e-12 || n2 < 1e-12) return 0.0;
+
+    v1.normalize();
+    v2.normalize();
+
+    double dot = v1.dot(v2);
+    if (dot >  1.0) dot =  1.0;
+    if (dot < -1.0) dot = -1.0;
+
+    return Math.acos(dot) * 180.0 / Math.PI;
+}
+
+static void assignAxialChainsDirectChild_Strict(NodeMap nm,
+                                                double maxJumpM,
+                                                double maxAngDeg) {
+    for (Object k : nm.getKeySet()) {
+        int pid = ((Integer) k).intValue();
+        XNode parent = nm.getNode(Integer.valueOf(pid));
+        if (parent == null) continue;
+
+        if (isEndNode(parent)) continue;
+        if (isLeafAny(parent)) continue;
+        if (parent.childs == null || parent.childs.isEmpty()) continue;
+        if (!isAxisType(parent)) continue;
+
+        int nextSeg = parent.segment + 1;
+        int pAxis = axisIdByOrder(parent); // -1 if missing
+
+        // Incoming direction uses parent's pid (grandparent)
+        XNode P = (parent.pid > 0) ? nm.getNode(Integer.valueOf(parent.pid)) : null;
+        Point3d prevPt = (P == null ? null : P.start);
+
+        int bestId = 0;
+        double bestScore = -1e100;
+
+        for (Object cidObj : parent.childs) {
+            if (cidObj == null) continue;
+            int cid = ((Integer) cidObj).intValue();
+            XNode c = nm.getNode(Integer.valueOf(cid));
+            if (c == null) continue;
+
+            // --- hard gates ---
+            if (!isAxisCandidate(c)) continue;
+            if (c.pid != parent.id) continue;          // explicit direct-child check
+            if (c.order != parent.order) continue;     // same order
+            if (c.segment != nextSeg) continue;        // segment+1
+
+            int cAxis = axisIdByOrder(c);
+            if (pAxis > 0 && cAxis > 0 && pAxis != cAxis) continue; // axisId match when present
+
+            if (parent.start != null && c.start != null) {
+                double jump = parent.start.distance(c.start);
+                if (jump > maxJumpM) continue;         // avoid huge axial jumps
+            }
+
+            // angle gate (only if we have prev point)
+            double ang = 0.0;
+            if (prevPt != null && parent.start != null && c.start != null) {
+                ang = angleDeg3(prevPt, parent.start, c.start);
+                if (ang > maxAngDeg) continue;
+            }
+
+            // --- scoring: prefer straighter + shorter ---
+            double jump = (parent.start != null && c.start != null) ? parent.start.distance(c.start) : 0.0;
+            double score = 0.0;
+
+            // straighter is better
+            score += (maxAngDeg - ang) * 10.0;
+            // shorter step is better
+            score += (maxJumpM - jump) * 100.0;
+            // tie-breaker on axisPriority (your helper)
+            score += axisPriority(c);
+
+            if (score > bestScore) {
+                bestScore = score;
+                bestId = cid;
+            }
+        }
+
+        if (bestId != 0) {
+            parent.apChild = bestId;
+            removeChildId(parent.childs, bestId);
+        }
+    }
+}
+
+
+static boolean isLeafAny(XNode n) {
+    if (n == null || n.organType == null) return false;
+    String t = n.organType;
+    return t.indexOf("Leaf") >= 0
+        || t.indexOf("Petiole") >= 0
+        || t.indexOf("Blade") >= 0
+        || t.indexOf("Lamina") >= 0;
+}
+
+// helper: selected terminal nodes remain usable as geometry references without becoming organs
+static boolean allowEndAsGeomRef(XNode parent) {
+    if (parent == null) return false;
+    return isLeafStem(parent) || isLeafBody(parent)
+        || isFruitStem(parent) || isFruitBody(parent)
+        || isBudNode(parent);
+}
+
+
+
+
+static boolean isFruitStem(XNode n) {
+    if (n == null || n.organType == null) return false;
+    return n.organType.indexOf("FruitSTEM") >= 0;
+}
+static boolean isFruitBody(XNode n) {
+    if (n == null || n.organType == null) return false;
+    return n.organType.indexOf("FruitBODY") >= 0;
+}
+static boolean isFruitEnd(XNode n) {
+    if (n == null || n.organType == null) return false;
+    return n.organType.indexOf("FruitEND") >= 0;
+}
+
+static void rewireFruits(NodeMap nm, int maxDbg) {
+    if (nm == null) return;
+
+    int stemSeen = 0, stemWired = 0, stemMissingBody = 0;
+    int bodySeen = 0, bodyWired = 0, bodyMissingEnd = 0;
+
+    // FruitSTEM -> FruitBODY
+    for (Object k : nm.getKeySet()) {
+        XNode stem = nm.getNode(k);
+        if (!isFruitStem(stem)) continue;
+        stemSeen++;
+
+        if (stem.childs == null || stem.childs.isEmpty()) {
+            stemMissingBody++;
+            if (stemMissingBody <= maxDbg) {
+                println("[FRUIT_PID] FruitSTEM has no childs id=" + stem.id + " pid=" + stem.pid);
+            }
+            continue;
+        }
+
+        int bodyId = 0;
+        for (Object cidObj : stem.childs) {
+            if (cidObj == null) continue;
+            int cid = ((Integer) cidObj).intValue();
+            XNode c = nm.getNode(Integer.valueOf(cid));
+            if (c == null) continue;
+            if (c.pid != stem.id) continue;
+            if (isFruitBody(c)) { bodyId = c.id; break; }
+        }
+
+        if (bodyId != 0) {
+            stem.apChild = bodyId;
+            removeChildId(stem.childs, bodyId);
+            stemWired++;
+        } else {
+            stemMissingBody++;
+            if (stemMissingBody <= maxDbg) {
+                println("[FRUIT_PID] FruitSTEM missing FruitBODY id=" + stem.id + " childs=" + stem.childs.size());
+            }
+        }
+    }
+
+    // FruitBODY -> FruitEND
+    for (Object k2 : nm.getKeySet()) {
+        XNode body = nm.getNode(k2);
+        if (!isFruitBody(body)) continue;
+        bodySeen++;
+
+        if (body.childs == null || body.childs.isEmpty()) {
+            bodyMissingEnd++;
+            if (bodyMissingEnd <= maxDbg) {
+                println("[FRUIT_PID] FruitBODY has no childs id=" + body.id + " pid=" + body.pid);
+            }
+            continue;
+        }
+
+        int endId = 0;
+        for (Object cidObj : body.childs) {
+            if (cidObj == null) continue;
+            int cid = ((Integer) cidObj).intValue();
+            XNode c = nm.getNode(Integer.valueOf(cid));
+            if (c == null) continue;
+            if (c.pid != body.id) continue;
+            if (isFruitEnd(c)) { endId = c.id; break; }
+        }
+
+        if (endId != 0) {
+            body.apChild = endId;
+            removeChildId(body.childs, endId);
+            bodyWired++;
+        } else {
+            bodyMissingEnd++;
+            if (bodyMissingEnd <= maxDbg) {
+                println("[FRUIT_PID] FruitBODY missing FruitEND id=" + body.id + " childs=" + body.childs.size());
+            }
+        }
+    }
+
+    println("[FRUIT_PID] stemSeen=" + stemSeen + " stemWired=" + stemWired + " stemMissingBody=" + stemMissingBody
+        + " bodySeen=" + bodySeen + " bodyWired=" + bodyWired + " bodyMissingEnd=" + bodyMissingEnd);
+}

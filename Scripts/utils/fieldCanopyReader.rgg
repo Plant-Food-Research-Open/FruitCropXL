@@ -1,0 +1,276 @@
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileReader;
+import java.io.IOException;
+import java.util.ArrayList;
+import static globalParameters.*;
+
+public class FieldCanopyPatch {
+	public int patchId;
+	public double x;
+	public double y;
+	public double z;
+
+	public FieldCanopyPatch() {
+		patchId = -1;
+		x = 0.0;
+		y = 0.0;
+		z = 0.0;
+	}
+
+	public FieldCanopyPatch(int patchId_, double x_, double y_, double z_) {
+		patchId = patchId_;
+		x = x_;
+		y = y_;
+		z = z_;
+	}
+}
+
+public class FieldCanopyLayer {
+	public int layerId;
+	public double zmin;
+	public double leafAreaDensity;
+	public double[] leafAngles;
+
+	public FieldCanopyLayer() {
+		layerId = -1;
+		zmin = 0.0;
+		leafAreaDensity = 0.0;
+		leafAngles = new double[0];
+	}
+
+	public FieldCanopyLayer(int layerId_, double zmin_, double leafAreaDensity_, double[] leafAngles_) {
+		layerId = layerId_;
+		zmin = zmin_;
+		leafAreaDensity = leafAreaDensity_;
+		leafAngles = leafAngles_;
+	}
+}
+
+public class FieldCanopyReader {
+	public static String getFieldCanopyDataRoot() {
+		
+		return joinPath(PATH_INPUT, fieldCanopy_dataDir);
+	}
+
+	public static ArrayList readCentres() {
+		ArrayList patches = new ArrayList();
+		File file = new File(getFieldCanopyDataRoot(), fieldCanopy_centres_file);
+		if (!file.exists() || file.isDirectory()) {
+			println("[fieldRandomCanopy] Missing centres file: " + file.getAbsolutePath());
+			return patches;
+		}
+
+		BufferedReader reader = null;
+		try {
+			reader = new BufferedReader(new FileReader(file));
+			String line;
+			while ((line = reader.readLine()) != null) {
+				line = cleanLine(line);
+				if (line.length() == 0) continue;
+				String[] parts = line.split(",", -1);
+				if (parts.length < 3) continue;
+				try {
+					int patchId = Integer.parseInt(parts[0].trim());
+					double x = Double.parseDouble(parts[1].trim());
+					double y = Double.parseDouble(parts[2].trim());
+					patches.add(new FieldCanopyPatch(patchId, x, y, 0.0));
+				} catch (NumberFormatException e) {
+					// Header or malformed row; skip locally for legacy CSV compatibility.
+				}
+			}
+		} catch (IOException e) {
+			println("[fieldRandomCanopy] Failed to read centres file: " + e.getMessage());
+		} finally {
+			closeQuietly(reader);
+		}
+		return patches;
+	}
+
+	public static ArrayList readDTM() {
+		ArrayList vertices = new ArrayList();
+		File file = new File(getFieldCanopyDataRoot(), fieldCanopy_DTM_file);
+		if (!file.exists() || file.isDirectory()) {
+			println("[fieldRandomCanopy] Missing DTM file: " + file.getAbsolutePath());
+			return vertices;
+		}
+
+		BufferedReader reader = null;
+		try {
+			reader = new BufferedReader(new FileReader(file));
+			String line;
+			int row = 0;
+			while ((line = reader.readLine()) != null) {
+				row++;
+				line = cleanLine(line);
+				if (line.length() == 0) continue;
+				String[] parts = line.split(",", -1);
+				if (parts.length < 3) continue;
+				try {
+					double x = Double.parseDouble(parts[0].trim());
+					double y = Double.parseDouble(parts[1].trim());
+					double z = Double.parseDouble(parts[2].trim());
+					vertices.add(new FieldCanopyPatch(row, x, y, z));
+				} catch (NumberFormatException e) {
+					println("[fieldRandomCanopy] Skipping malformed DTM row " + row + " in " + file.getName());
+				}
+			}
+		} catch (IOException e) {
+			println("[fieldRandomCanopy] Failed to read DTM file: " + e.getMessage());
+		} finally {
+			closeQuietly(reader);
+		}
+		return vertices;
+	}
+
+	public static ArrayList readPatchLayers(int patchId) {
+		String fileName = fieldCanopy_layerFilePattern;
+		if (fileName == null || fileName.length() == 0) {
+			fileName = "results_per_height_tree_%d.csv";
+		}
+		try {
+			fileName = String.format(fileName, Integer.valueOf(patchId));
+		} catch (RuntimeException e) {
+			fileName = "results_per_height_tree_" + patchId + ".csv";
+		}
+		return readLayerFile(new File(getFieldCanopyDataRoot(), fileName));
+	}
+
+	public static ArrayList readPlotLayers(String plotFile) {
+		File folder = new File(getFieldCanopyDataRoot(), fieldCanopy_plotInputFolder);
+		return readLayerFile(new File(folder, plotFile));
+	}
+
+	public static double getNearestTerrainZ(ArrayList dtm, double x, double y) {
+		if (dtm == null || dtm.size() == 0) return 0.0;
+		double bestDist2 = Double.MAX_VALUE;
+		double bestZ = 0.0;
+		for (int i = 0; i < dtm.size(); i++) {
+			FieldCanopyPatch p = (FieldCanopyPatch) dtm.get(i);
+			double dx = p.x - x;
+			double dy = p.y - y;
+			double d2 = dx * dx + dy * dy;
+			if (d2 < bestDist2) {
+				bestDist2 = d2;
+				bestZ = p.z;
+			}
+		}
+		return bestZ;
+	}
+
+	private static ArrayList readLayerFile(File file) {
+		ArrayList layers = new ArrayList();
+		if (!file.exists() || file.isDirectory()) {
+			println("[fieldRandomCanopy] Missing layer file: " + file.getAbsolutePath());
+			return layers;
+		}
+
+		BufferedReader reader = null;
+		try {
+			reader = new BufferedReader(new FileReader(file));
+			String header = reader.readLine();
+			if (header == null) return layers;
+			header = cleanLine(header);
+			String[] headers = header.split(",", -1);
+			int layerIdx = findColumn(headers, "layer");
+			if (layerIdx < 0) layerIdx = findColumn(headers, "Unnamed: 0");
+			int zminIdx = findColumn(headers, "zmin");
+			int valuesIdx = findColumn(headers, "values");
+			int ladIdx = findColumn(headers, "leafAreaDensity.m2.m3");
+			if (layerIdx < 0) layerIdx = 0;
+			if (zminIdx < 0) zminIdx = 1;
+			if (valuesIdx < 0) valuesIdx = 2;
+			if (ladIdx < 0) ladIdx = 3;
+
+			String line;
+			int row = 1;
+			while ((line = reader.readLine()) != null) {
+				row++;
+				line = cleanLine(line);
+				if (line.length() == 0) continue;
+				String[] parts = line.split(",", -1);
+				int needed = Math.max(Math.max(layerIdx, zminIdx), Math.max(valuesIdx, ladIdx));
+				if (parts.length <= needed) {
+					println("[fieldRandomCanopy] Skipping short layer row " + row + " in " + file.getName());
+					continue;
+				}
+				try {
+					int layerId = parseLayerId(parts[layerIdx], layers.size());
+					double zmin = Double.parseDouble(parts[zminIdx].trim());
+					double lad = Double.parseDouble(parts[ladIdx].trim());
+					double[] angles = parseAngles(parts[valuesIdx]);
+					layers.add(new FieldCanopyLayer(layerId, zmin, lad, angles));
+				} catch (NumberFormatException e) {
+					println("[fieldRandomCanopy] Skipping malformed layer row " + row + " in " + file.getName());
+				}
+			}
+		} catch (IOException e) {
+			println("[fieldRandomCanopy] Failed to read layer file: " + e.getMessage());
+		} finally {
+			closeQuietly(reader);
+		}
+		return layers;
+	}
+
+	private static double[] parseAngles(String raw) {
+		if (raw == null) return new double[0];
+		raw = raw.trim();
+		if (raw.length() == 0) return new double[0];
+		String[] tokens = raw.split(" ");
+		ArrayList values = new ArrayList();
+		for (int i = 0; i < tokens.length; i++) {
+			String token = tokens[i].trim();
+			if (token.length() == 0) continue;
+			try {
+				values.add(Double.valueOf(Double.parseDouble(token)));
+			} catch (NumberFormatException e) {
+				// Skip nonnumeric angle tokens in legacy files.
+			}
+		}
+		double[] angles = new double[values.size()];
+		for (int i = 0; i < values.size(); i++) {
+			angles[i] = ((Double) values.get(i)).doubleValue();
+		}
+		return angles;
+	}
+
+	private static int parseLayerId(String raw, int fallback) {
+		try {
+			return Integer.parseInt(raw.trim());
+		} catch (NumberFormatException e) {
+			return fallback;
+		}
+	}
+
+	private static int findColumn(String[] headers, String name) {
+		for (int i = 0; i < headers.length; i++) {
+			if (name.equals(headers[i].trim())) return i;
+		}
+		return -1;
+	}
+
+	private static String cleanLine(String line) {
+		if (line == null) return "";
+		if (line.endsWith("\r")) {
+			line = line.substring(0, line.length() - 1);
+		}
+		return line;
+	}
+
+	private static String joinPath(String base, String child) {
+		if (base == null) base = "";
+		if (child == null) child = "";
+		if (base.endsWith("/") || base.endsWith(File.separator)) {
+			return base + child + "/";
+		}
+		return base + "/" + child + "/";
+	}
+
+	private static void closeQuietly(BufferedReader reader) {
+		if (reader == null) return;
+		try {
+			reader.close();
+		} catch (IOException e) {
+		}
+	}
+}

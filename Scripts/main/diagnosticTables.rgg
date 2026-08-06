@@ -1,0 +1,250 @@
+/**
+ * Owns the typed diagnostic writers without registering diagnostic tables as
+ * primary biological output tables. All methods are file-output only and do
+ * not mutate model state.
+ */
+public class DiagnosticTableCoordinator {
+	public static final String TABLE_WATER_FLUX_SOLVER = "waterFluxSolver";
+	public static final String TABLE_LEAF_EXPANSION = "leafExpansion";
+	public static final String TABLE_ACTUAL_LEAF_SUMMARY = "actualLeafSummary";
+	public static final String TABLE_CARBON_TRANSPORT_MASS_BALANCE = "carbonTransportMassBalance";
+	public static final String TABLE_APPLE_FLOWER_TIMING = "appleFlowerTiming";
+	public static final String TABLE_APPLE_SPUR_BOURSE = "appleSpurBourse";
+	public static final String TABLE_APPLE_FLOWER_TO_FRUIT = "appleFlowerToFruit";
+	public static final String TABLE_APPLE_LEAF_AXIS = "appleLeafAxis";
+
+	private static final java.util.HashMap writers = new java.util.HashMap();
+	private static final java.util.HashMap csvPaths = new java.util.HashMap();
+	private static final java.util.HashMap metadataPaths = new java.util.HashMap();
+	private static final java.util.HashMap rowCounts = new java.util.HashMap();
+	private static com.fasterxml.jackson.dataformat.csv.CsvMapper csvMapper;
+	private static com.fasterxml.jackson.databind.ObjectMapper objectMapper;
+
+	private DiagnosticTableCoordinator() {
+	}
+
+	/**
+	 * Initialize the enabled diagnostic families for one run.
+	 *
+	 * <p>Each enabled CSV is removed exactly once here. Disabled-family artifacts
+	 * from a previous run are also removed. Row writers never delete files, so
+	 * multiple event records emitted during the first step are retained.</p>
+	 */
+	public static synchronized void initialize(
+		String outputPath,
+		String outputTableName,
+		boolean waterEnabled,
+		boolean leafEnabled,
+		boolean carbonEnabled,
+		boolean appleEnabled)
+	{
+		writers.clear();
+		csvPaths.clear();
+		metadataPaths.clear();
+		rowCounts.clear();
+		csvMapper = null;
+		objectMapper = null;
+
+		if (outputPath == null || outputPath.trim().length() == 0) return;
+
+		java.io.File outputDirectory = new java.io.File(outputPath);
+		java.io.File diagnosticDirectory = new java.io.File(outputDirectory, "diagnostics");
+		String tableName = (outputTableName == null) ? "" : outputTableName;
+		if (!waterEnabled) {
+			deleteIfExists(new java.io.File(outputDirectory,
+				"waterFluxSolverDebug_" + tableName + ".csv"));
+			deleteIfExists(new java.io.File(outputDirectory,
+				"waterFluxSolverDebug.metadata.json"));
+		}
+		if (!leafEnabled) {
+			deleteIfExists(new java.io.File(diagnosticDirectory,
+				"leafExpansion_debug.csv"));
+			deleteIfExists(new java.io.File(diagnosticDirectory,
+				"leafExpansion_debug.metadata.json"));
+			deleteIfExists(new java.io.File(diagnosticDirectory,
+				"actual_leaf_object_summary_debug.csv"));
+			deleteIfExists(new java.io.File(diagnosticDirectory,
+				"actual_leaf_object_summary_debug.metadata.json"));
+		}
+		if (!carbonEnabled) {
+			deleteIfExists(new java.io.File(diagnosticDirectory,
+				"debug_ct_mass_balance.csv"));
+			deleteIfExists(new java.io.File(diagnosticDirectory,
+				"debug_ct_mass_balance.metadata.json"));
+		}
+		if (!appleEnabled) {
+			deleteIfExists(new java.io.File(diagnosticDirectory,
+				"flower_timing_debug.csv"));
+			deleteIfExists(new java.io.File(diagnosticDirectory,
+				"flower_timing_debug.metadata.json"));
+			deleteIfExists(new java.io.File(diagnosticDirectory,
+				"apple_spur_bourse_debug.csv"));
+			deleteIfExists(new java.io.File(diagnosticDirectory,
+				"apple_spur_bourse_debug.metadata.json"));
+			deleteIfExists(new java.io.File(diagnosticDirectory,
+				"flower_to_fruit_debug.csv"));
+			deleteIfExists(new java.io.File(diagnosticDirectory,
+				"flower_to_fruit_debug.metadata.json"));
+			deleteIfExists(new java.io.File(diagnosticDirectory,
+				"apple_leaf_axis_debug.csv"));
+			deleteIfExists(new java.io.File(diagnosticDirectory,
+				"apple_leaf_axis_debug.metadata.json"));
+		}
+		if (!waterEnabled && !leafEnabled && !carbonEnabled && !appleEnabled) return;
+		if (!ensureDirectory(outputDirectory)) return;
+
+		csvMapper = new com.fasterxml.jackson.dataformat.csv.CsvMapper();
+		csvMapper.setVisibility(
+			com.fasterxml.jackson.annotation.PropertyAccessor.ALL,
+			com.fasterxml.jackson.annotation.JsonAutoDetect.Visibility.NONE);
+		csvMapper.setVisibility(
+			com.fasterxml.jackson.annotation.PropertyAccessor.FIELD,
+			com.fasterxml.jackson.annotation.JsonAutoDetect.Visibility.DEFAULT);
+
+		objectMapper = new com.fasterxml.jackson.databind.ObjectMapper();
+
+		if (waterEnabled) {
+			register(
+				TABLE_WATER_FLUX_SOLVER,
+				new java.io.File(outputDirectory,
+					"waterFluxSolverDebug_" + tableName + ".csv"),
+				new java.io.File(outputDirectory, "waterFluxSolverDebug.metadata.json"),
+				PlantWaterFluxSolverDebugOutputData.class);
+		}
+
+		if (!leafEnabled && !carbonEnabled && !appleEnabled) return;
+		if (!ensureDirectory(diagnosticDirectory)) return;
+
+		if (leafEnabled) {
+			register(TABLE_LEAF_EXPANSION,
+				new java.io.File(diagnosticDirectory, "leafExpansion_debug.csv"),
+				new java.io.File(diagnosticDirectory, "leafExpansion_debug.metadata.json"),
+				LeafExpansionDiagnosticOutputData.class);
+			register(TABLE_ACTUAL_LEAF_SUMMARY,
+				new java.io.File(diagnosticDirectory, "actual_leaf_object_summary_debug.csv"),
+				new java.io.File(diagnosticDirectory, "actual_leaf_object_summary_debug.metadata.json"),
+				ActualLeafSummaryDiagnosticOutputData.class);
+		}
+
+		if (carbonEnabled) {
+			register(TABLE_CARBON_TRANSPORT_MASS_BALANCE,
+				new java.io.File(diagnosticDirectory, "debug_ct_mass_balance.csv"),
+				new java.io.File(diagnosticDirectory, "debug_ct_mass_balance.metadata.json"),
+				CarbonTransportMassBalanceDiagnosticOutputData.class);
+		}
+
+		if (appleEnabled) {
+			register(TABLE_APPLE_FLOWER_TIMING,
+				new java.io.File(diagnosticDirectory, "flower_timing_debug.csv"),
+				new java.io.File(diagnosticDirectory, "flower_timing_debug.metadata.json"),
+				AppleFlowerTimingDiagnosticOutputData.class);
+			register(TABLE_APPLE_SPUR_BOURSE,
+				new java.io.File(diagnosticDirectory, "apple_spur_bourse_debug.csv"),
+				new java.io.File(diagnosticDirectory, "apple_spur_bourse_debug.metadata.json"),
+				AppleSpurBourseDiagnosticOutputData.class);
+			register(TABLE_APPLE_FLOWER_TO_FRUIT,
+				new java.io.File(diagnosticDirectory, "flower_to_fruit_debug.csv"),
+				new java.io.File(diagnosticDirectory, "flower_to_fruit_debug.metadata.json"),
+				AppleFlowerToFruitDiagnosticOutputData.class);
+			register(TABLE_APPLE_LEAF_AXIS,
+				new java.io.File(diagnosticDirectory, "apple_leaf_axis_debug.csv"),
+				new java.io.File(diagnosticDirectory, "apple_leaf_axis_debug.metadata.json"),
+				AppleLeafAxisDiagnosticOutputData.class);
+		}
+	}
+
+	private static boolean ensureDirectory(java.io.File directory) {
+		if (directory == null) return false;
+		if (directory.isDirectory()) return true;
+		return !directory.exists() && directory.mkdirs();
+	}
+
+	private static void deleteIfExists(java.io.File file) {
+		if (file != null && file.exists()) file.delete();
+	}
+
+	private static void register(
+		String tableKey,
+		java.io.File csvFile,
+		java.io.File metadataFile,
+		Class dtoClass)
+	{
+		if (tableKey == null || csvFile == null || metadataFile == null || dtoClass == null) return;
+		java.io.File csvParent = csvFile.getParentFile();
+		java.io.File metadataParent = metadataFile.getParentFile();
+		if (!ensureDirectory(csvParent) || !ensureDirectory(metadataParent)) return;
+		if (csvFile.exists() && !csvFile.delete()) return;
+		if (metadataFile.exists() && !metadataFile.delete()) return;
+
+		(new io.github.fruitcropxl.output.util.SchemaMetadataWriter(
+			metadataFile.getPath(), dtoClass, objectMapper)).writeMetadata();
+		io.github.fruitcropxl.output.util.StepwiseCsvWriter writer =
+			new io.github.fruitcropxl.output.util.StepwiseCsvWriter(csvFile.getPath(), csvMapper);
+		writers.put(tableKey, writer);
+		csvPaths.put(tableKey, csvFile.getPath());
+		metadataPaths.put(tableKey, metadataFile.getPath());
+		rowCounts.put(tableKey, Long.valueOf(0L));
+	}
+
+	private static synchronized void write(String tableKey, Object row) {
+		if (tableKey == null || row == null) return;
+		io.github.fruitcropxl.output.util.StepwiseCsvWriter writer =
+			(io.github.fruitcropxl.output.util.StepwiseCsvWriter) writers.get(tableKey);
+		if (writer == null) return;
+		writer.write(row);
+		Long count = (Long) rowCounts.get(tableKey);
+		long next = (count == null) ? 1L : count.longValue() + 1L;
+		rowCounts.put(tableKey, Long.valueOf(next));
+	}
+
+	public static void writeWaterFluxSolver(PlantWaterFluxSolverDebugOutputData row) {
+		write(TABLE_WATER_FLUX_SOLVER, row);
+	}
+
+	public static void writeLeafExpansion(LeafExpansionDiagnosticOutputData row) {
+		write(TABLE_LEAF_EXPANSION, row);
+	}
+
+	public static void writeActualLeafSummary(ActualLeafSummaryDiagnosticOutputData row) {
+		write(TABLE_ACTUAL_LEAF_SUMMARY, row);
+	}
+
+	public static void writeCarbonTransportMassBalance(
+		CarbonTransportMassBalanceDiagnosticOutputData row)
+	{
+		write(TABLE_CARBON_TRANSPORT_MASS_BALANCE, row);
+	}
+
+	public static void writeAppleFlowerTiming(AppleFlowerTimingDiagnosticOutputData row) {
+		write(TABLE_APPLE_FLOWER_TIMING, row);
+	}
+
+	public static void writeAppleSpurBourse(AppleSpurBourseDiagnosticOutputData row) {
+		write(TABLE_APPLE_SPUR_BOURSE, row);
+	}
+
+	public static void writeAppleFlowerToFruit(AppleFlowerToFruitDiagnosticOutputData row) {
+		write(TABLE_APPLE_FLOWER_TO_FRUIT, row);
+	}
+
+	public static void writeAppleLeafAxis(AppleLeafAxisDiagnosticOutputData row) {
+		write(TABLE_APPLE_LEAF_AXIS, row);
+	}
+
+	public static synchronized boolean isRegistered(String tableKey) {
+		return tableKey != null && writers.containsKey(tableKey);
+	}
+
+	public static synchronized String getCsvPath(String tableKey) {
+		return (tableKey == null) ? null : (String) csvPaths.get(tableKey);
+	}
+
+	public static synchronized String getMetadataPath(String tableKey) {
+		return (tableKey == null) ? null : (String) metadataPaths.get(tableKey);
+	}
+
+	public static synchronized long getRowCount(String tableKey) {
+		Long count = (tableKey == null) ? null : (Long) rowCounts.get(tableKey);
+		return (count == null) ? 0L : count.longValue();
+	}
+}

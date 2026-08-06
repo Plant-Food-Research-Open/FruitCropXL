@@ -1,0 +1,911 @@
+import java.util.List;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Iterator;
+import java.lang.reflect.Constructor;
+import java.io.File;
+import java.io.Serializable;
+import org.inra.psh.jfruit2.data.Data;
+import org.apache.commons.cli.ParseException;
+import org.apache.commons.configuration2.Configuration;
+import org.apache.commons.configuration2.PropertiesConfiguration;
+import org.apache.commons.configuration2.ex.ConfigurationException;
+import java.io.Serializable;
+// JFruit2
+import org.inra.psh.jfruit2.config.ParametersFactory;
+import org.inra.psh.jfruit2.data.Input;
+import org.inra.psh.jfruit2.main.JLaunch;
+import org.inra.psh.jfruit2.main.Util;
+import org.inra.psh.jfruit2.model.Growth;
+import org.inra.psh.jfruit2.config.ParametersFactory;
+
+// Jackson Writer
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.dataformat.csv.CsvMapper;
+import com.fasterxml.jackson.databind.MappingIterator;
+import com.fasterxml.jackson.dataformat.csv.CsvSchema;
+import com.fasterxml.jackson.annotation.JsonIgnore;
+
+//own model
+import static interfaces.*;
+import static absOrgan.*;
+import static plantBase.*;
+import static budBase.*;
+import static extraTools.*;
+import static shoot.*;
+import static modelOptions.*;
+import static lightInterception.*;
+import static initialConditions.*;
+import static berrySimple.*;
+import static berryComplex.*;
+import static virtualFruit.*;
+import static globalParameters.*;
+import static plantParameters.*;
+import static environment.*;
+
+/**
+ * Class responsible for creating instances of different types of fruit services.
+ * It maps the normalized fruitModule selector to exactly one service class.
+ */
+public class FruitCreator implements Serializable {
+	// Preserve compatibility with serialized GroIMP graphs in project storage.
+	private static final long serialVersionUID = 9167376384829494606L;
+	private String fruitModule;
+
+    /** The class type of the service to be used for fruit creation. */
+    private Class serviceClass;
+
+    /**
+     * Constructor for FruitCreator.
+     *
+     * @param fruitModule normalized selector: simpleFruit, complexBerry, or virtualFruit.
+     */
+	public FruitCreator(String fruitModule) {
+		this.fruitModule = fruitModule;
+		this.serviceClass = getServiceClass();
+	}
+
+	 /**
+     * Retrieves the class of the appropriate FruitService according to the creator's configuration.
+     *
+     * @return The class object of the selected FruitService.
+     */
+	public Class getServiceClass() {
+		if (this.serviceClass != null) {
+			return this.serviceClass;
+		}
+
+		if ("simpleFruit".equals(this.fruitModule)) {
+			return SimpleFruit.class;
+		} else if ("complexBerry".equals(this.fruitModule)) {
+			return ComplexBerry.class;
+		} else if ("virtualFruit".equals(this.fruitModule)) {
+			return VirtualFruit.class;
+		}
+		throw new IllegalArgumentException("Unknown fruitModule '" + this.fruitModule
+			+ "'. Accepted values: simpleFruit, complexBerry, virtualFruit");
+	}
+
+	public String getFruitModule() {
+		return this.fruitModule;
+	}
+
+	public boolean usesSimpleFruitService() {
+		return this.serviceClass == SimpleFruit.class
+			|| this.serviceClass == BerrySimple.class;
+	}
+
+	public boolean usesComplexBerryService() {
+		return this.serviceClass == ComplexBerry.class
+			|| this.serviceClass == BerryComplex.class;
+	}
+
+	public boolean usesVirtualFruitService() {
+		return this.serviceClass == VirtualFruit.class;
+	}
+
+	/**
+     * Creates an instance of FruitService without any parameters.
+     *
+     * @return An instance of the appropriate FruitService.
+     * @throws ReflectiveOperationException If there is an error with reflection during object creation.
+     */
+	public FruitService createFruit() {
+		Constructor constructor = this.serviceClass.getConstructor();
+		return (FruitService) constructor.newInstance();
+	}
+
+	 /**
+     * Creates an instance of FruitService with String parameters and an integer delta.
+     *
+     * @param fruitParams The parameters to pass to the FruitService constructor.
+     * @param delta       An integer delta value for the FruitService.
+     * @return An instance of the appropriate FruitService.
+     * @throws ReflectiveOperationException If there is an error with reflection during object creation.
+     */
+	public FruitService createFruit(String fruitParams, int delta) {
+		Constructor constructor = this.serviceClass.getConstructor(String.class, int.class);
+
+		return (FruitService) constructor.newInstance(fruitParams, delta);
+	}
+
+	public FruitService createFruit(ParametersFactory parametersFactory, int delta) {
+		Constructor constructor = this.serviceClass.getConstructor(ParametersFactory.class, int.class);
+
+		return (FruitService) constructor.newInstance(parametersFactory, delta);
+	}
+}
+
+/**  
+ * The Fruit module (merged with FruitService for alternative module switching).
+ * 
+ */
+public abstract module FruitService extends GrowingOrgan implements IFruit, ILightInterceptable, Serializable {
+
+	// Preserve compatibility with serialized GroIMP graphs in project storage.
+	private static final long serialVersionUID = -223223826634580231L;
+
+	/**
+	 * Shared fruit allocation dispatch.
+	 *
+	 * Fruit services historically publish their potential/loading/leakage/
+	 * unloading terms directly and do not invoke GrowingOrgan.calcSupplyDemand
+	 * during the phloem-concentration solve. Keeping that sequence here
+	 * preserves complex and virtual fruit numerics while allowing every fruit
+	 * implementation, including SimpleFruit, to use one polymorphic boundary.
+	 */
+	@Override
+	abstract void updateCarbonAllocation(double sugarConcentration);
+
+
+public class ExtendedJLaunch extends JLaunch implements Serializable {
+    private final long serialVersionUID = 1L;
+    /**
+     * Default constructor.
+     */
+    public ExtendedJLaunch() {
+        super(); // Calls the default constructor of JLaunch
+    }
+
+    /**
+     * Constructor with ParametersFactory.
+     * @param paramFct ParametersFactory instance for initialization.
+     */
+    public ExtendedJLaunch(ParametersFactory paramFct) {
+        super(paramFct); // Calls the parent constructor with ParametersFactory
+    }
+    
+    /**
+     * Override of the readProperties method to include logging and additional functionality.
+     * @param pathname Name of the .properties file.
+     */
+    @Override
+    public void readProperties(String pathname) {
+          try {
+			// Lecture et vérification des paramètres
+			File fParam = new File(pathname);
+			if (!fParam.exists()) throw new ParseException("File " + fParam.getPath() + " not found");
+			paramFct.load(fParam, null);
+			paramFct.writeAndCheck();
+			//paramFct.print();
+		}
+		catch (Exception e) {
+			String message = e.getMessage() == null ? e.toString() : e.getMessage();
+			System.out.println("FATAL : " + message);
+		}
+		catch (Error e) {
+			String message = e.getMessage() == null ? e.toString() : e.getMessage();
+			System.out.println("FATAL : " + message);
+		}
+	}
+}
+
+	/**
+	 * Explicit template payload for initializing a newly added fruit.
+	 * Units:
+	 * - freshWeight_mg, dryWeight_mg, waterMass_mg, seedDryWeight_mg in mg
+	 * - vol_cm3 in cm3
+	 * - mSuc/mSor/mGlu/mFru/mSta/mSyn in g C (mirrors JFruit Sugar2 outputs)
+	 * - c*0 in the raw Sugar2 init-key units from the parameter file; pass through unchanged
+	 */
+	public static class FruitInitState implements Serializable {
+		private static final long serialVersionUID = 1L;
+		public boolean valid = false;
+		public boolean hasSugar2Mass = false;
+		public boolean hasSugar2Concentrations = false;
+		public double freshWeight_mg = Double.NaN;
+		public double dryWeight_mg = Double.NaN;
+		public double waterMass_mg = Double.NaN;
+		public double seedDryWeight_mg = Double.NaN;
+		public double vol_cm3 = Double.NaN;
+		public double age_model = Double.NaN;
+		public double ageD_day = Double.NaN;
+		public int ageHour = -1;
+		public int ageMin = -1;
+		public double length_m = Double.NaN;
+		public double diameter_m = Double.NaN;
+		public double mSuc = Double.NaN;
+		public double mSor = Double.NaN;
+		public double mGlu = Double.NaN;
+		public double mFru = Double.NaN;
+		public double mSta = Double.NaN;
+		public double mSyn = Double.NaN;
+		public double sugarConcentration_fruit_g_per_g = Double.NaN;
+		public double cSuc0 = Double.NaN;
+		public double cSor0 = Double.NaN;
+		public double cGlu0 = Double.NaN;
+		public double cFru0 = Double.NaN;
+		public double cSta0 = Double.NaN;
+	}
+
+
+/**
+ * Parameters for dynamic growth and initialization linked with JFruit2.
+ * static means all instances has the same value. change one will affect all
+ */
+global String PARAMS; /**< Parameters for the fruit model configuration. */
+
+protected ExtendedJLaunch jLaunch; /**< Launch parameters for the simulation. */
+ /**< Factory for creating and managing parameters. 
+ this is for storing the originalParametersFactory, 
+ we have an instance factory for tracking the changed initial values*/
+global ParametersFactory originalParametersFactory;
+	global int DELTA = 60; /**< Jfruit2 time step in minutes [mn]. */
+
+global boolean veraison = false; /**< Flag indicating whether the fruit has reached the veraison stage. */
+/**phloem sugar concentration mol/L*/
+public double Cpm;
+
+protected transient Input input; /**< JFruit2 input parameters for the simulation. */
+protected transient List inputNodeList; /**< A list representing golden growth stages. */
+
+@JsonIgnore() // Ignore this property as we do not require it in the fruit CSV output
+public List outputHeader; /**< Header for the output for Jfruit. */
+
+@JsonIgnore() // Ignore this property as it cannot be deserialised to CSV
+public ObjectNode output; /**< Output node for simulation results. */
+global String[] inputHeaders;
+
+global int active;
+/** Header of the result file for the growth model */
+global String[] growthHeader = {"pip", "piv", "pp", "pv", "sfstone", "af", "ctcs", "pif", "tf", "cv", "ua", "ux1", "up1", "khx", "khp", "ux", "up", "masfls", "pasfls", "rM", "rG", "w", "s", "pf1", "pf2", "pf", "v"};
+
+/** Header of the result file for the sugar model */
+global String[] sugarHeader = {"dD", "mSol", "mSta", "mSyn"};
+
+/** Header of the result file for the sugar model (calculation of concentrations) */
+global String[] sugarConcHeader = {"cSolDM", "cStaDM", "cSolFM", "cStaFM"};
+
+/** Header of the result file for the sugar2 model */
+global String[] sugar2Header = {"mSuc", "mSor", "mGlu", "mFru", "mSta", "mSyn"};
+
+/** Header of the result file for the citrate model */
+global String[] citrateHeader = {"cit"};
+
+/** Header of the result file for the citrate model (calculation of concentrations) */
+global String[] citrateConcHeader = {"cCitW", "cCit", "cCitS"};
+
+/** Header of the result file for the malate model */
+global String[] malateHeader = {"malate", "deltaPsi", "pH", "mu"};
+/**
+ * Time and phenological stage parameters.
+ */
+int FRUIT_BEGIN; /**< This is for dynamic growth, initiating from flower or apex, the start of fruit age. */
+	boolean isFirstUpdate = true; /**< Flag to check if it is the first update step for JFruit. */
+	// One-time QA marker for fruits added by FruitPlanner (used by VirtualFruit debug checks).
+	public boolean addFruitDebugPendingPostCalcCheck = false;
+	public long addFruitDebugParentInternodeId = -1;
+	public long addFruitDebugTemplateFruitId = -1;
+	public boolean addFruitDebugTemplateUsed = false;
+
+	boolean shouldDrop; /**< Flag indicating whether the fruit should drop. */
+int phenologyStage; /**< Current phenological stage of the fruit. */
+int berryNum = 1; /**< Number of berries. */
+boolean initialized; /**< Indicates whether initialization between flowering to fruit set has occurred. */
+int ageHour; /**< Age in hours, representing the hour of the day. */
+public int ageMin; /**< Age in minutes. */
+
+
+/**
+ * Structural and mechanical properties.
+ * Includes biomass, volume, and conductance and cell wall extensibility
+ */
+public double structuralBiomass; /**< Structural biomass of the fruit. */
+public double seedDryWeight; /**< Fresh mass of the stone (fruit pit), assuming the water content of the seed is 0.5, measured in grams. */
+public double vol; /**< Fruit volume (cm3). */
+public double Afruit; /**< Fruit surface area, measured in square centimeters. */
+public double Axylem; /**< Surface area of the xylem network, in proportion to fruit surface area. */
+public double Aphloem; /**< Surface area of the phloem network, assumed to be the same as the xylem area. */
+public double Lxylem; /**< Axial xylem conductance (g bar-1.h-1). */
+public double Lphloem; /**< Axial phloem conductance (g bar-1.h-1). */
+public double cellWallExtensibility; /**< Measures the extensibility of the cell wall, affecting growth and development of the fruit. */
+double elasticModulus; /**< Elastic modulus of the fruit tissue, indicating the stiffness, measured in bar. */
+
+
+/**
+ * Water dynamics and flux properties.
+ * Includes water potential, and water flux.
+ * For fruit calculation, all water potential parts needs to converted from MPa to bar (1 bar = 0.1 MPa; needs * 10);
+ * the idea was the plant water potential is MPa, and then time 10 to convert into Bar for waterPotential_xylem input. 
+ */
+public double waterPotential_fruit; /**< bar, Water potential of the fruit, indicating the tendency of water to move from soil into the fruit. */
+public double waterPotential_xylem; /**< bar, Water potential in the xylem, indicating the tendency of water to move within the plant's vascular system. */
+public double waterPotential_phloem; /**< bar, Water potential in the phloem, related to the transport of water in the plant. */
+public double waterUptake_xylem; /**< Xylem water flux (g H2O/h). */
+public double waterUptake_phloem; /**< Phloem water flux (g H2O/h). */
+public double waterUptake_vascular_xylem; /**< Xylem water flux from the pedicel (g H2O/h). */
+public double waterUptake_vascular_phloem; /**< Phloem water flux from the pedicel (g H2O/h). */
+public double transpirationMass; /**< Transpiration of the fruit (g H2O/h). */
+public double waterMass; /**< Water mass (mg), converted for comparison with other organs. */
+public double deltaWater; /**< Change in water content within the fruit, typically reflecting water uptake or loss. */
+public double respirationWater; /**< Water lost through respiration processes of the fruit. */
+public double ro; /**< Surface conductance for water vapor, indicating how easily water vapor passes through the surface of the fruit. */
+
+/** Fruit incident PAR per unit area in umol / m2 / s (mirrors PhotosynthateOrgan.incPARm2). */
+public double fruitIncidentPAR;
+/** Fruit absorbed PAR in umol / s (mirrors PhotosynthateOrgan.absPAR). */
+public double fruitAbsorbedPAR;
+/** Fruit absorbed total radiation in model radiation unit / s (mirrors PhotosynthateOrgan.abs). */
+public double fruitAbsorbedRadiation;
+/** Fruit absorbed total radiation per unit area in model radiation unit / m2 / s (mirrors PhotosynthateOrgan.absm2). */
+public double fruitAbsorbedRadiation_m2;
+/** Effective fruit area used for light interception (m2). Can represent bunch-level proxy area in complex berry mode. */
+public double fruitLightArea_m2;
+/** Effective berry count used in fruit light area scaling (for QA/debug). */
+public int fruitBerryCountEffective;
+
+/**
+ * Sugar dynamics, carbon content, and transport properties.
+ * Includes sugar concentration, carbon allocation, uptake, and flux.
+ */
+// Assume the sugar input is accumulated in the form of sucrose, 0.28 is the ssrat[1] concentration of glucose.
+// Convert unit of sugar concentration from g sugar/g solution to mol sugar/mol solution.
+// Example: Glucose (Glc) and Fructose (Fru) (180.2 g/mol) are major sugars accumulated in fruit. 
+// There is Cgg g sugar (glucose) and (1 - Cgg) g water in 1 g solution with concentration Cgg g sugar/g solution;
+// The calculation: Cmm (mol sugar/mol solution) = (Cgg/180.2) / (Cgg/180.2 + (1 - Cgg)/18), get Cmm = Cgg/(10 - 9Cgg)
+
+public double sugarConcentration_fruit; /**< Soluble sugar concentration in the fruit (g soluble sugar/g water). */
+public double sugarConcentrationMole_fruit; /**< Total concentration of soluble compounds in the fruit (mol/g water ). */
+public double sucroseConcentration_vascular; /**< Sucrose concentration in the fruit vasculature (g suc/g pulp). */
+public double sugarConcentrationMole_phloem; /**< Sucrose concentration in the phloem (mol sucrose/mol solution). */
+public double sugarConcentration_phloem; /**< Sucrose concentration in the phloem (g sugar/g solution). */
+
+public double unloadingPerFruit; /**< The rate at which substances are unloaded from the phloem into the berry. */
+public double sugarUptake_active; /**< Active sugar absorption (g sugar/h). */
+public double sugarUptake_massflow; /**< Mass flux of sugar (g sugar/h). */
+public double sugarUptake_passive; /**< Passive sugar flux (g sugar/h). */
+public double solubleSugar; /**< Amount of soluble sugar in the fruit (mg soluble sugar). */
+public double mSol; /**< Amount of carbon in soluble sugars (g C). */
+public double mSta; /**< Amount of carbon in starch (g C). */
+public double mSyn; /**< Amount of carbon in other compounds (g C). */
+//sugar2Header = {"mSuc", "mSor", "mGlu", "mFru", "mSta", "mSyn"};
+public double mSuc; /**< Amount of carbon in sucrose (g C). */
+public double mSor; /**< Amount of carbon in sorbital (g C). */
+public double mGlu; /**< Amount of carbon in glucose (g C). */
+public double mFru; /**< Amount of carbon in frucose (g C). */
+
+
+
+/**
+ * Osmotic potential and turgor pressure properties.
+ * Includes both osmotic potentials and hydrostatic pressures in various tissues.
+ */
+public double osmoticWaterPotential_phloem; /**< Osmotic pressure in the phloem, measured in bar. */
+public double osmoticWaterPotential_vascular; /**< Osmotic pressure in the fruit vasculature, like pedicel, measured in bar. */
+public double osmoticWaterPotential_fruit; /**< Osmotic pressure in the fruit, measured in bar. */
+double osmoticWaterPotential_xylem; /**< Osmotic pressure in the xylem, initialized to 0, measured in bar. */
+double osmoticWaterPotential_partialContribution; /**< Ratio of osmotic potentials due to other compounds versus sugars, dimensionless. */
+public double turgorPressure_phloem; /**< Hydrostatic pressure (turgor) in the phloem, measured in bar. */
+double turgorPressure_xylem; /**< Hydrostatic pressure (turgor) in the xylem, measured in bar. */
+public double turgorPressure_vascular; /**< Hydrostatic pressure in the fruit vasculature, measured in bar. */
+public double turgorPressure_fruit; /**< Fruit turgor pressure, measured in bar. */
+double pf1; /**< Variable used for calculating fruit turgor pressure in the elasticity module, measured in bar. */
+double pf2; /**< Variable used for calculating fruit turgor pressure in the elasticity module, measured in bar. */
+
+
+/**
+ * organic acid mass and concentrations.
+ */
+double malicAcid; /**< Content of malic acid in the berry. */
+double tartaricAcid; /**< Content of tartaric acid in the berry. */
+double malicConcentration_fruit; /**< Concentration of malic acid in the fruit (g malic/g H2O). */
+double tartaricConcentration_fruit; /**< Concentration of tartaric acid in the fruit. */
+double malicConcentrationMole_fruit; /**< Mole concentration of malic acid in the fruit. */
+double tartaricConcentrationMole_fruit; /**< Mole concentration of tartaric acid in the fruit. */
+
+/**
+ * Environmental factors and yield prediction parameters.
+ */
+float accumulatedRainfallBM; /**< Total rainfall since fruit set. */
+float tmaxBM_apex; /**< Average daily max temperature before fruit set. */
+float rainfallBM_apex; /**< Total rainfall before fruit set. */
+float radBM_apex; /**< Average radiation before fruit set. */
+float carbonBM_apex; /**< Average carbon concentration before fruit set. */
+
+
+/**
+ * skind conductance parameters
+ */
+float roMax; /**< Maximum surface conductance for water vapor (cm/h), default value = 200 when using days after fruit set. */
+float roMin; /**< Minimum surface conductance for water vapor (cm/h), default value = 34.65. */
+float kro; /**< Rate coefficient for water vapor conductance (g-1 or day-1), depends on the description function, default value = 0.06288. */
+float coefRo; /**< Coefficient related to the function describing water vapor conductance (g or day), default value = -21. */
+
+
+
+	/**
+	 * Retrieves the ParametersFactory instance from the jLaunch object.
+	 * 
+	 * @return The ParametersFactory instance associated with jLaunch.
+	 */
+		public ParametersFactory getParamFct() {
+			return jLaunch.getParamFct();
+		}
+
+		private static boolean isFiniteValue(double v) {
+			return !(Double.isNaN(v) || Double.isInfinite(v));
+		}
+
+		protected double getFruitWaterMass_g() {
+			if (!isFiniteValue(waterMass)) return Double.NaN;
+			return waterMass * mgTogram;
+		}
+
+		protected double calcSugar2SolubleSugarMass_g() {
+			if (!isFiniteValue(mSuc) || !isFiniteValue(mSor)
+				|| !isFiniteValue(mGlu) || !isFiniteValue(mFru)) {
+				return Double.NaN;
+			}
+
+			double suc_g = mSuc / CARBON_FRACTION_SUCROSE;
+			double sor_g = mSor / CARBON_FRACTION_SORBITOL;
+			double glu_g = mGlu / CARBON_FRACTION_GLUCOSE;
+			double fru_g = mFru / CARBON_FRACTION_GLUCOSE;
+			return suc_g + sor_g + glu_g + fru_g;
+		}
+
+		protected double calcSugarSolubleSugarMass_g() {
+			if (!isFiniteValue(mSol)) return Double.NaN;
+			return mSol / getCtcsSugarCarbonFraction();
+		}
+
+		protected double calcSyncedSolubleSugarMass_g() {
+			double sugar2Mass_g = calcSugar2SolubleSugarMass_g();
+			if (isFiniteValue(sugar2Mass_g)) return sugar2Mass_g;
+
+			double sugarMass_g = calcSugarSolubleSugarMass_g();
+			if (isFiniteValue(sugarMass_g)) return sugarMass_g;
+
+			return Double.NaN;
+		}
+
+		protected int getCtcsFunc() {
+			try {
+				if (jLaunch == null || jLaunch.getParamFct() == null
+					|| jLaunch.getParamFct().getConfiguration() == null) {
+					return 2;
+				}
+				return jLaunch.getParamFct().getConfiguration().getInt("Growth.ctcsFunc", 1);
+			} catch (RuntimeException e) {
+				// Compatibility fallback: preserve legacy hexose interpretation when key/config is absent.
+				return 2;
+			}
+		}
+
+
+		protected double getCtcsSugarCarbonFraction() {
+			return (getCtcsFunc() == 1) ? CARBON_FRACTION_SUCROSE : CARBON_FRACTION_GLUCOSE;
+		}
+
+		protected double calcSyncedSugarConcentration_g_per_g_water() {
+			double waterMass_g = getFruitWaterMass_g();
+			double solubleSugarMass_g = calcSyncedSolubleSugarMass_g();
+			if (!isFiniteValue(waterMass_g) || waterMass_g <= 0.0
+				|| !isFiniteValue(solubleSugarMass_g) || solubleSugarMass_g < 0.0) {
+				return Double.NaN;
+			}
+			return solubleSugarMass_g / waterMass_g;
+		}
+
+		public FruitInitState captureInitState() {
+			FruitInitState s = new FruitInitState();
+
+			s.freshWeight_mg = freshWeight;
+			s.dryWeight_mg = biomass;
+			s.waterMass_mg = waterMass;
+			s.seedDryWeight_mg = seedDryWeight;
+			s.vol_cm3 = vol;
+
+			s.age_model = age;
+			s.ageD_day = ageD;
+			s.ageHour = ageHour;
+			s.ageMin = ageMin;
+			s.length_m = length;
+			s.diameter_m = diameter;
+
+			s.mSuc = mSuc;
+			s.mSor = mSor;
+			s.mGlu = mGlu;
+				s.mFru = mFru;
+				s.mSta = mSta;
+				s.mSyn = mSyn;
+				s.sugarConcentration_fruit_g_per_g = sugarConcentration_fruit;
+
+			s.hasSugar2Mass =
+				isFiniteValue(s.mSuc) && isFiniteValue(s.mSor)
+				&& isFiniteValue(s.mGlu) && isFiniteValue(s.mFru)
+				&& isFiniteValue(s.mSta);
+
+			if (!isFiniteValue(s.freshWeight_mg) || s.freshWeight_mg <= 0) {
+				if (isFiniteValue(s.waterMass_mg) && isFiniteValue(s.dryWeight_mg)) {
+					double seed = isFiniteValue(s.seedDryWeight_mg) ? s.seedDryWeight_mg : 0.0;
+					s.freshWeight_mg = Math.max(0.0, s.waterMass_mg + s.dryWeight_mg + seed);
+				}
+			}
+
+			s.valid = (isFiniteValue(s.freshWeight_mg) && s.freshWeight_mg > 0)
+				   || (isFiniteValue(s.dryWeight_mg) && s.dryWeight_mg > 0)
+				   || s.hasSugar2Mass;
+			return s;
+		}
+
+		public void applyInitState(FruitInitState s) {
+			if (s == null || !s.valid) return;
+
+			if (isFiniteValue(s.dryWeight_mg) && s.dryWeight_mg >= 0) biomass = s.dryWeight_mg;
+			if (isFiniteValue(s.freshWeight_mg) && s.freshWeight_mg >= 0) freshWeight = s.freshWeight_mg;
+			if (isFiniteValue(s.waterMass_mg) && s.waterMass_mg >= 0) waterMass = s.waterMass_mg;
+			if (isFiniteValue(s.seedDryWeight_mg) && s.seedDryWeight_mg >= 0) seedDryWeight = s.seedDryWeight_mg;
+			if (isFiniteValue(s.vol_cm3) && s.vol_cm3 >= 0) vol = s.vol_cm3;
+
+			if (isFiniteValue(s.age_model) && s.age_model >= 0) age = s.age_model;
+			if (isFiniteValue(s.ageD_day) && s.ageD_day >= 0) ageD = s.ageD_day;
+			if (s.ageHour >= 0) ageHour = s.ageHour;
+			if (s.ageMin >= 0) ageMin = s.ageMin;
+			if (isFiniteValue(s.length_m) && s.length_m > 0) length = s.length_m;
+			if (isFiniteValue(s.diameter_m) && s.diameter_m > 0) diameter = (float) s.diameter_m;
+
+				if (s.hasSugar2Mass) {
+					if (isFiniteValue(s.mSuc)) mSuc = s.mSuc;
+					if (isFiniteValue(s.mSor)) mSor = s.mSor;
+				if (isFiniteValue(s.mGlu)) mGlu = s.mGlu;
+				if (isFiniteValue(s.mFru)) mFru = s.mFru;
+					if (isFiniteValue(s.mSta)) mSta = s.mSta;
+					if (isFiniteValue(s.mSyn)) mSyn = s.mSyn;
+				}
+				if (isFiniteValue(s.sugarConcentration_fruit_g_per_g) && s.sugarConcentration_fruit_g_per_g > 0) {
+					sugarConcentration_fruit = s.sugarConcentration_fruit_g_per_g;
+				}
+
+			if (isFiniteValue(freshWeight) && freshWeight > 0
+				&& isFiniteValue(waterMass) && waterMass >= 0) {
+				double wc = waterMass / freshWeight;
+				if (isFiniteValue(wc)) {
+					if (wc < 0) wc = 0;
+					if (wc > 1) wc = 1;
+					waterContent = (float) wc;
+				}
+			}
+		}
+		
+		public static ParametersFactory copyParametersFactory(ParametersFactory original) {
+		ParametersFactory newFactory = new ParametersFactory();
+		
+		// Create a new Configuration object
+		Configuration newConfig = new PropertiesConfiguration();
+		
+		// Copy all key-value pairs from the original Configuration
+		for (Iterator keys = original.getConfiguration().getKeys(); keys.hasNext();) {
+			String key = (String) keys.next();
+			newConfig.setProperty(key, original.getConfiguration().getProperty(key));
+		}
+	
+		// Assign the copied configuration to the new factory
+		newFactory.setConfiguration(newConfig);
+
+	return newFactory;
+}
+
+	
+	/**
+	 * Advances the simulation by invoking the step method of jLaunch.
+	 */
+	public void step() {
+		jLaunch.step();
+	}
+	
+	/**
+	 * Initializes input data from a JSON node representing a fruit row.
+	 * Calls the {@link #updateInput(int, JsonNode)} method internally.
+	 * 
+	 * @param ageMin   The minimum age in minutes.
+	 * @param fruitRow The JSON node containing fruit properties.
+	 */
+	public void fromArray(int ageMin, JsonNode fruitRow) {
+		updateInput(ageMin, fruitRow);
+	}
+	
+	/**
+	 * Updates the input values related to fruit age based on the provided JSON node.
+	 * Assigns values to object properties if {@code inputVesselConditions} is true.
+	 * 
+	 * @param ageMin   The minimum age in minutes.
+	 * @param fruitRow A JSON node containing fruit properties such as "age_d" (days) and "age_h" (hours).
+	 */
+	public void updateInput(int ageMin, JsonNode fruitRow) {
+	}
+
+	/**
+	 * Concrete classes implement this to specify the output path
+	 */
+	abstract void initOutputFilePath();
+
+	/**
+	 * Initialise header values for outputs.
+	 */
+	void initOutputHeaders() {
+		outputHeader = new ArrayList();
+	}
+
+	public double[] getRawValues() {
+		return jLaunch.getValues();
+	}
+
+	public ObjectNode getJsonValues() {
+		ObjectMapper mapper = new ObjectMapper();
+		ObjectNode node = mapper.createObjectNode();
+		double[] rawValues = getRawValues();
+
+		node.put("ageD", ageD);
+		node.put("ageHour", ageHour);
+		node.put("ageMin", ageMin);
+		// if (printFlag) { println("Output Headers and Values:" +  outputHeader.size()); }
+		for (int i = 0; i < outputHeader.size(); i++) {
+			String k = (String) outputHeader.get(i);
+			double v = rawValues[i];
+			node.put(k, v);
+		}
+
+		// Fruit light outputs for per-fruit output tables.
+		node.put("fruitIncidentPAR_umol_m2_s", fruitIncidentPAR);
+		node.put("fruitAbsorbedPAR_umol_s", fruitAbsorbedPAR);
+		node.put("fruitAbsorbedRadiation_modelRad_s", fruitAbsorbedRadiation);
+		node.put("fruitAbsorbedRadiation_m2_modelRad_m2_s", fruitAbsorbedRadiation_m2);
+		node.put("fruitLightArea_m2", fruitLightArea_m2);
+		node.put("fruitBerryCountEffective", fruitBerryCountEffective);
+		node.put("fruitZ_m", z);
+		node.put("fruitHeightBand4", getFruitHeightBand4());
+
+		return node;
+	}
+	
+	public void syncOutputs(ObjectNode node) {
+	
+	}
+
+	/**
+	 * Whether this service supplies water, fresh-mass, sugar, pressure, and acid
+	 * outputs. Demand-only services override this so shared output tables can
+	 * retain their schema while marking unsupported values unavailable.
+	 */
+	public boolean hasDetailedFruitPhysiologyOutputs() {
+		return true;
+	}
+	
+	   
+	@Override
+	void calcAge() 
+	{
+		//confounded by the original fruit model, here ageD is using in some calculation
+		super.calcAge();
+		age_pre = age;
+		age = age + DT * wangEngelTempFunction(Ta, MIN_TEMP, OPT_TEMP, MAX_TEMP,REFTMP);
+		
+		if(age > 0) {
+			ageHour++;
+			ageD = ageD + DT;
+			//agePrevious = age;	
+			ageGdd = ageGdd_pre + deltaAgeGdd(Ta, baseT, DT);
+			ageMin = 60*ageHour;
+			//devAge += specificGrowthRate(TAU, Ta)*DT;
+		}
+	}
+	
+		
+	/**
+	 * Calculate skin conductance based on fruit age
+	 * 
+	 * @param ageD normally we use fruit age after full bloom
+	 * it updates the skin conductance, which is in unit of cm.h-1
+	 */
+	void calcRo(double ageD) {
+  	   //based on fruit age and species
+    }
+    
+	@Override
+	void update() {
+		 super.update();
+		 // Fruit surface area from fruit models is stored as Afruit [cm2]; light module uses area [m2].
+		 if (Afruit > 0) {
+		 	area = Afruit * 1e-4;
+		 } else {
+		 	area = 0;
+		 }
+		 // Keep light outputs until calcLight() updates/resets them in the interception phase.
+		 fruitLightArea_m2 = area;
+		 fruitBerryCountEffective = 1;
+		 
+	} 
+
+	/**
+	 * Returns a 1..4 band index for current fruit z-position based on configured output heights.
+	 */
+	public int getFruitHeightBand4() {
+		if (output_height == null || output_height.length < 2) {
+			return 1;
+		}
+		for (int i = 0; i < output_height.length - 1; i++) {
+			if (z >= output_height[i] && z < output_height[i + 1]) {
+				return i + 1;
+			}
+		}
+		if (z >= output_height[output_height.length - 1]) {
+			return Math.min(4, output_height.length);
+		}
+		return 1;
+	}
+
+	/**
+	 * Computes effective fruit area for light interception (m2).
+	 * Base implementation uses single-fruit surface area from Afruit.
+	 */
+	public double computeFruitLightArea_m2() {
+		fruitBerryCountEffective = 1;
+		return area;
+	}
+
+	/**
+	 * Returns true when fruit should be included in light interception for the current step.
+	 */
+	public boolean shouldCalcLight() {
+		if (Afruit > 0) {
+			area = Afruit * 1e-4;
+		} else {
+			area = 0;
+		}
+		fruitLightArea_m2 = computeFruitLightArea_m2();
+		if (Double.isNaN(fruitLightArea_m2) || Double.isInfinite(fruitLightArea_m2) || fruitLightArea_m2 <= 0) {
+			fruitLightArea_m2 = area;
+		}
+		return (calcLightInterception == true && runLightModel == true
+			&& globalRadiation > LIGHT_THRESHOLD && fruitLightArea_m2 > 1e-4);
+	}
+
+	/**
+	 * Resets fruit light interception outputs when light is not computed.
+	 */
+	private void resetFruitLightOutputs() {
+		fruitIncidentPAR = 0;
+		fruitAbsorbedPAR = 0;
+		fruitAbsorbedRadiation = 0;
+		fruitAbsorbedRadiation_m2 = 0;
+		fruitLightArea_m2 = 0;
+		fruitBerryCountEffective = 0;
+	}
+
+	/**
+	 * Calculates fruit light interception using the existing scene light model.
+	 */
+	@Override
+	public void calcLight() {
+		if (shouldCalcLight() == false || isLightInterceptionStepPrepared() == false) {
+			resetFruitLightOutputs();
+			return;
+		}
+		double singleFruitArea_m2 = Math.max(1e-8, area);
+		double effectiveArea_m2 = Math.max(1e-8, fruitLightArea_m2);
+		LightInterceptionResult result = getFruitLightResult(this, singleFruitArea_m2, effectiveArea_m2);
+		fruitIncidentPAR = result.incPARm2;
+		fruitAbsorbedPAR = result.absPAR;
+		fruitAbsorbedRadiation = result.abs;
+		fruitAbsorbedRadiation_m2 = result.absm2;
+	}
+
+	/**
+	 * Constructor method.
+	 * 
+	 * @param fruitParams The fruit parameter file contents.
+	 * @param delta The delta value for timesteps.
+	 */
+	
+	public FruitService(String fruitParams, int delta) {
+		jLaunch = new ExtendedJLaunch();
+		
+		loadParameters();
+		
+		jLaunch.readProperties(fruitParams);
+		
+		input = jLaunch.initInput(delta);
+		
+		initOutputHeaders(); 
+	}
+
+	/**
+	 * Constructor method.
+	 * 
+	 * @param parametersFactory The fruit parameters factory.
+	 * @param delta The delta value for timesteps.
+	 */
+	public FruitService(ParametersFactory parametersFactory, int delta) {
+		loadParameters();
+		
+		jLaunch = new ExtendedJLaunch(parametersFactory);
+		input = jLaunch.initInput(delta);
+		
+		initOutputHeaders();
+	}
+	
+	public void postLoad() {
+		
+		if (input == null && jLaunch != null) {
+			input = jLaunch.initInput(DELTA);
+		}
+	}
+	
+	
+	// ===== Methods required by other FruitService implementations
+
+	// Must be implemented
+	abstract void initData();
+	abstract FruitService initiate_pi(PlantIdentifier pi, float length_, float diameter_);
+	/**
+	 * Special case of Fruit's initiate_pb method for Fruit using Internode as param.
+	 */
+	abstract void initiate_pb(PlantBase pb, Internode N);
+
+	// Optionally implemented
+	void initiate_pb(PlantBase pb, int j, int k, int l);
+	void initiate_pb_fruitset(PlantBase pb, int j, int k, int l);
+	void initiate_apex(ApexService a);
+	void calcYield();
+	/**Drop apples on annual shoot as passed by the shoot generator */	
+	boolean shouldDrop();
+	
+	/** fruit thinning */
+	boolean shouldRemove(double odd)
+	{
+		return (random(0,1) > odd);
+	}
+
+} ==> Sphere(this.length).(setShader(GREEN));
+
+/**
+ * Preferred demand-only fruit service selected by fruitModule="simpleFruit".
+ *
+ * BerrySimple remains the implementation base so saved GroIMP projects that
+ * reference its serialized class name can still be opened.
+ */
+public module SimpleFruit extends BerrySimple
+{
+	private static final long serialVersionUID = 1L;
+
+	public SimpleFruit(String fruitParams, int delta) {}
+	public SimpleFruit(ParametersFactory parametersFactory, int delta) {}
+}
+
+/**
+ * Preferred detailed berry service selected by fruitModule="complexBerry".
+ *
+ * BerryComplex remains the implementation base so saved GroIMP projects that
+ * reference its serialized class name can still be opened.
+ */
+public module ComplexBerry extends BerryComplex
+{
+	private static final long serialVersionUID = 1L;
+
+	public ComplexBerry(String fruitParams, int delta) {}
+	public ComplexBerry(ParametersFactory parametersFactory, int delta) {}
+}

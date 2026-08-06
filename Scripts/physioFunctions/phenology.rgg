@@ -1,0 +1,240 @@
+import static globalParameters.*;
+import static plantParameters.*;
+import static absOrgan.*;
+import static leaf.*;
+import static shoot.*;
+import static modelOptions.*;
+import static initialConditions.*;
+import static environment.*;
+import static carbonTransport.*;
+import static extraTools.*;
+import static berryYield.*;
+import static fruitBase.*;
+import static budBase.*;
+import java.io.File;
+import de.grogra.pf.io.PropertyFileReader;
+import java.util.Random;
+import java.util.Arrays;
+import charts.*;
+
+import io.github.fruitcropxl.config.params.groups.*;
+import io.github.fruitcropxl.config.params.structures.*;
+
+// Constants for referencing bud dormancy stages
+private static int PRE_ENDODORMANCY = 1;
+private static int ENDODORMANCY = 2;
+private static int ECODORMANCY = 3;
+static int POST_ECODORMANCY = 4;
+
+// Constants for referencing apex phenology stages
+private static int BUD_BURST = 1;
+private static int FLOWERING = 2;
+
+// Constants for referencing fruit phenology stages
+private static int FRUIT_SET = 1;
+private static int VERAISON = 2;
+
+// Constants for determining when bud changes to next phenology stage
+private static double DORMANCY_DAY_LENGTH = 13.1;		// Photoperiod which triggers the start of endodormancy
+private static double ENDODORMANCY_TARGET = 52.0647;	// Target for chill accumulation
+private static double ECODORMANCY_TARGET = 906.4065;	// Target for thermal accumulation
+private static double YMAX = 1;							// Param for sigmoid function for chill accumulation
+private static double X0 = 10.98;						// Param for sigmoid function for chill accumulation
+private static double B = -25.5611;						// Param for sigmoid function for chill accumulation
+private static double BASE_TEMP = 0.27668;				// Param for calculating thermal accumulation
+
+// Constants for determining when apex/fruit changes to next phenology stage
+static double FLOWERING_TARGET = 21;
+static double FRUIT_SET_TARGET = 10;
+static double VERAISON_TARGET = 23;
+
+// Modifier to add to target thermal time for bud burst for each can position
+private static Double[] BUDBURST_CANE_DIFF = {0.760126244487366,
+-0.401913825208683, 0.909480299911841, -0.638674720537001,
+0.86057592489747, -0.132266810760252, 0.465236934425,
+-0.726266690487303, -0.991694550195852, -0.168072006490748};
+
+// Standard error used to calculate random value to add to budburst time for each cane position
+private static double[] BUDBURST_STANDARD_ERROR = {0.073439483597377,
+0.383131897479313, 1.02344502277929, 0.235249942713453,
+0.807342388112967, 0.182144893408495, 0.58059074899344,
+0.752322586321633, 0.54734478712361, 0.484463243210989};
+
+private static Random random = new Random();
+
+// Changes bud dormancy stage if conditions for next stage have been met
+public static void updateBudStage(BudService bud)
+{
+	if (bud.dormancyStage == PRE_ENDODORMANCY) {
+		// Enter endodormancy if day length is decreasing and is less than 13
+		if (hourOfDay == 0 && dayLength < calcDayLength(dayOfYear - 1, latitude) && dayLength < DORMANCY_DAY_LENGTH) {
+			if (printFlag) { println("Endodormancy day of year = " + dayOfYear); }
+			bud.dormancyStage = ENDODORMANCY;	
+			bud.accumulatedChill = 0;
+		}
+	} else if (bud.dormancyStage == ENDODORMANCY) {
+		// Add chill from current hour to total
+		double hourlyChill = (YMAX * 1/(1 + Math.exp(-(Ta-X0)/B)))*DT;
+		bud.accumulatedChill += hourlyChill > 0 ? hourlyChill : 0;
+		// Enter ecodormancy if chill greater than threshold
+		if (bud.accumulatedChill >= ENDODORMANCY_TARGET) {
+			bud.dormancyStage = ECODORMANCY;
+			if (printFlag) { println("Ecodormancy day of year = " + dayOfYear); }
+			bud.accumulatedHeat = 0;
+			// Determine heat target for bud burst using mean and standard error for cane position of bud
+			bud.heatTarget = ECODORMANCY_TARGET;
+			if (bud.nodeNumber > 0 && bud.nodeNumber <= BUDBURST_CANE_DIFF.length) {
+				bud.heatTarget += random.nextGaussian() * BUDBURST_STANDARD_ERROR[bud.nodeNumber-1] + BUDBURST_CANE_DIFF[bud.nodeNumber-1];
+			}
+		}
+	} else if (bud.dormancyStage == ECODORMANCY) {
+		// Add heat from current hour to total
+		double hourlyHeat = (Ta - BASE_TEMP)*DT;
+		bud.accumulatedHeat += hourlyHeat > 0 ? hourlyHeat : 0;
+		// Ecodormancy is finished if heat greater than thershold
+		if (bud.accumulatedHeat >= bud.heatTarget) {
+			// Bud burst triggered
+			bud.dormancyStage = POST_ECODORMANCY;
+			budBurst(bud);
+			thermalTimeAfterBudBurst = 0;
+			budBurstNum++;
+			if(budBurstNum/totalBudNum >= 0.5) {
+				if (printFlag) { println("50% Budburst happened"); }
+			}
+		}
+	}
+}
+
+// Apex develops from bud after ecodormancy finishes
+public static void budBurst(BudService bud)
+{
+	ApexService apex = bud.createApex();
+
+	if (bud.bunchesDefined == false) {
+		defineBunchPositions(bud);
+	}
+	
+	[bud ==> 
+	a:apex
+	{a.initiate(bud);
+	};]
+}
+
+// Get the predicted number of bunches for this shoot and randomly choose positions which will produce bunches
+public static void defineBunchPositions(BudService bud)
+{
+	// Generate random integer number of bunches using float of predicted number for probability
+	int bunchNo = (int) Math.floor(getBunchesPerShoot(bud));
+	float probExtraBunch = getBunchesPerShoot(bud) - bunchNo;
+	float r = random.nextFloat();
+	if (probExtraBunch >= r) {
+		bunchNo++;
+	}
+	
+	// Generate unique integers from 2 to 5 for ranks which can produce bunches
+	int[] predictedPositions = new int[bunchNo];
+	for (int i = 0; i < bunchNo; i++) {
+		boolean newPosition = false;
+		int position = 0;
+		while (!newPosition) {
+			newPosition = true;
+			position = random_int(2, 6);
+			for (int pp : predictedPositions) {
+				if (pp == position) {
+					newPosition = false;
+				}
+			}
+		}
+		predictedPositions[i] = position;
+	}
+	
+	// Initialize array of bud positions for all buds on current shoot
+	[b:bud, (b.plantNumber == bud.plantNumber && b.cordonNumber == bud.cordonNumber && b.nodeNumber == bud.nodeNumber) ::>
+		{b.bunchPositions = predictedPositions;
+		b.bunchesDefined = true;}
+	]
+}
+
+// Update thermal time and check if flowering should occur
+public static void updateFlowering(ApexService apex) 
+{
+	//apex.thermalTime += extraTools.wangEngelTempFunction(Ta, MIN_TEMP, OPT_TEMP, MAX_TEMP,REFTMP)*DT;
+	if (apex.phenologyStage == BUD_BURST && apex.age >= FLOWERING_TARGET) {
+			apex.phenologyStage = FLOWERING;
+			floweringNum++;
+			if(floweringNum/totalBudNum >= 0.5) println("50% flowering happened");			
+		}
+	
+}
+
+/* 
+Depreciated fruit will initiate
+// Fruit develops from apex at flowering time
+public static void initBerry(ApexService apex)
+{
+	[a:apex ==>
+		if (apex.shouldProduceBunch()) (
+		a 
+		[ b:Fruit {b.initiate_apex(apex);}]
+		);
+		
+	]
+}
+ */
+// Update thermal time and check if transition between fruit phenologyical stages should occur
+public static void updateBerryStage(FruitService fruit)
+{
+	//fruit.thermalTime += extraTools.wangEngelTempFunction(Ta, MIN_TEMP, OPT_TEMP, MAX_TEMP,REFTMP)*DT;
+	
+	if(fruit.phenologyStage == FRUIT_SET && fruit.age >= VERAISON_TARGET) {
+		//fruit.calcYield();
+		fruit.phenologyStage = VERAISON;
+		fruit.veraison = true;
+		veraisonNum++;
+		if(veraisonNum/totalBudNum >= 0.5) println("50% veraison happened");	
+	}
+}
+
+// Load grapevine phenology properties
+public static boolean loadPhenologyParameters(String file_name) 
+{
+	boolean error = false;
+	error = error || loadPhenologyPropertyFile(file_name);
+
+	if (error == true) if (printFlag) { println("Error during reading of phenology parameter file(s)!"); }
+	return error;
+}
+
+// Load the file with parameters which determine phenology
+private static boolean loadPhenologyPropertyFile(String file_name) {
+	ConfigLoader loader = new ConfigLoader(new LoadPhenologyCommand());
+	
+	// groupName: file_path, path: CONFIG_PATH_SCENARIOS + file_path
+	return loader.load(file_name, PATH_SCENARIOS + file_name);
+}
+
+private class LoadPhenologyCommand implements LoadCommand {
+	public void execute(String file_name) {
+		loadPhenologyProperties(file_name);
+	}
+}
+
+
+private static void loadPhenologyProperties(String file_name) {
+	CategoryStore config = ((DocumentCategoryNameGroup) CONFIG.getGroup(file_name, 
+			DocumentCategoryNameGroup.class)).getCategoryStore();
+
+	config.setCategoryContext("parameters");
+
+	DORMANCY_DAY_LENGTH = config.getDouble("DORMANCY_DAY_LENGTH");
+	ENDODORMANCY_TARGET = config.getDouble("ENDODORMANCY_TARGET");
+	ECODORMANCY_TARGET = config.getDouble("ECODORMANCY_TARGET");
+	YMAX = config.getDouble("YMAX");
+	X0 = config.getDouble("X0");
+	B = config.getDouble("B");
+	BASE_TEMP = config.getDouble("BASE_TEMP");
+	FLOWERING_TARGET = config.getDouble("FLOWERING_TARGET");
+	FRUIT_SET_TARGET = config.getDouble("FRUIT_SET_TARGET");
+	VERAISON_TARGET = config.getDouble("VERAISON_TARGET");
+	BUDBURST_CANE_DIFF = config.getDoubleArray("BUDBURST_CANE_DIFF", new Double[0]); // Default to empty array if not provided in phenology file.
+}

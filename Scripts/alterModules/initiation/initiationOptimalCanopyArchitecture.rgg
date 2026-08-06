@@ -1,0 +1,602 @@
+import static globalParameters.*;
+import static plantParameters.*;
+import static modelOptions.*;
+import static lightInterception.*;
+import static initialConditions.*;
+import static absOrgan.*;
+import static leaf.*;
+import static shoot.*;
+import static environment.*;
+import static extraTools.*;
+import static plantBase.*;
+import static carbonTransport.*;
+import static shootPositioning.*;
+import static structuralVariation.*;
+import static archReader.*;
+import static rootSystem.*;
+import static fineRoot.*;
+import static structuralRoot.*;
+import static soil.*;
+import static initiationBase.*;
+import static fruitBase.*;
+import static budBase.*;
+import static fieldBase.*;
+import static shootBase.*;
+
+public class InitiationOptimalCanopyArchitecture extends InitiationService {
+	//whether two canopy layer or one layer, 
+	//if false, the second row will be added above the first row
+	// FIXME: check if this needs to be public
+	public static boolean dLayer = false;
+	//special case for a fourth layer
+	public static boolean quadLayer = false;
+	static boolean shouldInitiateBd = ENDING_PHYTOMER_NUM == 0 ? true : false; // Flag variable to control bd.initiate on cordon when no annual shoots are added
+
+	private static boolean useGridLayout() {
+		return "layer_row_grid".equals(optimalCanopyLayoutMode);
+	}
+
+	private static int safeLayerCount() {
+		return Math.max(1, optimalCanopyLayerCount);
+	}
+
+	private static int safeRowsPerLayer() {
+		return Math.max(1, optimalCanopyRowsPerLayer);
+	}
+
+	private static int expectedTotalRows() {
+		return safeLayerCount() * safeRowsPerLayer();
+	}
+
+	private static int layerIndexForRow(int row) {
+		return (row - 1) / safeRowsPerLayer();
+	}
+
+	private static int rowWithinLayerForRow(int row) {
+		return (row - 1) % safeRowsPerLayer();
+	}
+
+	private static double rowYOffsetForRow(int row) {
+		return rowWithinLayerForRow(row) * rowDistance;
+	}
+
+	private static double yTranslateToNextRow(int row) {
+		return rowYOffsetForRow(row + 1) - rowYOffsetForRow(row);
+	}
+
+	private static double woodLengthForLayer(int layerIndex) {
+		if ("wood_length_explicit".equals(optimalCanopyLayerHeightMode) &&
+				optimalCanopyWoodLengthValues != null &&
+				optimalCanopyWoodLengthValues.length > 0) {
+			int idx = Math.min(layerIndex, optimalCanopyWoodLengthValues.length - 1);
+			return optimalCanopyWoodLengthValues[idx];
+		}
+
+		return optimalCanopyWoodLengthBase + optimalCanopyWoodLengthStep * layerIndex;
+	}
+
+	private static double woodLengthForRow(int row) {
+		return woodLengthForLayer(layerIndexForRow(row));
+	}
+
+	private static double blockWidthY() {
+		if ("use_stripDistance".equals(optimalCanopyStripSpacingMode)) {
+			return stripDistance;
+		}
+
+		return Math.max(0, safeRowsPerLayer() - 1) * rowDistance + stripDistance;
+	}
+
+	private static double rowStartXOffset(int row) {
+		if (!optimalCanopyStaggerAlternateRows) {
+			return 0;
+		}
+
+		return row % 2 == 0
+				? plantDistance * optimalCanopyAlternateRowXOffsetFraction
+				: 0;
+	}
+	
+    public void initiate() {[
+		{
+			continueRunning = true;
+			focalPlants = 0;
+			shouldInitiateBd =ENDING_PHYTOMER_NUM == 0 ? true : false;
+			if (useGridLayout() && optimalCanopyDeriveNrRowsFromLayers) {
+				nrRows = expectedTotalRows();
+			}
+			if (nrRows <= 0) {
+				println("WARNING: nrRows <= 0; resetting to 1.");
+				nrRows = 1;
+			}
+			if (nrPlants <= 0) {
+				println("WARNING: nrPlants <= 0; resetting to 1.");
+				nrPlants = 1;
+			}
+			if (nrStrips <= 0) {
+				println("WARNING: nrStrips <= 0; resetting to 1.");
+				nrStrips = 1;
+			}
+			if (useGridLayout() &&
+					optimalCanopyWarnIfNrRowsMismatch &&
+					!optimalCanopyDeriveNrRowsFromLayers &&
+					nrRows != expectedTotalRows()) {
+				println("WARNING: nrRows does not equal layerCount * rowsPerLayer.");
+			}
+			totalPlants = nrRows * nrPlants * nrStrips;
+			if (useGridLayout()) {
+				WOOD_LENGTH = woodLengthForRow(1);
+			}
+			if (optimalCanopyPrintEffectiveConfig) {
+				println("Optimal canopy architecture config:");
+				println("  file=" + FILE_NAME_OPTIMAL_CANOPY_ARCHITECTURE);
+				println("  layoutMode=" + optimalCanopyLayoutMode);
+				println("  nrStrips=" + nrStrips);
+				println("  layerCount=" + safeLayerCount());
+				println("  rowsPerLayer=" + safeRowsPerLayer());
+				println("  nrRows=" + nrRows);
+				println("  nrPlants=" + nrPlants);
+				println("  rowDistance=" + rowDistance);
+				println("  plantDistance=" + plantDistance);
+				println("  stripDistance=" + stripDistance);
+				println("  blockWidthY=" + blockWidthY());
+				println("  rowOrientation=" + rowOrientation);
+				println("  row1WoodLength=" + woodLengthForRow(1));
+				println("  lastRowWoodLength=" + woodLengthForRow(nrRows));
+			}
+		}
+		
+		Axiom ==>
+		temp
+			if(isRayTracingLightMode() && useDirectRadiation) (
+        // Initialize direct light settings 
+           [dir:DirectLight]            
+           { dir.update();}  
+        )
+	        if(isRayTracingLightMode() && useDiffuseRadiation) (
+        // Initialize diffuse light settings 
+           [dif:DiffuseLight]            
+           { dif.update();
+           	 leafAngleOptimization.initRadiationLocations();
+           }  
+        )
+       
+		//row orientation
+		RH(rowOrientation)
+		//for this particular situation, where we stack rows above each other
+			if(isRayTracingLightMode() && useShadingFactor == false && cloneX > 0) (
+			if(useGridLayout() && "derived_block_width".equals(optimalCanopyCloneSpacingMode)) (
+				GridClonerNode(cloneX, plantDistance * nrPlants, cloneY, blockWidthY() * nrStrips)
+			)
+			if(!useGridLayout() || !"derived_block_width".equals(optimalCanopyCloneSpacingMode)) (
+				if("legacy_dlayer".equals(optimalCanopyLayoutMode)) (GridClonerNode(cloneX, plantDistance * nrPlants, cloneY, (rowDistance+stripDistance)*nrStrips))
+				if("legacy_single".equals(optimalCanopyLayoutMode)) (GridClonerNode(cloneX, plantDistance * nrPlants, cloneY, stripDistance * nrStrips))
+				if("legacy_quad".equals(optimalCanopyLayoutMode)) (GridClonerNode(cloneX, plantDistance * nrPlants, cloneY, (3*rowDistance+stripDistance)*nrStrips))
+			)
+		)
+		FieldBase
+		{double tileWidth = plantDistance/nrTiles;}
+		/** measure stick (to compare ..) *************************************/
+			[
+				//Translate(-(nrTiles+1)*tileWidth,-tileWidth,0) 
+				//measureStick(10, 0.1) // (number of steps, step length (in m))
+			] 
+				
+		[
+			{
+				int i = 0;
+			}
+			for (int strip=1; strip<=nrStrips; strip++) (
+			
+			//setup of a strip
+			for (int row=1; row<=nrRows; row++) (
+	
+				//setup of a row
+				[
+					{borderX = 0;}
+					for (int pos=1; pos<=nrPlants; pos++) (
+						{println("quadLayer " + quadLayer);}
+						//if one wants to reduce the overlap between rows
+						if(pos == 1) (Translate(rowStartXOffset(row),0,0))
+	
+					[
+							{i++;}
+						
+						//the ground
+	/* 					 if (associatePlantsToTiles == false) (
+							[
+								//M(-0.0011) Box(0.001,plantDistance * (nrPlants-2), rowDistance * (nrRows-2) + (nrStrips-1)*stripDistance).(setShader(BLACK))
+								//t:TestTile {t.initiate();}
+							] 
+							)
+							else (
+							 [
+								Translate(-0.5*(nrTiles-1)*tileWidth,0,0)
+								for (1:nrTiles) (
+									[
+										for (1:nrTiles) (
+											t:Tile
+											Translate(plantDistance/nrTiles,0,0)
+											{
+												t.initiate(i, row, pos, strip);
+											}
+										)
+									]
+								Translate(0,rowDistance/nrTiles,0)
+								)
+							] 
+							) */ 
+							// add the plants
+				
+			
+	/* #############################canopy tier system ############################*/
+		if(trainingSystem == 7) 
+		   (   //scenario simulation with one shoot and bunches in different positions along the cordon
+							{int berryID = 1; int SID = 1;}
+							
+							pi:PlantIdentifier pb:PlantBase [RU(180) rb:RootBase]
+							{
+								
+									pi.initiate(i, row, pos, strip, species);
+									pb.initiate(i, row, pos, strip, pi);
+									rb.initiate_pb(pb,numofSoilLayers);
+									
+									
+									if (pb.border == false) {focalPlants++;}
+															
+							}
+							
+									//add the soil and root layers as branches
+							[
+								RU(180) for (int r = 0; r < numofSoilLayers; r++) (
+								sl:Soil {sl.initiate(r, pb);}
+								[ M(-sl.length) sr:StructuralRoot [fr:FineRoot]] 
+								 
+									{
+										fr.initiate_pb(r, pb);							
+										fr.addSoilArray(sl);
+										sr.initiate_pb(r, pb);
+										rb.addChildSoilRoot(r, sl, fr, sr);
+									}
+								)
+							]
+							
+							w:Trunk {w.initiate_pb(pb);} 			
+						//suppress random for optimization procedure
+						
+						for (int l:(1 : 1)) (
+						
+						
+						[ RU( Math.pow(-1,l) * 90)
+								
+						// add the one-year shoots of the plant
+							for(int k:(1:SHOOT_NUM+1)) 
+								( 
+									/* cor : Cordon  
+									{
+									cor.initiate_pb(pb,k, l);
+									
+									}  */
+								
+							// add the one-year shoots of the plant
+							[
+							// RU(Math.pow(-1,l) * 90) RL(Math.pow(-1,k) * random(1,5)) i0:Internode  {i0.initiate_pb(pb,0,k,l); }
+							 RU(Math.pow(-1,l) * -90) RL(Math.pow(-1,k) *  random(1,10)) 
+							//RU(Math.pow(-1,l) * -random(90, 90)) RL(random(-15, 15)) RV(-0.1) i0:Internode  {i0.initiate_pb(pb,0,k,l); }
+							for(int j:(1:ENDING_PHYTOMER_NUM)) (
+								{
+									FruitService fruitTemplate = main.FRUIT_CREATOR.createFruit();
+								}
+								//RH(random(-10,10)) itn:Internode 
+								if(j < STARTING_LEAF_NUMBER) (
+								// RV(-0.05) RL(Math.pow(-1,k) * 3) itn:Internode [if(fruitPosition == j) (b:fruitTemplate {be.initiate_pb(pb,j, k, l);})]
+								 
+								/*  itn:Internode  {itn.initiate_pb(pb, j, k, l);} 
+								 [
+								 if(k <= SHOOT_NUM && (j ==2 | j ==3)) ( 
+									  b:fruitTemplate  
+									 {
+									 	 b.initiate_pb(pb,itn); 
+									  	berryID++;
+									 }
+								 )
+								 
+								 ] */
+								 )
+								
+								
+								if(j >= STARTING_LEAF_NUMBER && j <= ENDING_LEAF_NUMBER ) (
+									//with some random angle between internodes
+									if(k <= SHOOT_NUM && j <= 4) 
+									(
+									/* 	RV(-0.05) RL(random(-5,5)) RH(random(30, 180)) 
+										itn:Internode  { itn.initiate_pb(pb, j,k,l);  }
+										[
+											if(j ==2 | j == 3) ( be:fruitTemplate  	
+											{
+												be.initiate_pb(pb,j,k,l); 
+												berryID++;
+									  		}
+									  )
+										] */
+									)
+								
+									if(k == SHOOT_NUM+1) 
+									(
+									RV(-0.05) RL(random(-5,5)) RH(phyllotaxis) 
+									itn:Internode  { itn.initiate_pb(pb, j,k,l);  }
+									[
+									if(j ==2 | j == 3) (RH(phyllotaxis) be:fruitTemplate  {be.initiate_pb(pb,j, k, l); 
+											
+											berryID++;})
+									] 
+									
+									[RU(-45) AdjustLU pt:Petiole 
+									{pt.initiate_pb(pb, j, k, l); }
+									RH(180)
+									jm:JMidrib(JMidrib.calcLeafDeclination(pt.rank, pt.order, 0.1))
+									for (int m = 0; m < leafShape.polyleaf[0].length; m++) (
+										[lf:Leaf]
+										{
+											lf.initiate_pb(pb, j, k, l); 
+											lf.order = pt.order;
+											lf.fid = m;
+											lf.area = leafShape.calcLeafPolygonArea(lf.length, lf.width, lf.fid);
+											jm.initiate(lf);
+										}
+									) //close the leaf loop
+									]
+									) //FOR k == shoot_num
+									)
+							
+								)
+															
+							] 
+							)
+							])  //this bracket for the number of cordons
+							) //bracket for the cane pruning system
+	
+							
+	
+		]
+		/* #############################################################*/					
+							if (pos != nrPlants && pos % 4 == 0) (
+											Translate(plantDistance, 0, 0)
+										)
+							else (Translate(plantDistance,0,0) )
+							
+							{if (pos != nrPlants) {borderX += plantDistance;}}
+							)
+					]
+					
+					if (row != nrRows) (
+						//Translate(0,rowDistance,0)
+						
+					if(useGridLayout()) (
+						Translate(0, yTranslateToNextRow(row), 0)
+						{
+							WOOD_LENGTH = woodLengthForRow(row + 1);
+							borderY += rowDistance;
+						}
+					)
+					if(!useGridLayout()) (
+					
+					/********************************************************************/ 
+						/* start of double layer */
+					/********************************************************************/
+						{float shootHeight = 0.7;}
+						if("legacy_dlayer".equals(optimalCanopyLayoutMode)) (
+						if(row == 1 ) 
+						( Translate(0,rowDistance,0)
+							{ //this takes effect for row 2
+								WOOD_LENGTH = 0.75;
+								if(scenario == 2 || scenario == 4 || 
+								scenario == 6 || scenario == 8) {
+									WOOD_LENGTH = 0.75+0.3;
+								}
+							} 
+						)
+						if(row == 2 ) 
+						( Translate(0, -rowDistance,0)
+							{//prepare for row 3
+							WOOD_LENGTH = 0.95 * 2;
+							}
+						)
+						if(row == 3 ) 
+						(Translate(0, rowDistance,0)
+							if(scenario == 2 || scenario == 4 || 
+								scenario == 6 || scenario == 8) 
+								{
+									WOOD_LENGTH = 0.95*2 + 0.3;
+								}
+						)
+						if(row == 4 ) 
+						(Translate(0, -rowDistance,0)
+						{WOOD_LENGTH = 0.95 * 3;}
+						)
+						if(row == 5 ) 
+						(Translate(0, rowDistance,0)
+							if(scenario == 2 || scenario == 4 || 
+								scenario == 6 || scenario == 8) 
+								{
+									WOOD_LENGTH = 0.95*3 + 0.3;
+								}
+						)
+						if(row == 6 ) 
+						(Translate(0, -rowDistance,0))
+						) //end of double layer
+						
+						
+						
+					/********************************************************************/ 
+						/* start of single layer */
+					/********************************************************************/
+						if("legacy_single".equals(optimalCanopyLayoutMode)) (
+						if(row == 1 ) 
+						( Translate(0,0,0)
+							{WOOD_LENGTH = shootHeight*2;} 
+						)
+						if(row == 2 ) 
+						( Translate(0, 0,0)
+							{WOOD_LENGTH = shootHeight * 3;}
+						)
+						if(row == 3 ) 
+						(Translate(0, 0,0) {WOOD_LENGTH = shootHeight * 4;} )
+						if(row == 4 ) 
+						(Translate(0, 0,0) {WOOD_LENGTH = shootHeight * 5;} )
+						) //end of single layer
+						
+						
+						/********************************************************************/ 
+						/* start of quard layer */
+					/********************************************************************/
+						if("legacy_quad".equals(optimalCanopyLayoutMode)) (
+								
+						{double DEFAULT_WOOD_LENGTH = 0.38;}			
+						if(row == 1 || row == 2 || row == 3) 
+						( Translate(0,rowDistance,0)
+							{ //this takes effect for next row
+							WOOD_LENGTH = DEFAULT_WOOD_LENGTH;
+						} 
+						)
+						
+						if(row == 4 ) 
+						( Translate(0, -3*rowDistance,0)
+						{//prepare for row 5
+								WOOD_LENGTH = DEFAULT_WOOD_LENGTH*2;
+						}
+						)
+						
+						if(row == 5 || row == 6 || row == 7) 
+						( Translate(0, rowDistance, 0)
+							{ //this takes effect for next row 
+							WOOD_LENGTH = DEFAULT_WOOD_LENGTH*2;
+						} 
+						)
+						if(row == 8 ) 
+						( Translate(0, -3*rowDistance,0)
+						{//prepare for row 9
+								WOOD_LENGTH = DEFAULT_WOOD_LENGTH*3;
+						}
+						)
+		
+					
+						if(row == 9 || row == 10 || row == 11) 
+						( Translate(0, rowDistance, 0)
+							{ //this takes effect for next row 
+							WOOD_LENGTH = DEFAULT_WOOD_LENGTH*3;
+						} 
+						)
+						if(row == 12 ) 
+						( Translate(0, -3*rowDistance,0)
+						{//prepare for row 9
+								WOOD_LENGTH = DEFAULT_WOOD_LENGTH*4;
+						}
+						)
+						
+						
+						if(row == 13 || row == 14 || row == 15) 
+						( Translate(0, rowDistance, 0)
+							{ //this takes effect for next row 
+							WOOD_LENGTH = DEFAULT_WOOD_LENGTH*4;
+						} 
+						)
+						if(row == 16 ) 
+						( Translate(0, -3*rowDistance,0)
+						{//prepare for row 9
+								WOOD_LENGTH = DEFAULT_WOOD_LENGTH*5;
+						}
+						)
+						
+						if(row == 17 || row == 18 || row == 19) 
+						( Translate(0, rowDistance, 0)
+							{ //this takes effect for next row 
+							WOOD_LENGTH = DEFAULT_WOOD_LENGTH*5;
+						} 
+						)
+						
+						) //end of quard layer
+					
+					
+					
+					
+					{borderY += rowDistance;}
+					)
+				)
+				)
+				if(useGridLayout()) (
+				Translate(0,blockWidthY(),0)
+				{
+					WOOD_LENGTH = woodLengthForRow(1);
+				}
+				)
+				if(!useGridLayout()) (
+				Translate(0,stripDistance,0)
+				//for testing purpose
+				{WOOD_LENGTH = 0.95;}
+				)
+				
+				{
+					if (strip != nrStrips) {
+						if (useGridLayout()) {
+							borderY += blockWidthY();
+						} else {
+							borderY += stripDistance;
+						}
+					}
+				}
+			)	
+			]	
+		
+			{
+				if (useGridLayout() && "derived_block_width".equals(optimalCanopyDensityCalculationMode)) {
+					double effectiveBlockWidth = blockWidthY();
+					if (effectiveBlockWidth <= 0) {
+						effectiveBlockWidth = rowDistance;
+					}
+					totalArea = plantDistance * nrPlants * effectiveBlockWidth * nrStrips;
+					focalArea = plantDistance * focalPlants / Math.max(1, nrRows) * effectiveBlockWidth;
+					if (focalArea <= 0 || Double.isNaN(focalArea) || Double.isInfinite(focalArea)) {
+						focalArea = plantDistance * Math.max(1, focalPlants) * Math.max(1.0e-6, effectiveBlockWidth);
+					}
+					dens = focalPlants / focalArea;
+					if (printFlag) {
+						println("Optimal canopy density calculation:");
+						println("  totalArea=" + totalArea);
+						println("  focalArea=" + focalArea);
+						println("  dens=" + dens);
+					}
+				} else {
+					totalArea = rowDistance * plantDistance * totalPlants;
+					focalArea = rowDistance * plantDistance * focalPlants;
+					dens = 1 / (rowDistance * plantDistance);
+
+					if("legacy_dlayer".equals(optimalCanopyLayoutMode))
+					{
+						int multiply= nrRows/2;
+						focalArea = rowDistance * plantDistance * focalPlants/multiply +
+									(stripDistance - rowDistance)*plantDistance*focalPlants/multiply/2;
+						dens = 	focalPlants/focalArea;
+						if (printFlag) { println("dens " + dens); }
+
+					}
+					if("legacy_single".equals(optimalCanopyLayoutMode))
+					{
+						focalArea =  stripDistance *plantDistance*focalPlants/nrRows;
+						dens = 	focalPlants/focalArea;
+						println("dens " + dens);
+					}
+
+					if("legacy_quad".equals(optimalCanopyLayoutMode))
+					{
+						focalArea = (plantDistance * focalPlants) * (rowDistance * 3 + stripDistance);
+						dens = 	focalPlants/focalArea;
+						if (printFlag) { println("dens " + dens); }
+					}
+				}
+				
+			}
+			
+		; //end of Axiom
+	]}
+}

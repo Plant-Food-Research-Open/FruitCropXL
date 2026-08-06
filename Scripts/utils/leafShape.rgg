@@ -1,0 +1,717 @@
+import de.grogra.xl.util.IntList;
+import de.grogra.xl.util.FloatList;
+import java.util.Arrays;
+import java.util.Map;
+import java.util.HashMap;
+import java.util.Random;
+import java.io.Writer;
+import java.io.Reader;
+import java.io.Serializable;
+ 
+import de.grogra.pf.ui.registry.RunAfterSave;
+import de.grogra.pf.ui.registry.RunAfterLoad;
+import de.grogra.pf.registry.RegistryContext;
+import org.apache.commons.math3.geometry.euclidean.threed.Vector3D;
+import static globalParameters.*;
+
+/**
+ * Static array of PolygonMesh objects for each lobe of the leaf.
+ * the first dimension is not widely currently. lobe was used in the cotton leaf
+ * it was called in multiple places, better to revise when ou-an moved all files are in the model
+ */
+global PolygonMesh[][] polyleaf = new PolygonMesh[1][1];
+
+global LeafData leafData;
+ 
+global float leafScalingFactor;
+/**
+ * Custom class to hold leaf data, including triangle indices and vertex coordinates.
+ */
+public class LeafData implements RunAfterLoad,Serializable {
+    /**
+     * Static array to store the indices of vertices forming triangles.
+     * This array is shared across all instances of LeafData.
+     */
+    private int[][] triangleIndex;
+
+    /**
+     * Static array to store the vertices of the leaf.
+     * Each vertex is represented by 3 coordinates (x, y, z).
+     * This array is shared across all instances of LeafData.
+     */
+    private float[][] leafVertices;
+    private float[] MULTI_FACET;
+    
+    @Override
+	public void load(RegistryContext ctx) {
+		// Example: read from a file in the project directory
+		//Object f = getFileFromProject("leafDataFile");
+		//Reader r = ctx.getRegistry().getFileSystem().getReader(f);
+		// (implement your reading logic here)
+	}
+	
+	// No-arg constructor required for reflection, deserialization, etc.
+    public LeafData() {
+        // Optionally initialize fields to default values, or leave empty
+    }
+    
+    /**
+     * Constructor to create a new instance of LeafData with specified triangle indices and vertices.
+     *
+     * @param triangleIndex The array of triangle indices.
+     * @param leafVertices  The array of leaf vertices.
+     */
+    public LeafData(int[][] triangleIndex, float[][] leafVertices) {
+        this.triangleIndex = triangleIndex;
+        this.leafVertices = leafVertices;
+    }
+    
+    public void initMultiFacet() {
+        if (triangleIndex == null || leafVertices == null) {
+             println("Error: Incomplete leaf data."); 
+            return;
+        }
+
+        MULTI_FACET = new float[triangleIndex.length * 3 * 3];
+        for (int i = 0; i < triangleIndex.length; i++) {
+            for (int j = 0; j < 3; j++) {
+                int vertexIndex = triangleIndex[i][j];
+                for (int k = 0; k < 3; k++) {
+                    MULTI_FACET[(i * 9) + (j * 3) + k] = leafVertices[vertexIndex][k];
+                }
+            }
+        }
+    }
+    
+    /**
+     * Gets the triangle indices.
+     *
+     * @return The array of triangle indices.
+     */
+    public int[][] getTriangleIndex() {
+        return triangleIndex;
+    }
+
+    /**
+     * Gets the leaf vertices.
+     *
+     * @return The array of leaf vertices.
+     */
+    public float[][] getLeafVertices() {
+        return leafVertices;
+    }
+    
+    
+    public float[] getMultiFacet() {
+        return MULTI_FACET;
+    }
+}
+
+public class LeafShapeFactory implements Serializable,RunAfterLoad {
+/** Map to store leaf data for each species*/
+private static Map speciesData = new HashMap();
+private static Map appleMeshCache = new HashMap();
+private static final double APPLE_CURL_BASE_DEG = 25.0;
+private static final double APPLE_CURL_JITTER_DEG = 15.0;
+private static final double APPLE_ASYMMETRY_MAX = 0.1;
+private static boolean appleCurlMessagePrinted = false;
+private static int appleSampleMessageCount = 0;
+
+    @Override
+	public void load(RegistryContext ctx) {
+		// Example: read from a file in the project directory
+		//Object f = getFileFromProject("leafDataFile");
+		//Reader r = ctx.getRegistry().getFileSystem().getReader(f);
+		// (implement your reading logic here)
+	}
+
+
+static {
+        speciesData.put("apple", createAppleLeafData());
+        speciesData.put("grapevine", createGrapevineLeafData());
+        speciesData.put("kiwifruit", createKiwifruitLeafData());
+    }
+
+    private static LeafData createAppleLeafData() {
+       int[][] triangleIndex = {
+                {0, 1, 12},
+				{1, 2, 12},
+				{2, 12, 13},
+				{2, 3, 13},
+				{3, 13, 14},
+				{3, 4, 14},
+				{4, 14, 5},
+				{5, 14, 6},
+				{7, 14, 6},
+				{8, 14, 7},
+				{9, 14, 8},
+				{9, 13, 14},
+				{10, 13, 9},
+				{10, 12, 13},
+				{11, 12, 10},
+				{11, 0, 12}
+            };
+            
+		float[][] leafVertices = {
+			{0,    0,    0},
+			{0.17957214,  -0.1965286,  -0.0360958},
+			{0.42375456,  -0.28217,    0.0735002},
+			{0.66440149,  -0.3388324,  0.1267603},
+			{0.89912622,  -0.3421756,  0.07161},
+			{1.12895112,  -0.2661498,  0.0310804},
+			{1.31871262,  -0.1285221,  0.1671794},
+			{1.13301352,  0.12584229,  0.2273315},
+			{0.91281532,  0.30981123,  0.1972189},
+			{0.63268854,  0.35685116,  0.2750484},
+			{0.43766623,  0.37288411,  0.1593796},
+			{0.19470789,  0.25470951,  0.0535398},
+			{0.33929627,  0.01388339,  0.017226},
+			{0.65039739,  0.00441307,  0.0718225},
+			{0.94532842,  -0.0494985,  0.1288958}    
+		};
+         return new LeafData(triangleIndex, leafVertices);
+    }
+        
+    private static LeafData createGrapevineLeafData() {
+       int[][] triangleIndex = {
+				{0,1,2}, //T0
+				{0,3,4}, //T1
+				{0,1,5}, //T2
+				{0,6,3}, //T3
+				{0,5,7}, //T4
+				{0,6,8}, //T5
+				{7,9,5}, //T6
+				{8,10,6}, //T7
+				{0,11,7}, //T8
+				{0,12,8}, //T9
+				{0,13,11}, //T10
+				{0,13,12}, //T11
+				{13,11,14}, //T12
+				{13,12,15}, //T13
+				{13,16,14}, //T14
+				{13,16,15} //T15
+            };
+            
+		float[][] leafVertices = {
+			  {0,0,0}, //P0
+			{-0.112784423061961,0.562051537565323,0.180983373709963}, //P1
+			{-0.40237709055199,0.235764383360833,0.0498973131679368}, //P2
+			{-0.0285679527598672,-0.57174752372368,0.185472280289994}, //P3
+			{-0.358351518182525,-0.27829123155991,0.0880078877971698}, //P4
+			{-0.00757012555175539,0.439897594230419,0.166064602123384}, //P5
+			{0.0547385401214449,-0.435708430124286,0.151945159340536}, //P6
+			{0.582282881699195,0.534250568490738,0.114861878194508}, //P7
+			{0.626223628844426,-0.47253410278889,0.0972895323876046}, //P8
+			{0.16461810757699,0.610669112775247,0.179123704369303}, //P9
+			{0.217298127884052,-0.592184805911892,0.176875046747193}, //P10
+			{0.430626666922783,0.247801246960088,0.102764173876781}, //P11
+			{0.426472982891481,-0.222560387722977,0.108163302417362}, //P12
+			{0.347793592590369,0.00251112585383129,0.0574457445617481}, //P13
+			{0.697437097907128,0.266568717166544,0.111195285756863}, //P14
+			{0.711859295886375,-0.241448054489933,0.120365292587605}, //P15
+			{0.908361843445933,0,0} //P16
+		};
+         return new LeafData(triangleIndex, leafVertices);
+    }
+    
+     private static LeafData createKiwifruitLeafData() {
+       int[][] triangleIndex = {
+		{0, 1, 2},
+				{0, 2, 3},
+				{0, 3, 4},
+				{0, 4, 5},
+				{0, 5, 6},
+				{0, 6, 7},
+				{0, 7, 8},
+				{0, 8, 9},
+				{0, 9, 10},
+				{0, 10, 11},
+				{0, 11, 12},
+				{0, 12, 13},
+				{0, 13, 14},
+				{0, 14, 15}
+            };
+            
+		float[][] leafVertices = {
+				{0,    0,    0},   //origin
+				{-0.14, -0.08,  0},
+				{-0.15, -0.15,  0},
+				{-0.1,  -0.3,  0},
+				{0.1,  -0.4,  0},  // bottom left
+				{0.4,  -0.5,  0},  //bottom middle
+				{0.7,  -0.4,  0}, // bottom right
+				{0.9,  -0.1,  0},  // right middle-bottom
+				{0.85,  0,    0},  // right center
+				{0.9,  0.3,  0},  // right middle-top
+				{0.7,  0.5,  0},  // top right
+				{0.4,  0.6,  0},  //top middle
+				{0.1,  0.5,  0}, // top left
+				{-0.1,  0.3,  0},
+				{-0.15, 0.15,  0},
+				{-0.14, 0.08,  0}
+		};
+         return new LeafData(triangleIndex, leafVertices);
+    }
+     
+      
+ /**
+     * Retrieves the LeafData for a given species.
+     * This method fetches the leaf geometry data associated with a specific species.
+     *
+     * @param species The name of the species for which leaf data is requested.
+     * @return The LeafData object containing triangle indices and vertices for the specified species.
+     *         Returns null if the species is not found.
+     */
+    public static LeafData getLeafData(String species) {
+        return (LeafData) speciesData.get(species);
+    }
+
+    public static boolean hasLeafShapeSpecies(String species) {
+        return species != null && speciesData.containsKey(species);
+    }
+
+    public static String normalizeLeafShapeSpecies(String shapeSpecies) {
+        String active = shapeSpecies;
+        if (active == null || active.length() == 0) {
+            active = species;
+        }
+        if (!hasLeafShapeSpecies(active)) {
+            if (printFlag) {
+                println("[LeafShape] WARN: unknown leafShapeSpecies=" + active + "; using species=" + species + ".");
+            }
+            active = species;
+        }
+        if (!hasLeafShapeSpecies(active)) {
+            active = "grapevine";
+        }
+        return active;
+    }
+
+    public static LeafData getLeafData(String species, long leafSeed) {
+        if (!"apple".equals(species)) {
+            return getLeafData(species);
+        }
+        return createAppleLeafData(leafSeed);
+    }
+
+    /**
+     * Sets the global triangle index and leaf vertices arrays based on the species specified.
+     * This method is used to set up the geometry for a specific type of leaf based on its species.
+     *
+     * @param species The name of the species whose leaf shape is to be retrieved.
+     *                Supported species are "apple", "grapevine", and "kiwifruit".
+     */
+    public static void getLeafShape(String species) {
+        String active = normalizeLeafShapeSpecies(species);
+        leafData = getLeafData(active);
+        initLeafShape(leafData);
+        if ("apple".equals(active) && printFlag && !appleCurlMessagePrinted) {
+            println("Apple leaf curl enabled (target edge curl range: 20-40 deg)");
+            appleCurlMessagePrinted = true;
+        }
+        // Additional processing can be done here with triangleIndex and leafVertices
+    }
+
+    public static PolygonMesh getPolygonForLeaf(String species, long leafSeed, int lobe, int fid) {
+        String active = normalizeLeafShapeSpecies(species);
+        if (!"apple".equals(active)) {
+            LeafData selectedLeafData = getLeafData(active);
+            selectedLeafData.initMultiFacet();
+            return createPolygonMesh(selectedLeafData.getMultiFacet());
+        }
+
+        Long cacheKey = Long.valueOf(leafSeed);
+        PolygonMesh cachedMesh = (PolygonMesh) appleMeshCache.get(cacheKey);
+        if (cachedMesh != null) {
+            return cachedMesh;
+        }
+
+        LeafData appleLeafData = getLeafData(active, leafSeed);
+        appleLeafData.initMultiFacet();
+        PolygonMesh generatedMesh = createPolygonMesh(appleLeafData.getMultiFacet());
+        appleMeshCache.put(cacheKey, generatedMesh);
+        return generatedMesh;
+    }
+
+
+/**
+ * Initializes the shape of a leaf based on its species.
+ * It sets up the leaf geometry and populates the MULTI_FACET array.
+ *
+ * @param species The species of the leaf to initialize.
+ */
+public static void initLeafShape(LeafData leafData) {
+    leafData.initMultiFacet();
+    initLeaf(0, leafData.MULTI_FACET);
+}
+
+/**
+ * Initializes the geometry of a leaf in the polyleaf array.
+ *
+ * @param leafID The ID of the leaf to initialize.
+ * @param data   The flattened data representing the leaf geometry.
+ */
+private static void initLeaf(int leafID, float[] data) {
+	polyleaf[leafID][0] = createPolygonMesh(data);
+}
+
+private static PolygonMesh createPolygonMesh(float[] data) {
+	FloatList coordinates = new FloatList(data);
+	PolygonMesh mesh = new PolygonMesh();
+	int[] tmp = new int[coordinates.size()/3];
+	for(int i = 0; i<tmp.length; i++) tmp[i]=i;
+	mesh.setIndexData(new IntList(tmp));
+	mesh.setVertexData(coordinates);
+	return mesh;
+}
+
+/**
+ * Builds a deterministic per-leaf apple {@link LeafData} instance from the static apple template.
+ *
+ * <p><b>How per-leaf variability is generated (deterministic):</b></p>
+ * <ul>
+ *   <li>The method starts from the static apple geometry declared in {@code createAppleLeafData()}.</li>
+ *   <li>{@code leafSeed} (passed from {@code Leaf.getId()}) is mixed by {@link #mixSeed(long)} to reduce
+ *       obvious correlations for close integer ids.</li>
+ *   <li>A local {@link Random} is created from the mixed seed, so results are independent of traversal order
+ *       and independent from any global RNG calls.</li>
+ * </ul>
+ *
+ * <p><b>Parameter sampling:</b></p>
+ * <ul>
+ *   <li>{@code curlDeg = 30 +/- 10} deg (uniform), resulting in a 20-40 deg target edge curl range.</li>
+ *   <li>{@code asym = +/- 0.1} (uniform), applied as a relative left/right multiplier.</li>
+ * </ul>
+ *
+ * <p>The base vertices are copied and then deformed by {@link #applyAppleEdgeCurl(float[][], double, double)}.
+ * Triangle connectivity is reused unchanged from the base apple leaf.</p>
+ *
+ * @param leafSeed stable per-leaf identifier used to generate a reproducible mesh for one leaf instance.
+ * @return a new apple {@code LeafData} with the same topology and a per-leaf curled vertex set.
+ */
+private static LeafData createAppleLeafData(long leafSeed) {
+    LeafData baseLeafData = (LeafData) speciesData.get("apple");
+    int[][] triangleIndex = baseLeafData.getTriangleIndex();
+    float[][] baseVertices = baseLeafData.getLeafVertices();
+    float[][] transformedVertices = copyVertices(baseVertices);
+
+    Random deterministicRandom = new Random(mixSeed(leafSeed));
+    double curlDeg = APPLE_CURL_BASE_DEG + ((deterministicRandom.nextDouble() * 2.0 - 1.0) * APPLE_CURL_JITTER_DEG);
+    double asym = (deterministicRandom.nextDouble() * 2.0 - 1.0) * APPLE_ASYMMETRY_MAX;
+    applyAppleEdgeCurl(transformedVertices, curlDeg, asym);
+
+    if (printFlag && appleSampleMessageCount < 2) {
+        println("Apple leaf curl sample leafSeed=" + leafSeed + " curlDeg=" + curlDeg + " asym=" + asym);
+        appleSampleMessageCount++;
+    }
+
+    return new LeafData(triangleIndex, transformedVertices);
+}
+
+private static float[][] copyVertices(float[][] vertices) {
+    float[][] copy = new float[vertices.length][3];
+    for (int i = 0; i < vertices.length; i++) {
+        copy[i][0] = vertices[i][0];
+        copy[i][1] = vertices[i][1];
+        copy[i][2] = vertices[i][2];
+    }
+    return copy;
+}
+
+/**
+ * Applies apple edge-curl deformation directly on a leaf vertex array.
+ *
+ * <p><b>Coordinate convention used in this file:</b></p>
+ * <ul>
+ *   <li>{@code x}: longitudinal leaf direction (petiole to tip)</li>
+ *   <li>{@code y}: lateral direction (left/right from midrib)</li>
+ *   <li>{@code z}: out-of-plane elevation</li>
+ * </ul>
+ *
+ * <p><b>Exact deformation procedure:</b></p>
+ * <ol>
+ *   <li>Estimate {@code halfWidth} as {@code max(abs(y))} across vertices.</li>
+ *   <li>Compute side-specific target curl:
+ *     <ul>
+ *       <li>{@code curlDegLeft  = curlDeg * (1 + asym)}</li>
+ *       <li>{@code curlDegRight = curlDeg * (1 - asym)}</li>
+ *     </ul>
+ *   </li>
+ *   <li>For each vertex, compute normalized lateral distance to the midrib:
+ *       {@code u = clamp01(abs(y)/halfWidth)}.</li>
+ *   <li>Compute smooth edge weight with smoothstep:
+ *       {@code w = u*u*(3 - 2*u)}.
+ *       This keeps curl near zero close to the midrib and smoothly increases it toward margins.</li>
+ *   <li>Convert weighted angle: {@code angleRad = radians(sideCurlDeg) * w}.</li>
+ *   <li>Apply a lateral-to-vertical rotation proxy by preserving {@code abs(y)} radius:
+ *     <ul>
+ *       <li>{@code curledY = abs(y) * cos(angleRad)}</li>
+ *       <li>{@code zOffset = abs(y) * sin(angleRad)}</li>
+ *       <li>{@code y = sign(y) * curledY}</li>
+ *       <li>{@code z = z + zOffset}</li>
+ *     </ul>
+ *   </li>
+ * </ol>
+ *
+ * <p>This produces a gentle upward margin curl while preserving topology and avoiding hard creases.</p>
+ *
+ * @param vertices mutable vertex array ({@code [n][3]}) to deform in-place.
+ * @param curlDeg nominal (pre-asymmetry) edge curl angle in degrees.
+ * @param asym relative left/right asymmetry factor (typical range {@code [-0.1, 0.1]}).
+ */
+private static void applyAppleEdgeCurl(float[][] vertices, double curlDeg, double asym) {
+    float halfWidth = 0f;
+    for (int i = 0; i < vertices.length; i++) {
+        halfWidth = Math.max(halfWidth, Math.abs(vertices[i][1]));
+    }
+    if (halfWidth <= 0f) {
+        return;
+    }
+
+    double curlDegLeft = curlDeg * (1.0 + asym);
+    double curlDegRight = curlDeg * (1.0 - asym);
+
+    for (int i = 0; i < vertices.length; i++) {
+        float y = vertices[i][1];
+        float z = vertices[i][2];
+        double normalized = clamp01(Math.abs(y) / halfWidth);
+        double smoothWeight = normalized * normalized * (3.0 - 2.0 * normalized);
+        double sideCurlDeg = (y >= 0f) ? curlDegLeft : curlDegRight;
+        double angleRad = Math.toRadians(sideCurlDeg) * smoothWeight;
+
+        double absY = Math.abs(y);
+        double curledY = absY * Math.cos(angleRad);
+        double zOffset = absY * Math.sin(angleRad);
+
+        vertices[i][1] = (float) (Math.signum(y) * curledY);
+        vertices[i][2] = (float) (z + zOffset);
+    }
+}
+
+private static double clamp01(double value) {
+    if (value < 0.0) {
+        return 0.0;
+    }
+    if (value > 1.0) {
+        return 1.0;
+    }
+    return value;
+}
+
+private static long mixSeed(long seed) {
+    long z = seed + 0x9E3779B97F4A7C15L;
+    z = (z ^ (z >>> 30)) * 0xBF58476D1CE4E5B9L;
+    z = (z ^ (z >>> 27)) * 0x94D049BB133111EBL;
+    return z ^ (z >>> 31);
+}
+}
+
+
+	
+    /**
+     * Calculates the maximum distance from the origin to any vertex, interpreted as leaf length.
+     *
+     * @param leafVertices An array of leaf vertices, each vertex is an array of 3 coordinates (x, y, z).
+     * @return The calculated length of the leaf.
+     */
+    public static float calcLeafLength(float[][] leafVertices) {
+        float length = 0.0f;
+        for (int i = 0; i < leafVertices.length; i++) {
+            float x = leafVertices[i][0];
+            float y = leafVertices[i][1];
+            float z = leafVertices[i][2];
+
+            float distance = (float) Math.sqrt(x * x + y * y + z * z);
+
+            if (distance > length) {
+                length = distance;
+            }
+        }
+        return length;
+    }
+
+    /**
+     * Calculates the maximum width of the leaf by comparing all pairs of y-coordinates.
+     *
+     * @param leafVertices An array of leaf vertices, each vertex is an array of 3 coordinates (x, y, z).
+     * @return The calculated width of the leaf.
+     */
+    public static float calcLeafWidth(float[][] leafVertices) {
+        float width = 0.0f;
+
+        for (int i = 0; i < leafVertices.length; i++) {
+            for (int j = i + 1; j < leafVertices.length; j++) {
+                float y1 = leafVertices[i][1];
+                float y2 = leafVertices[j][1];
+                float tempWidth = Math.abs(y1 - y2);
+
+                if (tempWidth > width) {
+                    width = tempWidth;
+                }
+            }
+        }
+        return width;
+    }
+
+    /**
+     * Returns the number of lobes in a leaf. Currently returns a placeholder value.
+     *
+     * @return The number of lobes in the leaf.
+     */
+    public static int getLobes() {
+        return 0; // Placeholder implementation
+    }
+
+    /**
+     * Calculates and returns the unscaled length of a leaf lobe.
+     *
+     * @param lobe The index of the leaf lobe.
+     * @return The unscaled length of the specified leaf lobe.
+     */
+    public static double getRefLength() {
+        return calcLeafLength(leafData.leafVertices);
+    }
+
+    /**
+     * Calculates and returns the unscaled width of a leaf lobe.
+     *
+     * @param lobe The index of the leaf lobe.
+     * @return The unscaled width of the specified leaf lobe.
+     */
+    public static double getRefWidth() {
+        return calcLeafWidth(leafData.leafVertices);
+    }
+
+    public static double getRefLength(String shapeSpecies) {
+        LeafData activeLeafData = LeafShapeFactory.getLeafData(LeafShapeFactory.normalizeLeafShapeSpecies(shapeSpecies));
+        return calcLeafLength(activeLeafData.getLeafVertices());
+    }
+
+    public static double getRefWidth(String shapeSpecies) {
+        LeafData activeLeafData = LeafShapeFactory.getLeafData(LeafShapeFactory.normalizeLeafShapeSpecies(shapeSpecies));
+        return calcLeafWidth(activeLeafData.getLeafVertices());
+    }
+
+    /**
+     * Calculates and returns the unscaled surface area of a leaf lobe.
+     *
+     * @param lobe The index of the leaf lobe.
+     * @return The unscaled surface area of the specified leaf lobe.
+     */
+    public static double getRefArea() {
+        return calcLeafPolygonArea(1, 1, 1);
+    }
+
+    
+    global double referenceArea = -1f; // Cache the calculated reference area
+    global double refLength = -1f; // Cache the calculated reference area
+    global double refWidth = -1f; // Cache the calculated reference width
+    global Vector3D[] referenceVertices;
+    /**
+     * Calculates the surface area of a leaf based on given length and width inputs.
+     * The method is mainly used for facet leaves.
+     *
+     * @param length_input The length of the leaf.
+     * @param width_input  The width of the leaf.
+     * @param fid          The facet identifier, 1 for a single leaf.
+     * @return The calculated surface area of the leaf.
+     */
+	
+	
+	
+	public static double calcLeafPolygonArea(String shapeSpecies, double length_input, double width_input, int fid) {
+		String active = LeafShapeFactory.normalizeLeafShapeSpecies(shapeSpecies);
+		LeafData activeLeafData = LeafShapeFactory.getLeafData(active);
+		activeLeafData.initMultiFacet();
+		double activeRefLength = calcLeafLength(activeLeafData.getLeafVertices());
+		double activeRefWidth = calcLeafWidth(activeLeafData.getLeafVertices());
+		double xScale = length_input / activeRefLength;
+		double yScale = width_input / activeRefWidth;
+		double zScale = Math.sqrt(xScale * yScale);
+
+		double totalArea = 0;
+		float[] activeFacetData = activeLeafData.getMultiFacet();
+		for (int i = 0; i < activeFacetData.length; i += 9) {
+			Vector3D vecA = new Vector3D(activeFacetData[i] * xScale, activeFacetData[i + 1] * yScale, activeFacetData[i + 2] * zScale);
+			Vector3D vecB = new Vector3D(activeFacetData[i + 3] * xScale, activeFacetData[i + 4] * yScale, activeFacetData[i + 5] * zScale);
+			Vector3D vecC = new Vector3D(activeFacetData[i + 6] * xScale, activeFacetData[i + 7] * yScale, activeFacetData[i + 8] * zScale);
+			totalArea += triangleAreaFromVertices(vecA, vecB, vecC);
+		}
+		return totalArea;
+	}
+
+	public static double calcLeafPolygonArea(double length_input, double width_input, int fid) {
+		String active = species;
+		if (leafShapeSpecies != null && leafShapeSpecies.length() > 0) {
+			active = leafShapeSpecies;
+		}
+		return calcLeafPolygonArea(active, length_input, width_input, fid);
+	}
+	
+	private static void cacheReferenceVertices() {
+		referenceVertices = new Vector3D[leafData.MULTI_FACET.length / 3];
+		for (int i = 0; i < leafData.MULTI_FACET.length; i += 3) {
+			referenceVertices[i / 3] = new Vector3D(leafData.MULTI_FACET[i], leafData.MULTI_FACET[i + 1], leafData.MULTI_FACET[i + 2]);
+		}
+	}
+
+    /**
+     * Calculates the area of a triangle given its three vertices.
+     *
+     * @param vecA The first vertex of the triangle.
+     * @param vecB The second vertex of the triangle.
+     * @param vecC The third vertex of the triangle.
+     * @return The area of the triangle.
+     */
+    private static double triangleAreaFromVertices(Vector3D vecA, Vector3D vecB, Vector3D vecC) {
+        Vector3D vecAB = vecA.subtract(vecB);
+        Vector3D vecAC = vecA.subtract(vecC);
+        Vector3D crossProd = vecAB.crossProduct(vecAC);
+        return crossProd.getNorm() / 2;
+    }
+    
+	 
+	/**
+	 * Calculates the total surface area of the multi-faceted leaf.
+	 * The method scales each triangle's area based on the given length and width, summing them together.
+	 */
+	private static double calcMultiFacetArea(float length_input, float width_input) {
+		double totalArea = 0;
+		double xScale = length_input / getRefLength();
+		double yScale = width_input / getRefWidth();
+		double zScale = Math.sqrt(xScale*yScale); //length_input/ getRefWidth(0);
+
+		for (int i = 0; i < leafData.MULTI_FACET.length; i+=9) {
+			Vector3D vecA = new Vector3D(leafData.MULTI_FACET[i] * xScale, leafData.MULTI_FACET[i+1] * yScale, leafData.MULTI_FACET[i+2]*zScale);
+			Vector3D vecB = new Vector3D(leafData.MULTI_FACET[i+3] * xScale, leafData.MULTI_FACET[i+4]* yScale, leafData.MULTI_FACET[i+5]*zScale);
+			Vector3D vecC = new Vector3D(leafData.MULTI_FACET[i+6] * xScale, leafData.MULTI_FACET[i+7]* yScale, leafData.MULTI_FACET[i+8]*zScale);
+			totalArea += triangleAreaFromVertices(vecA, vecB, vecC);
+		}
+		
+	
+		return totalArea;
+	}
+	
+	
+	// Returns scaled area of given facet (same as leaf area as leaf is made up of only one facet)
+		
+	public static float calcFacetPolygonArea(float length_input, float width_input, int lobe, int fid) {
+		return calcMultiFacetArea(length_input,width_input);	
+	}
+
+
+static void testArea() {
+	/* if (printFlag) { println("Ref width: " + getRefWidth(0)); }
+    if (printFlag) { println("Ref length " + getRefLength()); }
+	if (printFlag) { println(calcLeafPolygonArea(1, 1, 0)); }
+	if (printFlag) { println(calcLeafPolygonArea(1.8, 0.9, 0, 1)); }
+	if (printFlag) { println(calcLeafPolygonArea(3.4, 1.8, 0, 1)); }
+	if (printFlag) { println(calcLeafPolygonArea(4.7, 2.5, 0, 1)); }
+	if (printFlag) { println(calcLeafPolygonArea(5.8, 3.2, 0, 1)); }
+	if (printFlag) { println(calcLeafPolygonArea(7.3, 4.5, 0, 1)); }
+	println(calcLeafPolygonArea(8.8, 4.1, 0, 1)); */
+//	if (printFlag) { println("ref length " + getRefLength() + "ref width " + getRefWidth()); }
+	//if (printFlag) { println("reference leaf area: " + calcLeafPolygonArea(1, 1, 0)); }
+	//if (printFlag) { println("leaf area: " + calcLeafPolygonArea(0.1, 0.1, 0)); }
+
+}

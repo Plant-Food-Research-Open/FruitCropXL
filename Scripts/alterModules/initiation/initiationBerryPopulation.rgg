@@ -1,0 +1,39 @@
+import static globalParameters.*;
+import static plantBase.*;
+import static initiationBase.*;
+import static fruitBase.*;
+
+public class InitiationBerryPopulation extends InitiationService {
+    public void initiate() {[
+		{
+			continueRunning = true;
+			focalPlants = 0;
+		}
+		
+		Axiom ==> 
+		[
+			pi:PlantIdentifier pb:PlantBase 
+			{
+				pi.initiate(1, 1, 1, 1, species);
+				pb.initiate(1, 1, 1, 1, pi);
+			}
+			//for (int i=1; i<= totalFruitNum; i++)
+			//only need one fruit for simulation of vinefacts data
+			for (int i=1; i<= 1; i++)
+				(
+					[ 
+						Translate(random(0, 2), random(0, 2), random(0, 2)) 
+						b: main.FRUIT_CREATOR.createFruit()
+						
+						//Sphere(0.1)
+						//{println("b" + i);}
+						{
+							b.initiate_pb(pb, i, 1, 1);
+							b.berryNum = 1;
+							b.ID = i; 
+						} 
+					]
+				)					
+		];
+	]}
+}

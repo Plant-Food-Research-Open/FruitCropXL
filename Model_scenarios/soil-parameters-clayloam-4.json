@@ -1,0 +1,172 @@
+{
+  "instance": "1.3.6.1.4.1.61881.1.1.1.8.1.6.4.1.1",
+  "class": "2024-SoilWaterModel-soil-parameters",
+  "metaclass": "document-hybrid-category-name",
+  "category": {
+    "soil-descriptor": {
+      "dateSpecification": "2023-03-20",
+      "soilName": "RogerSoil"
+    },
+    "soilPhysicalProperties": {
+      "numofSoilLayers": 4
+    },
+    "soilSurfaceProperties": {
+      "maximumPonding": 100.0,
+      "runoffCoefficient": 0.5
+    }
+  },
+
+  "tables": [
+    "soilPhysicalProperties",
+    "soilChemicalProperties",
+    "treeModelVariables"
+  ],
+  "soilPhysicalProperties": {
+    "_row_prefix": "layer",
+    "layer_1": {
+      "layerThickness": 100,
+      "bulkDensity": 1.0,
+      "cropLowerLimit": 0.1,
+      "drainageUpperLimit": 0.25,
+      "waterSaturation": 0.55,
+      "saturatedConductivity": 4.17,
+      "swCon": 0.0375,
+      "thetaR": 0.1,
+      "airEntryCoef": 0.1,
+      "poreSizeCoef": 1.5,
+      "tortuosityCoef": 2.5
+    },
+    "layer_2": {
+      "layerThickness": 100,
+      "bulkDensity": 1.1,
+      "cropLowerLimit": 0.12,
+      "drainageUpperLimit": 0.3,
+      "waterSaturation": 0.5,
+      "saturatedConductivity": 2.08,
+      "swCon": 0.0285,
+      "thetaR": 0.1,
+      "airEntryCoef": 0.1,
+      "poreSizeCoef": 1.5,
+      "tortuosityCoef": 2.5
+    },
+    "layer_3": {
+      "layerThickness": 200,
+      "bulkDensity": 1.2,
+      "cropLowerLimit": 0.13,
+      "drainageUpperLimit": 0.3,
+      "waterSaturation": 0.45,
+      "saturatedConductivity": 1.04,
+      "swCon": 0.0211,
+      "thetaR": 0.1,
+      "airEntryCoef": 0.1,
+      "poreSizeCoef": 1.5,
+      "tortuosityCoef": 2.5
+    },
+    "layer_4": {
+      "layerThickness": 100,
+      "bulkDensity": 1.2,
+      "cropLowerLimit": 0.15,
+      "drainageUpperLimit": 0.32,
+      "waterSaturation": 0.45,
+      "saturatedConductivity": 0.21,
+      "swCon": 0.0093,
+      "thetaR": 0.1,
+      "airEntryCoef": 0.1,
+      "poreSizeCoef": 1.5,
+      "tortuosityCoef": 2.5
+    }
+  },
+  "soilChemicalProperties": {
+    "_row_prefix": "layer",
+    "layer_1": {
+      "absorptionCoefficient": 0.0
+    },
+    "layer_2": {
+      "absorptionCoefficient": 0.0
+    },
+    "layer_3": {
+      "absorptionCoefficient": 0.0
+    },
+    "layer_4": {
+      "absorptionCoefficient": 0.0
+    }
+  },
+  "treeModelVariables": {
+    "_row_prefix": "layer",
+    "layer_1": {
+      "stRootProportion": 0.3,
+      "fiRootProportion": 0.3,
+      "SOIL_N_CONTENT": 15.1,
+      "FRACTION_NH4": 0.2,
+      "FRACTION_NO3": 0.8,
+      "h1": -0.001,
+      "h2": -0.0025,
+      "h3": -0.03,
+      "h4": -1.5
+    },
+    "layer_2": {
+      "stRootProportion": 0.2,
+      "fiRootProportion": 0.2,
+      "SOIL_N_CONTENT": 15.1,
+      "FRACTION_NH4": 0.2,
+      "FRACTION_NO3": 0.8,
+      "h1": -0.001,
+      "h2": -0.0025,
+      "h3": -0.03,
+      "h4": -1.5
+    },
+    "layer_3": {
+      "stRootProportion": 0.3,
+      "fiRootProportion": 0.3,
+      "SOIL_N_CONTENT": 15.1,
+      "FRACTION_NH4": 0.2,
+      "FRACTION_NO3": 0.8,
+      "h1": -0.001,
+      "h2": -0.0025,
+      "h3": -0.03,
+      "h4": -1.5
+    },
+    "layer_4": {
+      "stRootProportion": 0.2,
+      "fiRootProportion": 0.2,
+      "SOIL_N_CONTENT": 15.1,
+      "FRACTION_NH4": 0.2,
+      "FRACTION_NO3": 0.8,
+      "h1": -0.001,
+      "h2": -0.0025,
+      "h3": -0.03,
+      "h4": -1.5
+    }
+  },
+  "metadata": {
+    "minerva": {
+      "content": {
+        "created-datetime": {
+          "$date": "2023-12-08T23:15:18.421Z"
+        },
+        "created-datestr": "2023-12-09 12:15:18.421529",
+        "created-user": "steve",
+        "created-host": "LIN-L-481412",
+        "updates": [
+          {
+            "update-datetime": {
+              "$date": "2023-12-08T23:15:18.421Z"
+            },
+            "update-datestr": "2023-12-09 12:15:18.421529",
+            "update-user": "steve",
+            "update-host": "LIN-L-481412"
+          }
+        ]
+      },
+      "comment": "the series and collection ids here are placeholders.",
+      "collection": {
+        "collection-id": "1.3.6.1.4.1.61881.1.1.1.8",
+        "name": "DHS model parametersets"
+      },
+      "series": {
+        "id": "1.3.6.1.4.1.61881.1.1.1.8.1.6",
+        "name": "Soil Water Balance model parametersets"
+      }
+    }
+  }
+}

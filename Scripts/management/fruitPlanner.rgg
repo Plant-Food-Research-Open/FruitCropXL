@@ -1,0 +1,2758 @@
+// ============================================================================
+// management/FruitPlanner.rgg
+// T1 fruit/flower twinning & T2 crop-load pruning
+// ============================================================================
+
+import static plantBase.*;
+import static budBase.*;
+import static flowerBase.*;
+import static fruitBase.*;
+import static budApple.*;
+import static shootBase.*;
+import static shoot.*;
+import static leaf.*;
+import static absOrgan.*;
+import static globalParameters.*;
+import static plantParameters.*;
+import static modelOptions.*;
+import static extraTools.*;
+import static archReader.*;
+import static budApple.*;
+import static budPlanner.*;
+
+/**
+ * FruitPlanner covers two related processes:
+ *
+ * T1 – Early twinning (flower/fruit thinning at stage 1)
+ *   Entry: runFromProjectParams_T1(boolean dryRun)
+ *
+ * T2 – Main crop-load pruning (cluster-based thinning + optional targets)
+ *   Entry: runFromProjectParams_Prune(boolean dryRun)
+ *
+ * Both T1 and T2:
+ *   - Decide whether to thin flowers or fruits based on counts:
+ *       nFlowers > nFruits  → thin flowers
+ *       else                → thin fruits
+ *
+ *   - Apply one of two cluster pruning modes:
+ *       Mode 1 (fruitPruningMode=1):
+ *           everywhere → max 1 organ per cluster
+ *       Mode 2 (fruitPruningMode=2):
+ *           below fruitSeparationHeight → 1 per cluster
+ *           above fruitSeparationHeight → 2 per cluster
+ *
+ *   - Cluster definition: all flowers/fruits whose parent internode is the same.
+ *
+ * Optionally, whole-tree, grid-based, or upright-region fruit-number targets can be enforced
+ * using:
+ *   fruitTargetMode ∈ {"none", "wholeTree", "gridBased", "uprightRegions"}
+ *   fruitTargetPerTree_T1, fruitTargetPerTree_T2
+ *   fruitTargetsGrid_T1,  fruitTargetsGrid_T2
+ *
+ * Fruit adding (gap-filling) is configured from model options under:
+ *   category.fruitPlanner.allowFruitAdding
+ *   category.fruitPlanner.maxFruitAddsPerTree
+ *   category.fruitPlanner.maxFruitPerInternode
+ *   category.fruitPlanner.fruitAddMode
+ *   category.fruitPlanner.allowAddOnOccupiedCordon
+ *   category.fruitPlanner.maxFruitPerCordonPosition
+ *   category.fruitPlanner.maxFruitPerCordonPositionFallback
+ *   category.fruitPlanner.fruitInitFromNearbyTemplate
+ *
+ * Basic global options (declared in modelOptions or similar):
+ *
+ *   global String fruitTargetMode = "none";
+ *   global int expectedFruitNumber_prePrune = 750;
+ *   global int desiredFruitNumber_postPrune = 500;
+ *   global int fruitPruningDOY = -1;
+ *   global int fruitPruningMode = 1;
+ *   global int fruitTargetPerTree_T1 = -1;
+ *   global int fruitTargetPerTree_T2 = -1;
+ *   global double[] fruitTargetsGrid_T1 = null;
+ *   global double[] fruitTargetsGrid_T2 = null;
+ *   global double fruitSeparationHeight = 1.7;
+ *
+ * T1 uses fruitTargetPerTree_T1 (fallback: expectedFruitNumber_prePrune).
+ * T2 wholeTree uses fruitTargetPerTree_T2 (fallback: desiredFruitNumber_postPrune).
+ * T2 gridBased uses the rounded sum of fruitTargetsGrid_T2 as the global floor/target
+ * (fallback: fruitTargetPerTree_T2, then desiredFruitNumber_postPrune, only if the
+ * grid targets are absent or empty).
+ *
+ * Upright-region note:
+ *   fruitTargetMode="uprightRegions" is implemented in this branch for numeric
+ *   target add/thin steps. It reuses the same order-root upright concept as
+ *   BudPlanner and LeafPlanner: MgmtUprightOrder defines the upright root,
+ *   each upright Z-span is split into three regions (0=bottom, 1=middle,
+ *   2=top), and the total fruit/flower target is distributed across regions
+ *   by region length. Organs are assigned by their parent internode z position.
+ *   This is not the same as gridBased mode and should not be silently mapped
+ *   to gridBased. Use gridBased when explicit rectangular spatial targets are
+ *   required, and use uprightRegions when the management objective is balanced
+ *   bottom/middle/top crop load on each upright.
+ *
+ * Twinning (T1/T2) → only numeric thinning, no stats in output, no mass‑balance guarantees.
+ * Pruning (T2) → real physical removal, 
+ * you want cluster + whole‑tree removal stats exposed so they can go into your output table.
+ * Optional fruit adding can be enabled for target gap-filling.
+ */
+public class FruitPlanner {
+ // --------------------------------------------------------------------------
+	// PUBLIC OUTPUT FIELDS FOR T2 PRUNING (for use in output tables)
+	// --------------------------------------------------------------------------
+	public static int    pruneFlowersRemoved      = 0;
+	public static int    pruneFruitsRemoved       = 0;
+	public static double pruneBiomassRemoved      = 0.0;
+	public static int    addFruitsAdded           = 0;
+	public static int    addFlowersAdded          = 0;
+	private static boolean addAppleRequireNearbyShoot = true;
+	private static boolean addAppleNearbyUseCordonOnly = false;
+	private static boolean addAppleFallbackOnlyWhenNoNearby = false;
+	private static boolean addAppleFallbackUseLegacyInternodeOnly = false;
+	private static boolean addAppleAllowLegacyWhenNoCordon = false;
+	private static int     addApplePerSiteLimit       = 1;
+	private static Cfg   addGridCfg               = null;
+	private static int[] addGridDeficits          = null;
+	private static long addUprightRegionRootID = -1L;
+	private static double addUprightRegionUprightZMin = 0.0;
+	private static double addUprightRegionUprightZMax = 0.0;
+	private static int addUprightRegionIdx = -1;
+	// Minimum vertical span (m) for a root to be managed as an upright-region upright.
+	private static final double UPRIGHT_REGION_MIN_SPAN_M = 2.0;
+	// Max number of fruits that cluster thinning is allowed to remove in this run.
+	// Used only when pruningMode == 3.
+	public static int clusterThinMaxFruitRemovals = Integer.MAX_VALUE;
+
+  // --------------------------------------------------------------------------
+  // CONFIG STRUCTURE
+  // --------------------------------------------------------------------------
+  static final class Cfg {
+    // Targeting mode
+    String  targetMode;     // "none", "wholeTree", "gridBased", "uprightRegions"
+    boolean gridMode;       // convenience flag (targetMode=="gridBased")
+
+    // Whole-tree target
+    int targetPerTree;      // fruits/flowers per tree (after thinning)
+
+    // Grid-based targets
+    int    gridNx, gridNz;
+    double gridXmin, gridXmax;
+    double gridZmin, gridZmax;
+    double[] gridTargets;   // length = gridNx * gridNz (target organs per cell)
+    double[] uprightRegionTargets; // explicit per-upright x 3 targets
+
+    // Pruning options (for both T1/T2)
+    int    pruningMode;     // 1 = 1/cluster everywhere; 2 = height-based (1/2)
+    int    pruningDOY;      // DOY gate (only used in T2 entry)
+    double sepHeight;       // fruitSeparationHeight (m)
+  }
+
+  // Stats structure
+  static final class FruitPruneStats {
+    int flowersRemoved;
+    int fruitsRemoved;
+    double biomassRemoved;  // approximate, based on reflection
+   
+
+    
+  }
+
+  // ========================================================================
+  // ENTRY POINTS
+  // ========================================================================
+
+  // ------------------------------------------------------------------------
+  // T1: early twinning / thinning
+  // (usually called at the "T1" stage date from the main project script)
+  // ------------------------------------------------------------------------
+  
+  /**
+ * Stage-T1 fruit/flower twinning entry point.
+ * <p>
+ * Reconciles the <em>current</em> flower/fruit count with either a
+ * whole-tree, grid-based, or upright-region T1 target, depending on the
+ * configured {@code fruitPlanner.targetMode}. This method is called from
+ * {@link TwinningPlanner} during Stage T1.
+ * </p>
+ *
+ * @param dryRun if {@code true}, compute and log the twinning actions without
+ *               modifying any leaves in the graph.
+ */
+  public static void runFromProjectParams_T1(boolean dryRun) {
+    if (!twinningStageIncludesObject(1, "fruit")) {
+      println("[FruitPlanner] skip T1: fruit not included in twinningObjects_T1");
+      return;
+    }
+    addFruitsAdded = 0;
+    addFlowersAdded = 0;
+
+    Cfg cfg = loadConfig_T1();
+
+    println("==========================================================");
+    println("[FruitPlanner/T1] START (early twinning)");
+    debugFruitSummary("T1/before");
+
+    runTwinningStage(cfg, dryRun, 1);
+
+    derive();  // update geometry / derived quantities
+    debugFruitSummary("T1/after");
+    println("==========================================================");
+  }
+  
+  // ------------------------------------------------------------------------
+  // T2: second twinning 
+  // ( optional whole-tree/grid targets)
+  // ------------------------------------------------------------------------
+	public static void runFromProjectParams_T2(boolean dryRun) {
+	  if (!twinningStageIncludesObject(2, "fruit")) {
+	    println("[FruitPlanner] skip T2: fruit not included in twinningObjects_T2");
+	    return;
+	  }
+	  addFruitsAdded = 0;
+	  addFlowersAdded = 0;
+
+	  Cfg cfg = loadConfig_T2(false);   // <-- twinning config
+	
+	  println("==========================================================");
+	  println("[FruitPlanner/T2] START (late twinning)");
+	  debugFruitSummary("T2/before");
+	
+	  runTwinningStage(cfg, dryRun, 2);
+	
+	  derive();
+	  debugFruitSummary("T2/after");
+	  println("==========================================================");
+	}
+	
+
+  // ------------------------------------------------------------------------
+  // T2: main crop-load pruning
+  // (cluster thinning + optional whole-tree/grid targets)
+  // ------------------------------------------------------------------------
+public static void runFromProjectParams_Prune(boolean dryRun) {
+    addFruitsAdded = 0;
+    addFlowersAdded = 0;
+
+    Cfg cfg = loadConfig_T2(true);
+    int curDOY = dayOfYear;
+
+    if (cfg.pruningDOY > 0 && curDOY != cfg.pruningDOY) {
+      println("[FruitPlanner/T2] pruneDOY mismatch → skip. (DOY="
+              + curDOY + ", fruitPruningDOY=" + cfg.pruningDOY + ")");
+      return;
+    }
+
+    println("==========================================================");
+    println("[FruitPlanner/T2] START (crop-load pruning)");
+    println("  DOY=" + curDOY);
+    println("  pruningMode=" + cfg.pruningMode);
+    println("  targetMode=" + cfg.targetMode);
+    println("  targetPerTree=" + cfg.targetPerTree);
+    println("==========================================================");
+
+    debugFruitSummary("Pruning/before");
+
+    // Optional pre-fill before any remove-only pruning steps.
+    if (allowFruitAdding) {
+      int addedPrePrune = 0;
+      if ("gridBased".equalsIgnoreCase(cfg.targetMode) && cfg.gridMode) {
+        addedPrePrune = addFruitsToGridTargets(cfg, dryRun,
+            "[FruitPlanner/T2/add/prePrune/grid]");
+      } else if (cfg.targetPerTree > 0) {
+        addedPrePrune = addFruitsToWholeTreeTarget(cfg, cfg.targetPerTree, dryRun,
+            "[FruitPlanner/T2/add/prePrune]");
+      }
+      if (addedPrePrune > 0 && !dryRun) derive();
+    }
+
+    // ------------------------------------------------------------
+    // NEW: set safety guard for pruneMode 3
+    // ------------------------------------------------------------
+    // Count fruits BEFORE cluster thinning (example: plant 1)
+    int nFrBeforeCluster =
+        (int) count((* f:FruitService, (f.plantNumber == 1) *));
+    
+    // Default: no limit (old behaviour for modes 1 and 2)
+    clusterThinMaxFruitRemovals = Integer.MAX_VALUE;
+
+    // Activate guard only in pruneMode 3 and if we actually have a target
+    if (cfg.pruningMode == 3 && cfg.targetPerTree > 0) {
+        int minFruitAfterCluster = cfg.targetPerTree;  // "guarded" target
+
+        int maxRemovable = nFrBeforeCluster - minFruitAfterCluster;
+        if (maxRemovable < 0) {
+            maxRemovable = 0; // already below/at target → skip cluster removals
+        }
+
+        clusterThinMaxFruitRemovals = maxRemovable;
+
+        println("[FruitPlanner/T2] pruneMode=3 → guard cluster thinning:"
+              + " nFrBefore=" + nFrBeforeCluster
+              + " minAfterCluster=" + minFruitAfterCluster
+              + " maxClusterRemovals=" + clusterThinMaxFruitRemovals);
+    }
+
+    // ------------------------------------------------------------
+    // STEP 1: Cluster thinning (FRUITS ONLY, not flowers)
+    // ------------------------------------------------------------
+    println("[FruitPlanner/T2] Step 1: cluster thinning on fruits");
+
+    FruitPruneStats statsCluster =
+      applyClusterThinning(cfg,
+                           /* thinFlowers = false → thin fruits */
+                           false,
+                           dryRun,
+                           "[FruitPlanner/T2/cluster]");
+
+    derive();  // update after structural removal
+
+    int nFlwAfterCluster = (int) count((* f:Flower,      (f.plantNumber == 1) *));
+    int nFrAfterCluster  = (int) count((* f:FruitService,(f.plantNumber == 1) *));
+    println("[FruitPlanner/T2] after cluster: nFlowers=" + nFlwAfterCluster
+          + " nFruits=" + nFrAfterCluster
+          + " (cluster removed fruits=" + statsCluster.fruitsRemoved + ")");
+
+    // ------------------------------------------------------------
+    // STEP 2: Whole-tree / grid numeric targets (NO cluster inside)
+    // ------------------------------------------------------------
+    // Keep pruning remove-only after the optional pre-prune add phase.
+    FruitPruneStats statsTarget = runTwinningStage(cfg, dryRun, 2, false);
+
+    derive();
+
+    // ------------------------------------------------------------
+    // STEP 3: Aggregate pruning stats (cluster + numeric)
+    // ------------------------------------------------------------
+    FruitPruneStats totalStats = new FruitPruneStats();
+    totalStats.flowersRemoved = statsCluster.flowersRemoved + statsTarget.flowersRemoved;
+    totalStats.fruitsRemoved  = statsCluster.fruitsRemoved  + statsTarget.fruitsRemoved;
+    totalStats.biomassRemoved = statsCluster.biomassRemoved + statsTarget.biomassRemoved;
+
+    pruneFlowersRemoved = totalStats.flowersRemoved;
+    pruneFruitsRemoved  = totalStats.fruitsRemoved;
+    pruneBiomassRemoved = totalStats.biomassRemoved;
+
+    println("[FruitPlanner/T2] FINAL PRUNE SUMMARY:"
+          + " flowersRemoved=" + totalStats.flowersRemoved
+          + " fruitsRemoved="  + totalStats.fruitsRemoved
+          + " biomassRemoved≈" + round3(totalStats.biomassRemoved)
+          + " (arbitrary mass units)");
+
+    debugFruitSummary("Pruning/after");
+    println("==========================================================");
+}
+
+  // ------------------------------------------------------------------------
+  // Optional: explicit twinning entry points (as in LeafPlanner)
+  // Can be called from scripts for testing / calibration.
+  // ------------------------------------------------------------------------
+  public static void runTwinning_T1(boolean dryRun) {
+    Cfg cfg = loadConfig_T1();
+    runTwinningStage(cfg, dryRun, 1);
+  }
+
+
+  // ========================================================================
+  // CORE TWINNING / PRUNING LOGIC (USED BY T1 + T2)
+  // ========================================================================
+  /**
+   * Shared logic for T1 and T2.
+   *
+   * 1) Decide whether to thin flowers or fruits based on counts:
+   *       nFlowers > nFruits → thin flowers; else thin fruits.
+   * 2) Apply whole-tree or grid-based numeric targets
+   *    (NO cluster-based thinning here).
+   *
+   * Cluster thinning is now only done in the pruning entry method.
+   */
+  /**
+   * Shared logic for T1 and T2.
+   *
+   * 1) Decide whether to thin flowers or fruits based on counts:
+   *       nFlowers > nFruits → thin flowers; else thin fruits.
+   * 2) Apply whole-tree or grid-based numeric targets.
+   *
+   * NOTE: Cluster-based thinning is NOT done here anymore.
+   *       It is only applied in runFromProjectParams_Prune().
+   *
+   * Returns: FruitPruneStats for the numeric target step only.
+   */
+  /**
+   * Convenience wrapper that runs twinning with fruit adding enabled.
+   *
+   * stageId mapping:
+   *   1 -> T1 twinning window
+   *   2 -> T2 twinning window
+   * The value is used for log labels and stage-specific reporting.
+   */
+  static FruitPruneStats runTwinningStage(Cfg cfg, boolean dryRun, int stageId) {
+    return runTwinningStage(cfg, dryRun, stageId, true);
+  }
+
+  /**
+   * Shared numeric twinning engine.
+   *
+   * enableAdd=true  -> run add-before-thin phase if allowFruitAdding is enabled.
+   * enableAdd=false -> skip add phase (used by prune step 2 to keep remove-only).
+   *
+   * stageId mapping:
+   *   1 = T1
+   *   2 = T2
+   */
+  static FruitPruneStats runTwinningStage(Cfg cfg, boolean dryRun, int stageId, boolean enableAdd) {
+    if (cfg != null && cfg.gridMode && useAutoFitTwinningGridBoundsMode()) {
+      autoFitGridBoundsToCurrentTree(cfg, "[FruitPlanner/T" + stageId + "]");
+    }
+
+    // ----------------------------------------------------------------------
+    // 1. Decide whether we are thinning flowers or fruits
+    // ----------------------------------------------------------------------
+    int nFlw   = (int) count((* f:Flower,      (f.plantNumber == 1) *));
+    int nFruit = (int) count((* f:FruitService,(f.plantNumber == 1) *));
+    int total  = nFlw + nFruit;
+
+    println("[FruitPlanner/T" + stageId + "] start:"
+          + " nFlowers=" + nFlw
+          + " nFruits="  + nFruit
+          + " total="    + total);
+
+    FruitPruneStats statsTarget = new FruitPruneStats();
+
+    // Optional add phase before any thinning.
+    if (enableAdd && allowFruitAdding) {
+      int addedNow = 0;
+      if ("wholeTree".equalsIgnoreCase(cfg.targetMode) && cfg.targetPerTree > 0) {
+        addedNow = addFruitsToWholeTreeTarget(cfg, cfg.targetPerTree, dryRun,
+            "[FruitPlanner/T" + stageId + "/add/wholeTree]");
+      } else if ("gridBased".equalsIgnoreCase(cfg.targetMode) && cfg.gridMode) {
+        addedNow = addFruitsToGridTargets(cfg, dryRun,
+            "[FruitPlanner/T" + stageId + "/add/grid]");
+      } else if ("uprightRegions".equalsIgnoreCase(cfg.targetMode) && cfg.targetPerTree > 0) {
+        addedNow = addFruitsToUprightRegions(cfg, cfg.targetPerTree, dryRun,
+            "[FruitPlanner/T" + stageId + "/add/uprightRegions]");
+      }
+      if (addedNow > 0 && !dryRun) derive();
+      if (addedNow > 0) {
+        nFlw   = (int) count((* f:Flower,      (f.plantNumber == 1) *));
+        nFruit = (int) count((* f:FruitService,(f.plantNumber == 1) *));
+        total  = nFlw + nFruit;
+        println("[FruitPlanner/T" + stageId + "] post-add:"
+              + " addedFruits=" + addedNow
+              + " nFlowers=" + nFlw
+              + " nFruits="  + nFruit
+              + " total="    + total);
+      }
+    }
+
+    if (total <= 0) {
+      println("[FruitPlanner/T" + stageId + "] no flowers/fruits → nothing to do.");
+      return statsTarget;
+    }
+
+    boolean thinFlowers = (nFlw > nFruit);
+    println("[FruitPlanner/T" + stageId + "] thinning "
+          + (thinFlowers ? "FLOWERS" : "FRUITS"));
+
+    // ----------------------------------------------------------------------
+    // 2. (NO cluster-based thinning here)
+    // ----------------------------------------------------------------------
+
+    derive();  // update geometry / derived quantities before numeric step
+
+    // ----------------------------------------------------------------------
+    // 3. Optional numeric targets (whole-tree or grid-based)
+    // ----------------------------------------------------------------------
+    if ("wholeTree".equalsIgnoreCase(cfg.targetMode)
+        && cfg.targetPerTree > 0) {
+
+      statsTarget = thinToWholeTreeTarget(cfg, thinFlowers, cfg.targetPerTree,
+                                          dryRun,
+                                          "[FruitPlanner/T" + stageId + "/wholeTree]");
+
+    } else if ("gridBased".equalsIgnoreCase(cfg.targetMode)
+               && cfg.gridMode
+               && cfg.gridTargets != null
+               && cfg.gridTargets.length == cfg.gridNx * cfg.gridNz) {
+
+      statsTarget = thinToGridTargets(cfg, thinFlowers, dryRun,
+                                      "[FruitPlanner/T" + stageId + "/grid]");
+    } else if ("uprightRegions".equalsIgnoreCase(cfg.targetMode)
+               && cfg.targetPerTree > 0) {
+      statsTarget = thinToUprightRegions(cfg, thinFlowers, cfg.targetPerTree, dryRun,
+                                         "[FruitPlanner/T" + stageId + "/uprightRegions]");
+    }
+
+    // ----------------------------------------------------------------------
+    // 4. Log NUMERIC step only (no cluster contribution here)
+    // ----------------------------------------------------------------------
+    println("[FruitPlanner/T" + stageId + "] SUMMARY (numeric targets):"
+          + " flowersRemoved=" + statsTarget.flowersRemoved
+          + " fruitsRemoved="  + statsTarget.fruitsRemoved
+          + " biomassRemoved≈" + round3(statsTarget.biomassRemoved)
+          + " (arbitrary mass units)");
+
+    return statsTarget;
+  }
+
+  // ========================================================================
+  // CONFIG LOADERS
+  // ========================================================================
+
+  static Cfg loadConfig_T1() {
+    Cfg cfg = new Cfg();
+
+    // Target mode and pruning settings
+    cfg.targetMode  = normalizeTargetMode((fruitTargetMode != null) ? fruitTargetMode : "none");
+    cfg.pruningMode = fruitPruningMode;
+    cfg.sepHeight   = fruitSeparationHeight;
+    cfg.pruningDOY  = -1; // no DOY gate for T1 entry
+
+    // Determine whole-tree or grid mode
+    if ("gridBased".equalsIgnoreCase(cfg.targetMode)) {
+      cfg.gridMode   = true;
+      cfg.gridNx     = twinningNx;
+      cfg.gridNz     = twinningNz;
+      cfg.gridXmin   = twinningXMin;
+      cfg.gridXmax   = twinningXMax;
+      cfg.gridZmin   = twinningZMin;
+      cfg.gridZmax   = twinningZMax;
+      cfg.gridTargets = fruitTargetsGrid_T1;
+      if (useAutoFitTwinningGridBoundsMode()) {
+        autoFitGridBoundsToCurrentTree(cfg, "[FruitPlanner/T1]");
+      }
+    } else if ("uprightRegions".equalsIgnoreCase(cfg.targetMode)) {
+      cfg.gridMode = false;
+      cfg.uprightRegionTargets = fruitTargetsUprightRegion_T1;
+      int tgt = fruitTargetPerTree_T1;
+      if (tgt <= 0 && expectedFruitNumber_prePrune > 0) {
+        tgt = expectedFruitNumber_prePrune;
+      }
+      cfg.targetPerTree = tgt;
+    } else {
+      cfg.gridMode = false;
+      int tgt = fruitTargetPerTree_T1;
+      if (tgt <= 0 && expectedFruitNumber_prePrune > 0) {
+        tgt = expectedFruitNumber_prePrune;
+      }
+      cfg.targetPerTree = tgt;
+    }
+
+    return cfg;
+  }
+  
+  
+static Cfg loadConfig_T2(boolean forPruning) {
+  Cfg cfg = new Cfg();
+
+  // Shared options
+  cfg.targetMode  = normalizeTargetMode((fruitTargetMode != null) ? fruitTargetMode : "none");
+  cfg.pruningMode = fruitPruningMode;
+  cfg.sepHeight   = fruitSeparationHeight;
+
+  // Only pruning uses DOY gate
+  cfg.pruningDOY  = forPruning ? fruitPruningDOY : -1;
+
+  int tgt = 0;  // will fill for both grid and non-grid
+
+  // Grid vs whole-tree
+  if ("gridBased".equalsIgnoreCase(cfg.targetMode)) {
+    cfg.gridMode    = true;
+    cfg.gridNx      = twinningNx;
+    cfg.gridNz      = twinningNz;
+    cfg.gridXmin    = twinningXMin;
+    cfg.gridXmax    = twinningXMax;
+    cfg.gridZmin    = twinningZMin;
+    cfg.gridZmax    = twinningZMax;
+    cfg.gridTargets = fruitTargetsGrid_T2;
+    if (useAutoFitTwinningGridBoundsMode()) {
+      autoFitGridBoundsToCurrentTree(cfg, forPruning ? "[FruitPlanner/T2-prune]" : "[FruitPlanner/T2]");
+    }
+
+    // -------- derive grid-mode floor / total target --------
+    // In grid mode, use the rounded grid-target sum as the global floor/guard when available.
+    int sumGrid = sumRoundedGridTargets(cfg.gridTargets);
+    if (sumGrid > 0) {
+      tgt = sumGrid;
+    } else if (fruitTargetPerTree_T2 > 0) {
+      // Compatibility fallback when scenarios select grid mode but omit valid grid targets.
+      tgt = fruitTargetPerTree_T2;
+    } else if (desiredFruitNumber_postPrune > 0) {
+      // Final fallback: desired post-prune number
+      tgt = desiredFruitNumber_postPrune;
+    }
+
+  } else if ("uprightRegions".equalsIgnoreCase(cfg.targetMode)) {
+    cfg.gridMode = false;
+    cfg.uprightRegionTargets = fruitTargetsUprightRegion_T2;
+
+    if (forPruning) {
+      tgt = desiredFruitNumber_postPrune;
+    } else {
+      tgt = fruitTargetPerTree_T2;
+      if (tgt <= 0 && desiredFruitNumber_postPrune > 0) {
+        tgt = desiredFruitNumber_postPrune;
+      }
+    }
+  } else {
+    cfg.gridMode = false;
+
+    if (forPruning) {
+      // TRUE post‑pruning crop‑load target
+      tgt = desiredFruitNumber_postPrune;
+    } else {
+      // T2 twinning target; fallback to post‑prune if undefined
+      tgt = fruitTargetPerTree_T2;
+      if (tgt <= 0 && desiredFruitNumber_postPrune > 0) {
+        tgt = desiredFruitNumber_postPrune;
+      }
+    }
+  }
+
+  cfg.targetPerTree = tgt;
+  return cfg;
+}
+
+  /**
+   * Backward-compatible fruit target mode parser.
+   *
+   * Accepted upright-region aliases are "uprightRegions", "upright_region",
+   * "upright-region", "upright_regions", "upright-regions", and "upright3".
+   * Unsupported values are returned
+   * unchanged so callers do not silently reinterpret them as gridBased.
+   * The legacy "wholePlant" alias maps to "wholeTree".
+   */
+  static String normalizeTargetMode(String modeRaw) {
+    if (modeRaw == null) return "none";
+    String mode = modeRaw.trim();
+
+    if ("wholePlant".equalsIgnoreCase(mode)
+        || "whole_tree".equalsIgnoreCase(mode)
+        || "whole-tree".equalsIgnoreCase(mode)
+        || "wholetree".equalsIgnoreCase(mode)) {
+      return "wholeTree";
+    }
+    if ("grid".equalsIgnoreCase(mode)
+        || "grid_based".equalsIgnoreCase(mode)
+        || "grid-based".equalsIgnoreCase(mode)
+        || "gridbased".equalsIgnoreCase(mode)) {
+      return "gridBased";
+    }
+    if ("upright3".equalsIgnoreCase(mode)
+        || "upright_region".equalsIgnoreCase(mode)
+        || "upright-region".equalsIgnoreCase(mode)
+        || "upright_regions".equalsIgnoreCase(mode)
+        || "upright-regions".equalsIgnoreCase(mode)
+        || "uprightRegions".equalsIgnoreCase(mode)) {
+      return "uprightRegions";
+    }
+    if ("none".equalsIgnoreCase(mode)) return "none";
+    return mode;
+  }
+
+  /**
+   * Init-time apple fruit adding entry (used by InitiationArchReader CPU/GPU).
+   *
+   * Resolves target with the same logic as T2 twinning config:
+   *   - gridBased: prefer rounded grid sum, fallback to fruitTargetPerTree_T2, then desiredFruitNumber_postPrune
+   *   - wholeTree: use targetPerTree from config
+   * and applies add-filling through grid or whole-tree add paths accordingly.
+   */
+  public static int addInitialAppleFruitsFromTargets(boolean dryRun) {
+    if (!main.FRUIT_CREATOR.usesVirtualFruitService()) return 0;
+
+    int existingAppleFruits = 0;
+    try {
+      existingAppleFruits = (int) count((* f:FruitService, (f.plantNumber == 1) *));
+    } catch (Throwable t) {
+      existingAppleFruits = 0;
+    }
+
+    int appleInitPostPruneTarget = -1;
+    try {
+      appleInitPostPruneTarget = desiredFruitNumber_postPrune;
+    } catch (Throwable t) {
+      appleInitPostPruneTarget = -1;
+    }
+
+    Cfg cfg = null;
+    try {
+      cfg = loadConfig_T2(false);
+    } catch (Throwable t) {
+      cfg = null;
+    }
+
+    String targetMode = "legacyFallback";
+    boolean useGridTarget = false;
+    boolean gridConfigValid = false;
+    int gridTargetSum = 0;
+    int appleInitTarget = 0;
+
+    try {
+      if (cfg != null && cfg.targetMode != null) targetMode = cfg.targetMode;
+    } catch (Throwable t) {
+      targetMode = "legacyFallback";
+    }
+
+    if (cfg != null) {
+      try { appleInitTarget = cfg.targetPerTree; } catch (Throwable t) { appleInitTarget = 0; }
+      useGridTarget = ("gridBased".equalsIgnoreCase(targetMode) && cfg.gridMode);
+      if (useGridTarget) {
+        try {
+          int cells = cfg.gridNx * cfg.gridNz;
+          gridConfigValid = (cells > 0
+              && cfg.gridTargets != null
+              && cfg.gridTargets.length == cells);
+          if (cfg.gridTargets != null) {
+            int i;
+            for (i = 0; i < cfg.gridTargets.length; i++) {
+              gridTargetSum += (int) Math.round(cfg.gridTargets[i]);
+            }
+          }
+        } catch (Throwable t) {
+          gridConfigValid = false;
+          gridTargetSum = 0;
+        }
+      }
+    }
+
+    if (appleInitTarget <= 0) {
+      try {
+        if (fruitTargetPerTree_T2 > 0) {
+          appleInitTarget = fruitTargetPerTree_T2;
+        } else if (fruitTargetPerTree_T1 > 0) {
+          appleInitTarget = fruitTargetPerTree_T1;
+        } else if (appleInitPostPruneTarget > 0) {
+          appleInitTarget = appleInitPostPruneTarget;
+        } else {
+          appleInitTarget = 500;
+        }
+      } catch (Throwable t) {
+        appleInitTarget = 500;
+      }
+    }
+
+    boolean appleInitSkipBecausePostPruneReached =
+      (appleInitTarget > 0 && existingAppleFruits >= appleInitTarget);
+
+    int appleInitRemaining = appleInitTarget;
+    if (appleInitSkipBecausePostPruneReached) {
+      appleInitRemaining = 0;
+    } else if (appleInitRemaining != Integer.MAX_VALUE) {
+      appleInitRemaining = appleInitRemaining - existingAppleFruits;
+      if (appleInitRemaining < 0) appleInitRemaining = 0;
+    }
+
+    int appleInitTotalCordonGe4 = 0;
+    int appleInitEligibleCordonCount = 0;
+    int appleInitCordonWithoutNearbyShoot = 0;
+    int appleInitEligibleTopCount = 0;
+    int appleInitEligibleBottomCount = 0;
+    double appleInitZMin = Double.POSITIVE_INFINITY;
+    double appleInitZMax = Double.NEGATIVE_INFINITY;
+    double appleInitZSplit = 0.0;
+
+    try {
+      for (Cordon c : (* cc:Cordon, (cc.order >= 4) *)) {
+        if (c == null) continue;
+        appleInitTotalCordonGe4++;
+        if (!hasNearbyShootMeristem(c)) {
+          appleInitCordonWithoutNearbyShoot++;
+          continue;
+        }
+        double zc = zBase(c);
+        if (zc < appleInitZMin) appleInitZMin = zc;
+        if (zc > appleInitZMax) appleInitZMax = zc;
+        appleInitEligibleCordonCount++;
+      }
+      if (appleInitEligibleCordonCount > 0) {
+        appleInitZSplit = appleInitZMin + 0.5 * (appleInitZMax - appleInitZMin);
+        for (Cordon c : (* cc:Cordon, (cc.order >= 4) *)) {
+          if (c == null) continue;
+          if (!hasNearbyShootMeristem(c)) continue;
+          if (zBase(c) >= appleInitZSplit) appleInitEligibleTopCount++;
+          else appleInitEligibleBottomCount++;
+        }
+      }
+    } catch (Throwable t) {
+      appleInitTotalCordonGe4 = 0;
+      appleInitEligibleCordonCount = 0;
+      appleInitCordonWithoutNearbyShoot = 0;
+      appleInitEligibleTopCount = 0;
+      appleInitEligibleBottomCount = 0;
+      appleInitZMin = 0.0;
+      appleInitZMax = 0.0;
+      appleInitZSplit = 0.0;
+    }
+
+    if (printFlag || fruitAddDebug) {
+      println("[InitArch/addLeaves] cordon>=4 diagnostics"
+          + " total=" + appleInitTotalCordonGe4
+          + " withNearbyShoot=" + appleInitEligibleCordonCount
+          + " withoutNearbyShoot=" + appleInitCordonWithoutNearbyShoot
+          + " zSplit=" + round3(appleInitZSplit)
+          + " targetMode=" + targetMode
+          + " gridConfigValid=" + gridConfigValid
+          + " gridTargetSum=" + gridTargetSum);
+      if (fruitAddDebug && appleInitTotalCordonGe4 > 0) {
+        int dbgShown = 0;
+        for (Cordon c : (* cc:Cordon, (cc.order >= 4) *)) {
+          if (c == null) continue;
+          boolean near = false;
+          try { near = hasNearbyShootMeristem(c); } catch (Throwable t) { near = false; }
+          int fruitN = 0;
+          try { fruitN = countFruitChildren(c); } catch (Throwable t) { fruitN = 0; }
+          double zc = 0.0;
+          try { zc = zBase(c); } catch (Throwable t) { zc = 0.0; }
+          println("[InitArch/addLeaves] cordon>=4 sample id=" + c.getId()
+              + " order=" + c.order
+              + " rank=" + c.rank
+              + " cordonNumber=" + c.cordonNumber
+              + " nodeNumber=" + c.nodeNumber
+              + " z=" + round3(zc)
+              + " nearbyShoot=" + near
+              + " fruitChildren=" + fruitN);
+          dbgShown++;
+          if (dbgShown >= 12) break;
+        }
+      }
+    }
+
+    int added = 0;
+    if (appleInitRemaining > 0) {
+      if (useGridTarget && cfg != null && gridConfigValid) {
+        boolean allowFruitAddingBackup = allowFruitAdding;
+        boolean addAppleNearbyUseCordonOnlyBackup = addAppleNearbyUseCordonOnly;
+        boolean addAppleFallbackOnlyWhenNoNearbyBackup = addAppleFallbackOnlyWhenNoNearby;
+        boolean addAppleFallbackUseLegacyInternodeOnlyBackup = addAppleFallbackUseLegacyInternodeOnly;
+        // Init-time fruit population should remain available even if runtime add-filling is disabled.
+        allowFruitAdding = true;
+        // Match legacy init passes: nearby-site addition scans Cordon nodes.
+        addAppleNearbyUseCordonOnly = true;
+        // Keep legacy init behavior: use non-nearby fallback only if nearby-site passes add zero.
+        addAppleFallbackOnlyWhenNoNearby = true;
+        // Grid mode keeps cordon-capable fallback (non-grid keeps legacy fallback below).
+        addAppleFallbackUseLegacyInternodeOnly = false;
+        try {
+          if (cfg.targetPerTree <= 0) cfg.targetPerTree = appleInitTarget;
+          added = addFruitsToGridTargets(cfg, dryRun, "[InitArch/addLeaves/grid]");
+        } finally {
+          allowFruitAdding = allowFruitAddingBackup;
+          addAppleNearbyUseCordonOnly = addAppleNearbyUseCordonOnlyBackup;
+          addAppleFallbackOnlyWhenNoNearby = addAppleFallbackOnlyWhenNoNearbyBackup;
+          addAppleFallbackUseLegacyInternodeOnly = addAppleFallbackUseLegacyInternodeOnlyBackup;
+        }
+      } else if (!dryRun) {
+        final int appleInitCapFinal = appleInitRemaining;
+        final int[] appleInitAdded = new int[] {0};
+
+        // Legacy pass 1A: one fruit/site on upper fruiting cordons.
+        [
+          i:Cordon,
+          (i.order >= 4
+           && hasNearbyShootMeristem(i)
+           && countFruitChildren(i) == 0
+           && (appleInitEligibleCordonCount <= 0 || zBase(i) >= appleInitZSplit)
+           && appleInitAdded[0] < appleInitCapFinal) ==> i
+          {
+            PlantBase pb = first((* p:PlantBase, (p.plantNumber == i.plantNumber) *));
+          }
+          [
+            b:main.FRUIT_CREATOR.createFruit(FruitService.originalParametersFactory, FruitService.DELTA)
+            {
+              b.initiate_pb(pb, i);
+              appleInitAdded[0]++;
+            }
+          ]
+          ;
+        ]
+        // Legacy pass 1B: one fruit/site on lower fruiting cordons.
+        [
+          i:Cordon,
+          (i.order >= 4
+           && hasNearbyShootMeristem(i)
+           && countFruitChildren(i) == 0
+           && appleInitEligibleCordonCount > 0
+           && zBase(i) < appleInitZSplit
+           && appleInitAdded[0] < appleInitCapFinal) ==> i
+          {
+            PlantBase pb = first((* p:PlantBase, (p.plantNumber == i.plantNumber) *));
+          }
+          [
+            b:main.FRUIT_CREATOR.createFruit(FruitService.originalParametersFactory, FruitService.DELTA)
+            {
+              b.initiate_pb(pb, i);
+              appleInitAdded[0]++;
+            }
+          ]
+          ;
+        ]
+        // Legacy pass 2A: allow a second fruit on upper cordons.
+        [
+          i:Cordon,
+          (i.order >= 4
+           && hasNearbyShootMeristem(i)
+           && countFruitChildren(i) > 0
+           && countFruitChildren(i) < 2
+           && (appleInitEligibleCordonCount <= 0 || zBase(i) >= appleInitZSplit)
+           && appleInitAdded[0] < appleInitCapFinal) ==> i
+          {
+            PlantBase pb = first((* p:PlantBase, (p.plantNumber == i.plantNumber) *));
+          }
+          [
+            b:main.FRUIT_CREATOR.createFruit(FruitService.originalParametersFactory, FruitService.DELTA)
+            {
+              b.initiate_pb(pb, i);
+              appleInitAdded[0]++;
+            }
+          ]
+          ;
+        ]
+        // Legacy pass 2B: if still needed, allow a second fruit on lower cordons.
+        [
+          i:Cordon,
+          (i.order >= 4
+           && hasNearbyShootMeristem(i)
+           && countFruitChildren(i) > 0
+           && countFruitChildren(i) < 2
+           && appleInitEligibleCordonCount > 0
+           && zBase(i) < appleInitZSplit
+           && appleInitAdded[0] < appleInitCapFinal) ==> i
+          {
+            PlantBase pb = first((* p:PlantBase, (p.plantNumber == i.plantNumber) *));
+          }
+          [
+            b:main.FRUIT_CREATOR.createFruit(FruitService.originalParametersFactory, FruitService.DELTA)
+            {
+              b.initiate_pb(pb, i);
+              appleInitAdded[0]++;
+            }
+          ]
+          ;
+        ]
+        // Cordon-only fallback when nearby metadata is missing:
+        // add to empty old cordons first (no annual-shoot placement).
+        if (appleInitAdded[0] < appleInitCapFinal
+            && appleInitEligibleCordonCount <= 0
+            && appleInitTotalCordonGe4 > 0) {
+          [
+            i:Cordon,
+            ((i.order >= 4
+              && countFruitChildren(i) == 0)
+             && appleInitAdded[0] < appleInitCapFinal) ==> i
+            {
+              PlantBase pb = first((* p:PlantBase, (p.plantNumber == i.plantNumber) *));
+            }
+            [
+              b:main.FRUIT_CREATOR.createFruit(FruitService.originalParametersFactory, FruitService.DELTA)
+              {
+                b.initiate_pb(pb, i);
+                appleInitAdded[0]++;
+              }
+            ]
+            ;
+          ]
+        }
+        // If still below cap, allow up to 2 fruits per old cordon.
+        if (appleInitAdded[0] < appleInitCapFinal
+            && appleInitEligibleCordonCount <= 0
+            && appleInitTotalCordonGe4 > 0) {
+          [
+            i:Cordon,
+            ((i.order >= 4
+              && countFruitChildren(i) > 0
+              && countFruitChildren(i) < 2)
+             && appleInitAdded[0] < appleInitCapFinal) ==> i
+            {
+              PlantBase pb = first((* p:PlantBase, (p.plantNumber == i.plantNumber) *));
+            }
+            [
+              b:main.FRUIT_CREATOR.createFruit(FruitService.originalParametersFactory, FruitService.DELTA)
+              {
+                b.initiate_pb(pb, i);
+                appleInitAdded[0]++;
+              }
+            ]
+            ;
+          ]
+        }
+        // Legacy compatibility: if no old cordons exist in the imported graph,
+        // fall back to historical order-4 placement to keep baseline scenarios alive.
+        if (appleInitAdded[0] == 0
+            && appleInitCapFinal > 0
+            && appleInitTotalCordonGe4 <= 0) {
+          [
+            i:Internode,
+            (((i.rank >= 1 && i.rank < 4) && i.order == 4)
+             && appleInitAdded[0] < appleInitCapFinal) ==> i
+            {
+              PlantBase pb = first((* p:PlantBase, (p.plantNumber == i.plantNumber) *));
+            }
+            [
+              b:main.FRUIT_CREATOR.createFruit(FruitService.originalParametersFactory, FruitService.DELTA)
+              {
+                b.initiate_pb(pb, i);
+                appleInitAdded[0]++;
+              }
+            ]
+            ;
+          ]
+        }
+        if (appleInitAdded[0] == 0
+            && appleInitCapFinal > 0
+            && appleInitTotalCordonGe4 <= 0) {
+          [
+            s:ShootMeristem i:Internode,
+            (((i.rank >= 1 && i.rank < 4) && i.order == 4)
+             && appleInitAdded[0] < appleInitCapFinal) ==> s i
+            {
+              PlantBase pb = first((* p:PlantBase, (p.plantNumber == i.plantNumber) *));
+            }
+            [
+              b:main.FRUIT_CREATOR.createFruit(FruitService.originalParametersFactory, FruitService.DELTA)
+              {
+                b.initiate_pb(pb, i);
+                appleInitAdded[0]++;
+              }
+            ]
+            ;
+          ]
+        }
+
+        added = appleInitAdded[0];
+      }
+    }
+
+    if (printFlag || fruitAddDebug) {
+      println("[InitArch/addLeaves] apple init fruit cap="
+            + appleInitRemaining
+            + " existing=" + existingAppleFruits
+            + " postPruneTarget=" + appleInitPostPruneTarget
+            + " skipAdd(postPruneReached)=" + appleInitSkipBecausePostPruneReached
+            + " targetMode=" + targetMode
+            + " targetResolved=" + appleInitTarget
+            + " added=" + added
+            + " eligibleCordon=" + appleInitEligibleCordonCount
+            + " top=" + appleInitEligibleTopCount
+            + " bottom=" + appleInitEligibleBottomCount);
+    }
+
+    return added;
+  }
+
+
+
+  // ========================================================================
+  // CLUSTER-BASED THINNING (MODES 1 & 2)
+  // ========================================================================
+
+  static FruitPruneStats applyClusterThinning(Cfg cfg,
+                                              boolean thinFlowers,
+                                              boolean dryRun,
+                                              String label) {
+    FruitPruneStats stats = new FruitPruneStats();
+
+    // Build clusters: Map<Internode, List<Flower/FruitService>>
+    java.util.Map clusters = new java.util.HashMap();
+
+    if (thinFlowers) {
+      for (Flower fl : (* f:Flower, (f.plantNumber == 1) *)) {
+        Internode itn = getParentInternode(fl);
+        if (itn == null) continue;
+
+        java.util.List list = (java.util.List) clusters.get(itn);
+        if (list == null) {
+          list = new java.util.ArrayList();
+          clusters.put(itn, list);
+        }
+        list.add(fl);
+      }
+    } else {
+      for (FruitService fr : (* f:FruitService, (f.plantNumber == 1) *)) {
+        Internode itn = getParentInternode(fr);
+        if (itn == null) continue;
+
+        java.util.List list = (java.util.List) clusters.get(itn);
+        if (list == null) {
+          list = new java.util.ArrayList();
+          clusters.put(itn, list);
+        }
+        list.add(fr);
+      }
+    }
+
+    println(label + " clusters=" + clusters.size()
+          + " (mode=" + cfg.pruningMode + ")");
+
+    java.util.Iterator it = clusters.entrySet().iterator();
+    while (it.hasNext()) {
+      java.util.Map.Entry e = (java.util.Map.Entry) it.next();
+      Internode base = (Internode) e.getKey();
+      java.util.List cluster = (java.util.List) e.getValue();
+
+      if (cluster == null || cluster.isEmpty()) continue;
+
+      int clusterSize = cluster.size();
+
+      // --------------------------------------------------------------------
+      // Decide how many to keep in this cluster
+      // --------------------------------------------------------------------
+      int keepMax;
+      if (cfg.pruningMode == 2) {
+        double z = 0.0;
+        try { z = zBase(base); } catch (Throwable t) {}
+        if (z < cfg.sepHeight) keepMax = 1;
+        else                   keepMax = 2;
+      } else {
+        // Mode 1: 1 per cluster everywhere
+        keepMax = 1;
+      }
+
+      if (keepMax <= 0 || clusterSize <= keepMax) continue;
+
+      // --------------------------------------------------------------------
+      // Sort cluster by estimated organ size (descending),
+      // so we KEEP the largest and remove the rest.
+      // --------------------------------------------------------------------
+      try {
+        java.util.Collections.sort(cluster, new java.util.Comparator() {
+          public int compare(Object o1, Object o2) {
+            double s1 = getOrganSize(o1);
+            double s2 = getOrganSize(o2);
+            if (s1 < s2) return 1;   // descending
+            if (s1 > s2) return -1;
+            return 0;
+          }
+        });
+      } catch (Throwable t) {
+        // on any sort failure → we still remove from the tail
+      }
+
+    int removedHere = 0;
+	int i;
+	for (i = keepMax; i < clusterSize; i++) {
+	  Object obj = cluster.get(i);
+	  if (obj == null) continue;
+	
+	  // guard (mode 3)
+	  if (cfg.pruningMode == 3 &&
+		  stats.fruitsRemoved >= clusterThinMaxFruitRemovals) {
+		if (!dryRun) {
+		  println("[FruitPlanner/T2/cluster] guard reached → stop cluster thinning:"
+				+ " fruitsRemoved=" + stats.fruitsRemoved
+				+ " max=" + clusterThinMaxFruitRemovals);
+		}
+		break;
+	  }
+	
+	  if (thinFlowers && (obj instanceof Flower)) {
+		Flower fl = (Flower) obj;
+		stats.flowersRemoved++;
+		stats.biomassRemoved += getBiomass(fl);
+		removedHere++;
+		if (!dryRun) removeFlower(fl);
+	  } else if (!thinFlowers && (obj instanceof FruitService)) {
+		FruitService fr = (FruitService) obj;
+		stats.fruitsRemoved++;
+		stats.biomassRemoved += getBiomass(fr);
+		removedHere++;
+		if (!dryRun) removeFruit(fr);
+	  }
+	}
+
+      if (removedHere > 0) {
+        println(label + " cluster at internode@" + base.hashCode()
+              + " size=" + clusterSize
+              + " keepMax=" + keepMax
+              + " removed=" + removedHere);
+      }
+    }
+
+    println(label + " TOTAL cluster-removal:"
+          + " flowers=" + stats.flowersRemoved
+          + " fruits="  + stats.fruitsRemoved
+          + " biomass≈" + round3(stats.biomassRemoved));
+
+    return stats;
+  }
+
+  // ========================================================================
+  // WHOLE-TREE TARGET THINNING
+  // ========================================================================
+
+  static final class UprightRegionFruitSnap {
+    Internode root;
+    int uprightIdx;
+    int idx;
+    int flatIdx;
+    double xRow;
+    double uprightZMin;
+    double uprightZMax;
+    double zMin;
+    double zMax;
+    double lenM;
+    int now;
+    int target;
+    java.util.List organs;
+  }
+
+  static final class UprightOrderSnap {
+    Internode root;
+    double zMin;
+    double zMax;
+    double xRow;
+    int n;
+  }
+
+  static java.util.List computeUprightRegionFruitSnaps(boolean thinFlowers, int totalTarget, double[] explicitTargets) {
+    int regionCount = 3;
+    int uprightOrder = Math.max(1, MgmtUprightOrder);
+    double eps = 1.0e-9;
+    java.util.Map up2min = new java.util.HashMap();
+    java.util.Map up2max = new java.util.HashMap();
+    java.util.Map up2root = new java.util.HashMap();
+    java.util.Map up2xsum = new java.util.HashMap();
+    java.util.Map up2count = new java.util.HashMap();
+    java.util.Map root2snaps = new java.util.HashMap();
+    java.util.List snaps = new java.util.ArrayList();
+
+    for (Internode itn : (* i:Internode, (i.plantNumber == 1) *)) {
+      Internode root = orderRootKeyCompat(itn, uprightOrder);
+      if (root == null) continue;
+      Double mn = (Double) up2min.get(root);
+      Double mx = (Double) up2max.get(root);
+      Double xsum = (Double) up2xsum.get(root);
+      Integer n = (Integer) up2count.get(root);
+      double a = zBase(itn), b = zTip(itn);
+      double lo = (a < b) ? a : b;
+      double hi = (a < b) ? b : a;
+      if (mn == null || lo < mn.doubleValue()) up2min.put(root, Double.valueOf(lo));
+      if (mx == null || hi > mx.doubleValue()) up2max.put(root, Double.valueOf(hi));
+      up2xsum.put(root, Double.valueOf(((xsum != null) ? xsum.doubleValue() : 0.0) + localXRow(itn)));
+      up2count.put(root, Integer.valueOf(((n != null) ? n.intValue() : 0) + 1));
+      up2root.put(root, root);
+    }
+
+    java.util.List roots = new java.util.ArrayList();
+    java.util.Iterator it = up2root.keySet().iterator();
+    while (it.hasNext()) {
+      Internode root = (Internode) it.next();
+      UprightOrderSnap snap = new UprightOrderSnap();
+      snap.root = root;
+      snap.zMin = ((Double) up2min.get(root)).doubleValue();
+      snap.zMax = ((Double) up2max.get(root)).doubleValue();
+      if ((snap.zMax - snap.zMin) <= UPRIGHT_REGION_MIN_SPAN_M) continue;
+      Integer n = (Integer) up2count.get(root);
+      Double xsum = (Double) up2xsum.get(root);
+      snap.n = (n != null) ? n.intValue() : 0;
+      snap.xRow = (snap.n > 0 && xsum != null) ? (xsum.doubleValue() / snap.n) : localXRow(root);
+      roots.add(snap);
+    }
+    try {
+      java.util.Collections.sort(roots, new java.util.Comparator() {
+        public int compare(Object a, Object b) {
+          UprightOrderSnap x = (UprightOrderSnap) a;
+          UprightOrderSnap y = (UprightOrderSnap) b;
+          if (x.xRow < y.xRow) return -1;
+          if (x.xRow > y.xRow) return 1;
+          if (x.zMin < y.zMin) return -1;
+          if (x.zMin > y.zMin) return 1;
+          int hx = System.identityHashCode(x.root);
+          int hy = System.identityHashCode(y.root);
+          if (hx < hy) return -1;
+          if (hx > hy) return 1;
+          return 0;
+        }
+      });
+    } catch (Throwable t) {}
+
+    int ui;
+    for (ui = 0; ui < roots.size(); ui++) {
+      UprightOrderSnap snap = (UprightOrderSnap) roots.get(ui);
+      Internode root = snap.root;
+      double uMin = snap.zMin;
+      double uMax = snap.zMax;
+      double h = uMax - uMin;
+      double dz = h / (double) regionCount;
+      java.util.List rootSnaps = new java.util.ArrayList();
+      int i;
+      for (i = 0; i < regionCount; i++) {
+        UprightRegionFruitSnap s = new UprightRegionFruitSnap();
+        s.root = root;
+        s.uprightIdx = ui;
+        s.idx = i;
+        s.flatIdx = ui * regionCount + i;
+        s.xRow = snap.xRow;
+        s.uprightZMin = uMin;
+        s.uprightZMax = uMax;
+        s.zMin = (h > eps) ? (uMin + dz * i) : uMin;
+        s.zMax = (h > eps) ? ((i == regionCount - 1) ? uMax : (uMin + dz * (i + 1))) : uMax;
+        s.lenM = Math.max(0.0, s.zMax - s.zMin);
+        s.now = 0;
+        s.target = -1;
+        s.organs = new java.util.ArrayList();
+        snaps.add(s);
+        rootSnaps.add(s);
+      }
+      root2snaps.put(root, rootSnaps);
+    }
+
+    if (thinFlowers) {
+      for (Flower fl : (* f:Flower, (f.plantNumber == 1) *)) {
+        Internode site = first((* fl (<--)+ i:Internode *));
+        if (site == null) continue;
+        Internode root = orderRootKeyCompat(site, uprightOrder);
+        if (root == null) continue;
+        java.util.List rootSnaps = (java.util.List) root2snaps.get(root);
+        if (rootSnaps == null || rootSnaps.isEmpty()) continue;
+        UprightRegionFruitSnap ref = (UprightRegionFruitSnap) rootSnaps.get(0);
+        int regionIdx = uprightRegionIndex(midZ(site), ref.uprightZMin, ref.uprightZMax, regionCount);
+        UprightRegionFruitSnap s = (UprightRegionFruitSnap) rootSnaps.get(regionIdx);
+        s.now++;
+        s.organs.add(fl);
+      }
+    } else {
+      for (FruitService fr : (* f:FruitService, (f.plantNumber == 1) *)) {
+        Internode site = first((* fr (<--)+ i:Internode *));
+        if (site == null) continue;
+        Internode root = orderRootKeyCompat(site, uprightOrder);
+        if (root == null) continue;
+        java.util.List rootSnaps = (java.util.List) root2snaps.get(root);
+        if (rootSnaps == null || rootSnaps.isEmpty()) continue;
+        UprightRegionFruitSnap ref = (UprightRegionFruitSnap) rootSnaps.get(0);
+        int regionIdx = uprightRegionIndex(midZ(site), ref.uprightZMin, ref.uprightZMax, regionCount);
+        UprightRegionFruitSnap s = (UprightRegionFruitSnap) rootSnaps.get(regionIdx);
+        s.now++;
+        s.organs.add(fr);
+      }
+    }
+
+    double sumLen = 0.0;
+    int i;
+    for (i = 0; i < snaps.size(); i++) sumLen += ((UprightRegionFruitSnap) snaps.get(i)).lenM;
+    if (explicitTargets != null && explicitTargets.length > 0) {
+      for (i = 0; i < snaps.size(); i++) {
+        UprightRegionFruitSnap s = (UprightRegionFruitSnap) snaps.get(i);
+        if (s.flatIdx >= explicitTargets.length) continue;
+        double raw = explicitTargets[s.flatIdx];
+        if (Double.isNaN(raw) || Double.isInfinite(raw) || raw < 0.0) continue;
+        s.target = (int) Math.round(raw);
+      }
+    } else if (totalTarget > 0 && sumLen > 0.0) {
+      for (i = 0; i < snaps.size(); i++) {
+        UprightRegionFruitSnap s = (UprightRegionFruitSnap) snaps.get(i);
+        s.target = (int) Math.round(totalTarget * (s.lenM / sumLen));
+      }
+    }
+    return snaps;
+  }
+
+  static FruitPruneStats thinToUprightRegions(Cfg cfg, boolean thinFlowers, int target, boolean dryRun, String label) {
+    FruitPruneStats stats = new FruitPruneStats();
+    boolean explicitMode = (cfg != null && cfg.uprightRegionTargets != null && cfg.uprightRegionTargets.length > 0);
+    if (!explicitMode && target <= 0) return stats;
+    java.util.List snaps = computeUprightRegionFruitSnaps(thinFlowers, target,
+        (cfg != null) ? cfg.uprightRegionTargets : null);
+    if (snaps == null || snaps.isEmpty()) {
+      println(label + " WARN uprightRegions: no uprights found; skipping.");
+      return stats;
+    }
+    if (explicitMode) {
+      int expectedTargets = snaps.size();
+      int actualTargets = cfg.uprightRegionTargets.length;
+      println(label + " Upright-region explicit target mode:"
+            + " uprightCount=" + (expectedTargets / 3)
+            + " regionCount=3"
+            + " expectedTargets=" + expectedTargets
+            + " actualTargets=" + actualTargets);
+      if (actualTargets < expectedTargets) {
+        println(label + " WARN explicit upright-region targets shorter than expected; missing bins left unchanged.");
+      } else if (actualTargets > expectedTargets) {
+        println(label + " WARN explicit upright-region targets longer than expected; extra values ignored.");
+      }
+    }
+    int i;
+    for (i = 0; i < snaps.size(); i++) {
+      UprightRegionFruitSnap s = (UprightRegionFruitSnap) snaps.get(i);
+      if (s.target < 0) continue;
+      int toRemove = s.now - s.target;
+      if (toRemove <= 0) continue;
+      java.util.List list = new java.util.ArrayList();
+      list.addAll(s.organs);
+      try {
+        java.util.Collections.sort(list, new java.util.Comparator() {
+          public int compare(Object o1, Object o2) {
+            double a = getOrganSize(o1), b = getOrganSize(o2);
+            if (a < b) return -1; if (a > b) return 1; return 0;
+          }
+        });
+      } catch (Throwable t) {}
+      int k;
+      for (k = 0; k < list.size() && toRemove > 0; k++) {
+        Object obj = list.get(k);
+        if (thinFlowers && obj instanceof Flower) {
+          Flower fl = (Flower) obj;
+          stats.flowersRemoved++;
+          stats.biomassRemoved += getBiomass(fl);
+          if (!dryRun) removeFlower(fl);
+          toRemove--;
+        } else if (!thinFlowers && obj instanceof FruitService) {
+          FruitService fr = (FruitService) obj;
+          stats.fruitsRemoved++;
+          stats.biomassRemoved += getBiomass(fr);
+          if (!dryRun) removeFruit(fr);
+          toRemove--;
+        }
+      }
+    }
+    println(label + " thin-uprightRegions: removedFlowers=" + stats.flowersRemoved
+          + " removedFruits=" + stats.fruitsRemoved);
+    java.util.List after = computeUprightRegionFruitSnaps(thinFlowers, target,
+        (cfg != null) ? cfg.uprightRegionTargets : null);
+    for (i = 0; i < after.size(); i++) {
+      UprightRegionFruitSnap s = (UprightRegionFruitSnap) after.get(i);
+      println("  " + label + " idx=" + s.flatIdx
+            + " upright=" + s.uprightIdx
+            + " region=" + uprightRegionName(s.idx)
+            + " xRow=" + round3(s.xRow)
+            + " target=" + s.target
+            + " current=" + s.now);
+    }
+    return stats;
+  }
+
+  static int addFruitsToUprightRegions(Cfg cfg, int target, boolean dryRun, String label) {
+    if (!allowFruitAdding) return 0;
+    boolean explicitMode = (cfg != null && cfg.uprightRegionTargets != null && cfg.uprightRegionTargets.length > 0);
+    if (!explicitMode && target <= 0) return 0;
+    java.util.List snaps = computeUprightRegionFruitSnaps(false, target,
+        (cfg != null) ? cfg.uprightRegionTargets : null);
+    if (snaps == null || snaps.isEmpty()) {
+      println(label + " WARN uprightRegions: no uprights found for add; skipping.");
+      return 0;
+    }
+    int totalDef = 0;
+    int totalTarget = 0;
+    int i;
+    for (i = 0; i < snaps.size(); i++) {
+      UprightRegionFruitSnap s = (UprightRegionFruitSnap) snaps.get(i);
+      if (s.target >= 0) totalTarget += s.target;
+      int d = s.target - s.now;
+      if (d > 0) totalDef += d;
+    }
+    if (totalDef <= 0) return 0;
+    int nFruit = (int) count((* f:FruitService, (f.plantNumber == 1) *));
+    if ("onlyIfNone".equalsIgnoreCase(fruitAddMode) && nFruit > 0) {
+      println(label + " add-uprightRegions: deficit=" + totalDef + " added=0 (mode=onlyIfNone)");
+      return 0;
+    }
+    int totalGuard = explicitMode ? totalTarget
+        : ((cfg != null && cfg.targetPerTree > 0) ? cfg.targetPerTree : totalTarget);
+    int cap = Math.min(totalDef, maxFruitAddsPerTree);
+    if (totalGuard > 0) cap = Math.min(cap, Math.max(0, totalGuard - nFruit));
+    if (cap <= 0) return 0;
+    int added = 0;
+    for (i = 0; i < snaps.size() && added < cap; i++) {
+      UprightRegionFruitSnap s = (UprightRegionFruitSnap) snaps.get(i);
+      int deficit = s.target - s.now;
+      if (s.target < 0 || deficit <= 0) continue;
+      int need = Math.min(deficit, cap - added);
+      if (need <= 0) continue;
+      setAddUprightRegionConstraint(s);
+      int addedHere = "grapevine".equals(species)
+          ? addFruits_Grapevine(need, dryRun, label + "/upright" + s.uprightIdx + "-" + uprightRegionName(s.idx))
+          : addFruits_Apple(need, dryRun, label + "/upright" + s.uprightIdx + "-" + uprightRegionName(s.idx));
+      clearAddUprightRegionConstraint();
+      added += addedHere;
+      println("  " + label + " idx=" + s.flatIdx
+            + " upright=" + s.uprightIdx
+            + " region=" + uprightRegionName(s.idx)
+            + " xRow=" + round3(s.xRow)
+            + " target=" + s.target
+            + " current=" + s.now
+            + " added=" + addedHere);
+    }
+    println(label + " add-uprightRegions: deficit=" + totalDef + " cap=" + cap + " added=" + added);
+    return added;
+  }
+
+  static FruitPruneStats thinToWholeTreeTarget(Cfg cfg,
+                                               boolean thinFlowers,
+                                               int target,
+                                               boolean dryRun,
+                                               String label) {
+    FruitPruneStats stats = new FruitPruneStats();
+    if (target <= 0) return stats;
+
+    // Whole-tree mode can still thin spatially (de-crowd dense zones first) by using
+    // a temporary auto-fit grid and balanced per-cell targets that sum to target.
+    Cfg gridCfg = buildWholeTreeBalancingGridCfg(cfg, label);
+    if (gridCfg != null) {
+      int[] currentCounts = countOrgansByGrid(gridCfg, thinFlowers);
+      int[] balancedTargets = buildBalancedCellTargetsFromCurrentCounts(currentCounts, target);
+      if (currentCounts != null && balancedTargets != null) {
+        gridCfg.gridTargets = toDoubleArray(balancedTargets);
+        gridCfg.targetPerTree = target;
+        println(label + " whole-tree target: using spatial balancing grid "
+              + gridCfg.gridNx + "x" + gridCfg.gridNz
+              + " (nNow=" + sumIntArray(currentCounts)
+              + " target=" + target + ")");
+        return thinToGridTargets(gridCfg, thinFlowers, dryRun, label + "/spatial");
+      }
+    }
+
+    java.util.List all = new java.util.ArrayList();
+    if (thinFlowers) {
+      for (Flower fl : (* f:Flower, (f.plantNumber == 1) *)) {
+        all.add(fl);
+      }
+    } else {
+      for (FruitService fr : (* f:FruitService, (f.plantNumber == 1) *)) {
+        all.add(fr);
+      }
+    }
+
+    int nNow = all.size();
+    if (nNow <= target) {
+      println(label + " nNow=" + nNow + " ≤ target=" + target
+            + " → no additional thinning.");
+      return stats;
+    }
+
+    int toRemove = nNow - target;
+
+    // Sort ascending by size → remove the smallest first
+    try {
+      java.util.Collections.sort(all, new java.util.Comparator() {
+        public int compare(Object o1, Object o2) {
+          double s1 = getOrganSize(o1);
+          double s2 = getOrganSize(o2);
+          if (s1 < s2) return -1;
+          if (s1 > s2) return 1;
+          return 0;
+        }
+      });
+    } catch (Throwable t) {
+      // on failure → removal order stays arbitrary
+    }
+
+    int removed = 0;
+    int i;
+    for (i = 0; i < all.size() && removed < toRemove; i++) {
+      Object obj = all.get(i);
+      if (obj == null) continue;
+
+      if (thinFlowers && (obj instanceof Flower)) {
+        Flower fl = (Flower) obj;
+        stats.flowersRemoved++;
+        stats.biomassRemoved += getBiomass(fl);
+        removed++;
+        if (!dryRun) removeFlower(fl);
+      } else if (!thinFlowers && (obj instanceof FruitService)) {
+        FruitService fr = (FruitService) obj;
+        stats.fruitsRemoved++;
+        stats.biomassRemoved += getBiomass(fr);
+        removed++;
+        if (!dryRun) removeFruit(fr);
+      }
+    }
+
+    println(label + " whole-tree target:"
+          + " nNow=" + nNow
+          + " target=" + target
+          + " removed=" + removed);
+
+    return stats;
+  }
+
+  // ========================================================================
+  // GRID-BASED TARGET THINNING
+  // (optional; ignores clusters, works per organ & per cell)
+  // ========================================================================
+
+  static FruitPruneStats thinToGridTargets(Cfg cfg,
+                                           boolean thinFlowers,
+                                           boolean dryRun,
+                                           String label) {
+    FruitPruneStats stats = new FruitPruneStats();
+
+    int cells = cfg.gridNx * cfg.gridNz;
+    if (cells <= 0 || cfg.gridTargets == null
+        || cfg.gridTargets.length != cells) {
+      println(label + " invalid grid configuration → skip.");
+      return stats;
+    }
+
+    int[] counts = new int[cells];
+    java.util.List[] organsByCell = new java.util.ArrayList[cells];
+
+    if (thinFlowers) {
+      for (Flower fl : (* f:Flower, (f.plantNumber == 1) *)) {
+        try { fl.update3D(); } catch (Throwable t) {}
+        double xr = localXRow(fl);
+        double zr = zBase(fl);
+
+        int c = gridIndex(cfg, xr, zr);
+        if (c < 0) continue;
+
+        if (organsByCell[c] == null) organsByCell[c] = new java.util.ArrayList();
+        organsByCell[c].add(fl);
+        counts[c]++;
+      }
+    } else {
+      for (FruitService fr : (* f:FruitService, (f.plantNumber == 1) *)) {
+        try { fr.update3D(); } catch (Throwable t) {}
+        double xr = localXRow(fr);
+        double zr = zBase(fr);
+
+        int c = gridIndex(cfg, xr, zr);
+        if (c < 0) continue;
+
+        if (organsByCell[c] == null) organsByCell[c] = new java.util.ArrayList();
+        organsByCell[c].add(fr);
+        counts[c]++;
+      }
+    }
+
+    println(label + " GRID REPORT:");
+    int c;
+    int totalCountBefore = 0;
+    int totalGridTarget = 0;
+    for (c = 0; c < cells; c++) {
+      double targD = cfg.gridTargets[c];
+      int cur = counts[c];
+      totalCountBefore += cur;
+      totalGridTarget += (int) Math.round(targD);
+      println("  cell " + c + " count=" + cur + " target=" + targD);
+    }
+
+    int wholeTreeFloor = 0;
+    boolean useWholeTreeFloorGuard = (cfg.targetPerTree > 0);
+    int globalRemovalBudget = Integer.MAX_VALUE;
+    if (useWholeTreeFloorGuard) {
+      wholeTreeFloor = cfg.targetPerTree;
+      globalRemovalBudget = totalCountBefore - wholeTreeFloor;
+      if (globalRemovalBudget < 0) globalRemovalBudget = 0;
+      String floorLabel = (cfg.gridMode && totalGridTarget > 0)
+          ? "grid-sum floor guard"
+          : "whole-tree floor guard";
+      println(label + " " + floorLabel + ":"
+            + " nNow=" + totalCountBefore
+            + " floor=" + wholeTreeFloor
+            + " maxRemovals=" + globalRemovalBudget);
+      if (totalGridTarget > 0 && totalGridTarget != wholeTreeFloor) {
+        println(label + " NOTE grid target sum (" + totalGridTarget
+              + ") != whole-tree target (" + wholeTreeFloor
+              + "); grid thinning will not remove below whole-tree target.");
+      }
+    }
+
+    if (dryRun) return stats;
+
+    boolean floorStopPrinted = false;
+    for (c = 0; c < cells; c++) {
+      double targetD = cfg.gridTargets[c];
+      int target = (int) Math.round(targetD);
+      int cur = counts[c];
+
+      if (cur <= target) continue;
+
+      int toRemove = cur - target;
+      if (useWholeTreeFloorGuard) {
+        if (globalRemovalBudget <= 0) {
+          if (!floorStopPrinted) {
+            println(label + " stop grid thinning at whole-tree floor (floor=" + wholeTreeFloor + ")");
+            floorStopPrinted = true;
+          }
+          break;
+        }
+        if (toRemove > globalRemovalBudget) toRemove = globalRemovalBudget;
+        if (toRemove <= 0) continue;
+      }
+      java.util.List list = organsByCell[c];
+      if (list == null || list.isEmpty()) continue;
+
+      // sort ascending by size → remove smallest to match target
+      try {
+        java.util.Collections.sort(list, new java.util.Comparator() {
+          public int compare(Object o1, Object o2) {
+            double s1 = getOrganSize(o1);
+            double s2 = getOrganSize(o2);
+            if (s1 < s2) return -1;
+            if (s1 > s2) return 1;
+            return 0;
+          }
+        });
+      } catch (Throwable t) {}
+
+      int removedHere = 0;
+      int i;
+      for (i = 0; i < list.size() && removedHere < toRemove; i++) {
+        Object obj = list.get(i);
+        if (obj == null) continue;
+
+        if (thinFlowers && (obj instanceof Flower)) {
+          Flower fl = (Flower) obj;
+          stats.flowersRemoved++;
+          stats.biomassRemoved += getBiomass(fl);
+          removedHere++;
+          if (!dryRun) removeFlower(fl);
+        } else if (!thinFlowers && (obj instanceof FruitService)) {
+          FruitService fr = (FruitService) obj;
+          stats.fruitsRemoved++;
+          stats.biomassRemoved += getBiomass(fr);
+          removedHere++;
+          if (!dryRun) removeFruit(fr);
+        }
+      }
+
+      if (removedHere > 0) {
+        if (useWholeTreeFloorGuard) globalRemovalBudget -= removedHere;
+        println(label + " cell " + c + " removed=" + removedHere
+              + " (cur=" + cur + " target=" + target + ")");
+      }
+    }
+
+    return stats;
+  }
+
+  static int addFruitsToWholeTreeTarget(Cfg cfg, int target, boolean dryRun, String label) {
+    if (!allowFruitAdding) return 0;
+    if (target <= 0) return 0;
+
+    int nFruit = (int) count((* f:FruitService, (f.plantNumber == 1) *));
+    int deficit = target - nFruit;
+    if (deficit <= 0) {
+      println(label + " add-fruit summary: nFruit=" + nFruit
+            + " target=" + target + " deficit=0 added=0");
+      return 0;
+    }
+
+    if ("onlyIfNone".equalsIgnoreCase(fruitAddMode) && nFruit > 0) {
+      println(label + " add-fruit summary: nFruit=" + nFruit
+            + " target=" + target + " deficit=" + deficit
+            + " added=0 (mode=onlyIfNone)");
+      return 0;
+    }
+
+    int cap = Math.min(deficit, maxFruitAddsPerTree);
+    Cfg spatialAddGridCfg = null;
+    int[] spatialAddDeficits = null;
+    int spatialAddDeficitTotal = 0;
+    if (cap > 0) {
+      spatialAddGridCfg = buildWholeTreeBalancingGridCfg(cfg, label);
+      if (spatialAddGridCfg != null) {
+        int[] currentCounts = countOrgansByGrid(spatialAddGridCfg, false);
+        int[] balancedTargets = buildBalancedCellTargetsFromCurrentCounts(currentCounts, target);
+        spatialAddDeficits = deficitsFromCurrentAndTargets(currentCounts, balancedTargets);
+        spatialAddDeficitTotal = sumIntArray(spatialAddDeficits);
+        if (spatialAddDeficitTotal > 0) {
+          println(label + " whole-tree spatial add balance:"
+                + " grid=" + spatialAddGridCfg.gridNx + "x" + spatialAddGridCfg.gridNz
+                + " spatialDeficit=" + spatialAddDeficitTotal);
+        } else {
+          spatialAddGridCfg = null;
+          spatialAddDeficits = null;
+        }
+      }
+    }
+    int added = 0;
+    addGridCfg = spatialAddGridCfg;
+    addGridDeficits = spatialAddDeficits;
+    if ("grapevine".equals(species)) added = addFruits_Grapevine(cap, dryRun, label);
+    else added = addFruits_Apple(cap, dryRun, label);
+    addGridCfg = null;
+    addGridDeficits = null;
+
+    addFruitsAdded += added;
+    println(label + " add-fruit summary: nFruit=" + nFruit
+          + " target=" + target + " deficit=" + deficit
+          + (spatialAddDeficitTotal > 0 ? (" spatialDeficit=" + spatialAddDeficitTotal) : "")
+          + " cap=" + cap + " added=" + added);
+    if (cap > 0 && added == 0) {
+      println(label + " add-fruit: no candidate internodes found.");
+      if (fruitAddDebug) printAddCandidateDiagnostics(label);
+    }
+    return added;
+  }
+
+  static int addFruitsToGridTargets(Cfg cfg, boolean dryRun, String label) {
+    if (!allowFruitAdding) return 0;
+    if (cfg == null) return 0;
+    int cells = cfg.gridNx * cfg.gridNz;
+    if (cells <= 0 || cfg.gridTargets == null || cfg.gridTargets.length != cells) return 0;
+
+    int[] deficits = new int[cells];
+    int c;
+    int totalDeficit = 0;
+    int[] counts = new int[cells];
+    for (FruitService fr : (* f:FruitService, (f.plantNumber == 1) *)) {
+      int idx = gridIndex(cfg, localXRow(fr), zBase(fr));
+      if (idx >= 0 && idx < cells) counts[idx]++;
+    }
+    for (c = 0; c < cells; c++) {
+      int target = (int) Math.round(cfg.gridTargets[c]);
+      int d = target - counts[c];
+      if (d < 0) d = 0;
+      deficits[c] = d;
+      totalDeficit += d;
+      if (fruitAddDebug) {
+        println(label + " cell " + c + " count=" + counts[c]
+              + " target=" + target + " deficit=" + d);
+      }
+    }
+
+    int nFruit = (int) count((* f:FruitService, (f.plantNumber == 1) *));
+    int wholeTreeDeficit = Integer.MAX_VALUE;
+    if (cfg.targetPerTree > 0) {
+      wholeTreeDeficit = cfg.targetPerTree - nFruit;
+      if (wholeTreeDeficit <= 0) {
+        println(label + " add-fruit summary: nFruit=" + nFruit
+              + " gridDeficit=" + totalDeficit
+              + " wholeTreeTarget=" + cfg.targetPerTree
+              + " wholeTreeDeficit=0"
+              + " added=0 (whole-tree target already reached)");
+        return 0;
+      }
+    }
+    if ("onlyIfNone".equalsIgnoreCase(fruitAddMode) && nFruit > 0) {
+      println(label + " add-fruit summary: nFruit=" + nFruit
+            + " gridDeficit=" + totalDeficit
+            + " added=0 (mode=onlyIfNone)");
+      return 0;
+    }
+
+    int cap = Math.min(totalDeficit, maxFruitAddsPerTree);
+    if (wholeTreeDeficit != Integer.MAX_VALUE && cap > wholeTreeDeficit) {
+      cap = wholeTreeDeficit;
+    }
+    int added = 0;
+    addGridCfg = cfg;
+    addGridDeficits = deficits;
+    if ("grapevine".equals(species)) added = addFruits_Grapevine(cap, dryRun, label);
+    else added = addFruits_Apple(cap, dryRun, label);
+    addGridCfg = null;
+    addGridDeficits = null;
+
+    addFruitsAdded += added;
+    println(label + " add-fruit summary: nFruit=" + nFruit
+          + " gridDeficit=" + totalDeficit
+          + (cfg.targetPerTree > 0 ? (" wholeTreeTarget=" + cfg.targetPerTree
+                                     + " wholeTreeDeficit="
+                                     + Math.max(0, cfg.targetPerTree - nFruit)) : "")
+          + " cap=" + cap
+          + " added=" + added);
+    if (cap > 0 && added == 0) {
+      println(label + " add-fruit: no candidate internodes found.");
+      if (fruitAddDebug) printAddCandidateDiagnostics(label);
+    }
+    return added;
+  }
+
+  static int addFruits_OnInternodes(int capToAdd, boolean dryRun, String label) {
+    if (capToAdd <= 0) return 0;
+    if (dryRun) return estimateAddableFruits(capToAdd);
+
+    final int[] added = new int[] {0};
+
+    [
+      i:Internode,
+      (isInternodeCandidateForAdd(i)
+       && added[0] < capToAdd
+       && countFruitChildren(i) < currentPerSiteLimit()
+       && hasGridDeficitForInternode(i)) ==> i
+      {
+        FruitService b = "grapevine".equals(species)
+            ? main.FRUIT_CREATOR.createFruit()
+            : main.FRUIT_CREATOR.createFruit(FruitService.originalParametersFactory, FruitService.DELTA);
+        FruitService tplNear = null;
+        if (!"grapevine".equals(species) && fruitInitFromNearbyTemplate) {
+          tplNear = getFirstFruitChild(i);
+          if (!isUsableFruitTemplateForAdd(tplNear)) tplNear = null;
+          if (tplNear == null) {
+            tplNear = findNearbyFruitTemplateForApple(i);
+          }
+        }
+      }
+	      [
+	        b {
+	          if (!dryRun) {
+	            PlantBase pb = first((* p:PlantBase, (p.plantNumber == i.plantNumber) *));
+	            initAddedFruitFromInternode(b, pb, i, tplNear);
+	            debugValidateAddedFruitInit(b, i, tplNear, label);
+	          }
+	          added[0]++;
+	          consumeGridDeficitForInternode(i);
+          if (fruitAddDebug) {
+            if ("grapevine".equals(species)) {
+              println(label + " +grape bunch node=" + i.nodeNumber + " rank=" + i.rank);
+            } else {
+              println(label + " +apple fruit node=" + i.nodeNumber + " rank=" + i.rank);
+            }
+          }
+        }
+      ]
+      ;
+      {
+        if (fruitAddDebug && added[0] >= capToAdd) {
+          // cap reached for this call
+        }
+      }
+    ];
+
+    return added[0];
+  }
+
+  static int addFruits_Grapevine(int capToAdd, boolean dryRun, String label) {
+    if (capToAdd <= 0) return 0;
+    if (main.FRUIT_CREATOR.usesVirtualFruitService()) return 0;
+    return addFruits_OnInternodes(capToAdd, dryRun, label);
+  }
+
+  static int estimateAddableFruits(int capToAdd) {
+    if (capToAdd <= 0) return 0;
+    int added = 0;
+    int[] localDeficits = null;
+    if (addGridDeficits != null) {
+      localDeficits = new int[addGridDeficits.length];
+      System.arraycopy(addGridDeficits, 0, localDeficits, 0, addGridDeficits.length);
+    }
+
+    for (Internode i : (* it:Internode, (isInternodeCandidateForAdd(it)) *)) {
+      if (added >= capToAdd) break;
+      if (countFruitChildren(i) >= currentPerSiteLimit()) continue;
+
+      if (!hasGridDeficitForInternode(i)) continue;
+
+      if (addGridCfg != null) {
+        int c = gridCellForInternode(i);
+        if (c < 0) continue;
+        if (localDeficits == null || c >= localDeficits.length) continue;
+        if (localDeficits[c] <= 0) continue;
+        localDeficits[c] = localDeficits[c] - 1;
+      }
+
+      added++;
+    }
+    return added;
+  }
+
+  static int addFruits_Apple(int capToAdd, boolean dryRun, String label) {
+    if (capToAdd <= 0) return 0;
+    if (!main.FRUIT_CREATOR.usesVirtualFruitService()) return 0;
+
+    int cordonGe4Count = 0;
+    try {
+      cordonGe4Count = (int) count((* c:Cordon, (c.order >= 4) *));
+    } catch (Throwable t) {
+      cordonGe4Count = 0;
+    }
+    addAppleAllowLegacyWhenNoCordon = (cordonGe4Count <= 0);
+
+    int remaining = capToAdd;
+    int added = 0;
+    int nearbyAdded = 0;
+
+    addApplePerSiteLimit = maxFruitPerCordonPosition;
+    addAppleRequireNearbyShoot = true;
+    int a1 = addFruits_OnInternodes(remaining, dryRun, label + "/pass1-preferShoot");
+    nearbyAdded += a1;
+    added += a1;
+    remaining = capToAdd - added;
+
+    if (remaining > 0 && (!addAppleFallbackOnlyWhenNoNearby || nearbyAdded <= 0)) {
+      addApplePerSiteLimit = maxFruitPerCordonPosition;
+      addAppleRequireNearbyShoot = false;
+      int a2 = addFruits_OnInternodes(remaining, dryRun, label + "/pass1-empty");
+      added += a2;
+      remaining = capToAdd - added;
+    }
+
+    if (allowAddOnOccupiedCordon && remaining > 0) {
+      int siteCap;
+      for (siteCap = maxFruitPerCordonPosition + 1;
+           siteCap <= maxFruitPerCordonPositionFallback && remaining > 0;
+           siteCap++) {
+        addApplePerSiteLimit = siteCap;
+        addAppleRequireNearbyShoot = true;
+        int a3 = addFruits_OnInternodes(remaining, dryRun,
+            label + "/pass2-preferShoot/cap" + siteCap);
+        nearbyAdded += a3;
+        added += a3;
+        remaining = capToAdd - added;
+        if (remaining <= 0) break;
+
+        if (!addAppleFallbackOnlyWhenNoNearby || nearbyAdded <= 0) {
+          addAppleRequireNearbyShoot = false;
+          int a4 = addFruits_OnInternodes(remaining, dryRun,
+              label + "/pass2-occupied/cap" + siteCap);
+          added += a4;
+          remaining = capToAdd - added;
+        }
+      }
+    }
+
+    addApplePerSiteLimit = maxFruitPerCordonPosition;
+    addAppleRequireNearbyShoot = true;
+
+    return added;
+  }
+
+  static boolean isAppleCordonInternode(Internode i) {
+    if (i == null) return false;
+    if (i instanceof Cordon) return true;
+    if (!addAppleAllowLegacyWhenNoCordon) return false;
+    return (i.order == 4) && (i.rank >= 1 && i.rank < 4);
+  }
+
+  static boolean isInternodeCandidateForAdd(Internode i) {
+    if ("grapevine".equals(species)) {
+      return isGrapevineEligibleInternode(i);
+    }
+    if (addAppleRequireNearbyShoot && addAppleNearbyUseCordonOnly && !(i instanceof Cordon)) {
+      return false;
+    }
+    // Keep apple fruit adding on old wood only.
+    if (addAppleFallbackUseLegacyInternodeOnly && !addAppleRequireNearbyShoot) {
+      if (i == null) return false;
+      if (!isAppleCordonInternode(i)) return false;
+    } else {
+      if (!isAppleCordonInternode(i)) return false;
+    }
+    if (addAppleRequireNearbyShoot && !hasNearbyShootMeristem(i)) return false;
+    return true;
+  }
+
+  static int currentPerSiteLimit() {
+    if ("grapevine".equals(species)) return maxFruitPerInternode;
+    return addApplePerSiteLimit;
+  }
+
+  static int gridCellForInternode(Internode i) {
+    if (addGridCfg == null || i == null) return -1;
+    return gridIndex(addGridCfg, localXRow(i), zBase(i));
+  }
+
+  static boolean hasGridDeficitForInternode(Internode i) {
+    if (!matchesAddUprightRegionConstraint(i)) return false;
+    if (addGridCfg == null) return true;
+    int c = gridCellForInternode(i);
+    if (c < 0) return false;
+    if (addGridDeficits == null || c >= addGridDeficits.length) return false;
+    return addGridDeficits[c] > 0;
+  }
+
+  static void consumeGridDeficitForInternode(Internode i) {
+    if (addGridCfg == null || addGridDeficits == null) return;
+    int c = gridCellForInternode(i);
+    if (c < 0 || c >= addGridDeficits.length) return;
+    if (addGridDeficits[c] > 0) addGridDeficits[c] = addGridDeficits[c] - 1;
+  }
+
+  static void printAddCandidateDiagnostics(String label) {
+    int candidates = 0;
+    int blocked = 0;
+    for (Internode i : (* it:Internode, (isInternodeCandidateForAdd(it)) *)) {
+      candidates++;
+      if (countFruitChildren(i) >= currentPerSiteLimit()) blocked++;
+    }
+    println(label + " add-fruit diagnostics:"
+          + " candidates=" + candidates
+          + " blockedByPerSiteLimit=" + blocked);
+  }
+
+  static boolean isGrapevineEligibleInternode(Internode i) {
+    if (i == null) return false;
+    return (i.order == 4) && (i.rank >= 1 && i.rank <= 5);
+  }
+
+  static int countFruitChildren(Internode i) {
+    if (i == null) return 0;
+    try { return i.getChildFruitCount(); } catch (Throwable t) {}
+    return 0;
+  }
+
+  static FruitService getFirstFruitChild(Internode i) {
+    if (i == null) return null;
+    try {
+      int n = i.getChildFruitCount();
+      if (n > 0) {
+        long id = i.getChildFruitIdAt(0);
+        return i.getFruit(id);
+      }
+    } catch (Throwable t) {}
+    return null;
+  }
+
+  static boolean hasNearbyAxisTag(int cordonA, int nodeA, int cordonB, int nodeB) {
+    if (cordonA <= 0 || cordonB <= 0) return false;
+    if (nodeA <= 0 || nodeB <= 0) return false;
+    if (cordonA != cordonB) return false;
+    return (Math.abs(nodeA - nodeB) <= 1);
+  }
+
+  static int nearbyAnchorOrder(Internode i) {
+    int target = 4;
+    try {
+      target = Math.max(1, MgmtPlacementOrder);
+    } catch (RuntimeException e) {
+      target = 4;
+    }
+    if (i != null && i.order > 0) {
+      target = Math.min(target, i.order);
+    }
+    return Math.max(1, target);
+  }
+
+  static Internode orderRootKeyCompat(Internode itn, int targetOrder) {
+    if (itn == null) return null;
+    int ord = (targetOrder > 0) ? targetOrder : 1;
+
+    Internode anchor = itn;
+    if (anchor.order != ord) {
+      Internode anc = first((* itn (<--)+ j:Internode, (j.order == ord) *));
+      if (anc != null) anchor = anc;
+    }
+
+    if (anchor == null) return null;
+
+    Internode cur = anchor;
+    int guard = 0;
+    while (guard++ < 2000) {
+      Internode prev = first((* cur (<--)+ j:Internode, (j.order == anchor.order) *));
+      if (prev == null) break;
+      cur = prev;
+    }
+    return cur;
+  }
+
+  static Internode safeOrderRoot(Internode i, int targetOrder) {
+    if (i == null) return null;
+    try {
+      return orderRootKeyCompat(i, targetOrder);
+    } catch (Throwable t) {
+      return null;
+    }
+  }
+
+  static boolean hasNearbyShootMeristem(Internode i) {
+    if (i == null) return false;
+    int targetOrder = nearbyAnchorOrder(i);
+    Internode iRoot = safeOrderRoot(i, targetOrder);
+
+    // Primary check: keep strict axis-tag matching for scenarios with complete metadata.
+    for (ShootMeristem sm : (* s:ShootMeristem, (s.plantNumber == i.plantNumber) *)) {
+      if (hasNearbyAxisTag(sm.cordonNumber, sm.nodeNumber, i.cordonNumber, i.nodeNumber)) return true;
+    }
+
+    // Compatibility fallback: ArchReader-heavy runs can have few/no ShootMeristem
+    // nodes at pruning time; use annual-shoot internodes as "new shoot nearby".
+    for (Internode sh : (* s:Internode, (s.plantNumber == i.plantNumber) *)) {
+      if (sh == null || sh == i) continue;
+      if (sh instanceof Cordon) continue;
+      if (sh.order < 4) continue;
+      if (hasNearbyAxisTag(sh.cordonNumber, sh.nodeNumber, i.cordonNumber, i.nodeNumber)) return true;
+    }
+
+    // Imported-topology fallback: same order-root as BudPlanner upright grouping.
+    if (iRoot != null) {
+      for (Internode sh : (* s:Internode, (s.plantNumber == i.plantNumber) *)) {
+        if (sh == null || sh == i) continue;
+        if (sh instanceof Cordon) continue;
+        if (sh.order < 4) continue;
+        Internode shRoot = safeOrderRoot(sh, targetOrder);
+        if (shRoot != null && shRoot == iRoot) return true;
+      }
+    }
+
+    return false;
+  }
+
+  static FruitService findNearbyFruitTemplateForApple(Internode i) {
+    if (i == null) return null;
+    FruitService best = null;
+    double bestScore = 1e99;
+    for (FruitService fr : (* f:FruitService, (f.plantNumber == i.plantNumber) *)) {
+      if (!isUsableFruitTemplateForAdd(fr)) continue;
+      double penalty = (fr.cordonNumber == i.cordonNumber) ? 0.0 : 1000.0;
+      double dn = Math.abs(fr.nodeNumber - i.nodeNumber);
+      double score = penalty + dn;
+      if (score < bestScore) {
+        bestScore = score;
+        best = fr;
+      }
+    }
+    return best;
+  }
+
+  static boolean isUsableFruitTemplateForAdd(FruitService fr) {
+    if (fr == null) return false;
+    FruitService.FruitInitState st = null;
+    try {
+      st = fr.captureInitState();
+    } catch (Throwable t) {
+      return false;
+    }
+    if (st == null || !st.valid) return false;
+
+    // Skip fruits that were created in the same add/init pass but have not
+    // reached a physiologically usable state yet.
+    if (isFiniteAddCheck(st.freshWeight_mg) && st.freshWeight_mg > 0) return true;
+    if (isFiniteAddCheck(st.dryWeight_mg) && st.dryWeight_mg > 0) return true;
+    if (isFiniteAddCheck(st.waterMass_mg) && st.waterMass_mg > 0) return true;
+    return false;
+  }
+
+  /**
+   * Initializes a newly added fruit after the generic add rule has selected an internode candidate.
+   *
+   * Add-fruit sequence (apple / virtual-fruit path):
+   * 1) FruitPlanner computes deficit (whole-tree or grid) and calls addFruits_Apple(...).
+   * 2) addFruits_Apple(...) sets pass-specific constraints (empty/occupied cordon, nearby shoot)
+   *    and delegates to addFruits_OnInternodes(...).
+   * 3) addFruits_OnInternodes(...) chooses a template fruit (`tpl`) for apple:
+   *    - first fruit already on the same internode (same cordon position), else
+   *    - nearest fruit on the same plant (prefer same cordon).
+   * 4) This helper attaches the new fruit to the selected internode via initiate_pb(...).
+   * 5) If template init is enabled and tpl exists, it copies tpl state into a typed payload
+   *    (FruitInitState) and applies it to the new fruit.
+   *
+   * The payload/application step is explicit (not reflection-based):
+   * - FruitService fields (FW/DW/water/age/geometry + Sugar2 masses) are updated.
+   * - If `b` is VirtualFruit, VirtualFruit.applyInitState(...) also updates the per-fruit
+   *   instanceParametersFactory (`Growth.*`, `Sugar2.*`) and rebuilds the JFruit runtime,
+   *   so the external VirtualFruit starts from the same template-like state.
+   */
+	  static void initAddedFruitFromInternode(FruitService b, PlantBase pb, Internode i, FruitService tpl) {
+	    if (b == null || pb == null || i == null) return;
+
+    if ("grapevine".equals(species)) {
+      b.initiate_pb(pb, i.rank, i.nodeNumber, i.cordonNumber);
+      return;
+    }
+
+    b.initiate_pb(pb, i);
+
+    if (!fruitInitFromNearbyTemplate || tpl == null) return;
+
+	    try {
+	      FruitService.FruitInitState st = tpl.captureInitState();
+	      if (st != null) {
+	        b.applyInitState(st);
+	      }
+	    } catch (Throwable t) {
+	      if (fruitAddDebug) {
+	        println("[FruitPlanner/add] WARN template init failed: " + t);
+		    }
+		  }
+	  }
+
+	  static boolean isFiniteAddCheck(double v) {
+	    return !(Double.isNaN(v) || Double.isInfinite(v));
+	  }
+
+	  static String fmtAddCheck(double v) {
+	    if (!isFiniteAddCheck(v)) return "NaN";
+	    return String.valueOf(round3(v));
+	  }
+
+	  static void debugValidateAddedFruitInit(FruitService b, Internode i, FruitService tpl, String label) {
+	    if (!fruitAddDebug) return;
+	    if (b == null || i == null) return;
+
+	    // Mark for one-time post-VF-output QA in VirtualFruit.update/processOutput.
+	    try {
+	      b.addFruitDebugPendingPostCalcCheck = true;
+	      b.addFruitDebugParentInternodeId = i.nodeID;
+	      b.addFruitDebugTemplateFruitId = (tpl != null) ? tpl.nodeID : -1;
+	      b.addFruitDebugTemplateUsed = (tpl != null) && fruitInitFromNearbyTemplate;
+	    } catch (Throwable t) {
+	      println(label + " [add-check/init] WARN could not set post-calc debug mark: " + t);
+	    }
+
+	    Internode p = getParentInternode(b);
+	    boolean parentOk = (p != null && p.nodeID == i.nodeID);
+	    println(label + " [add-check/init]"
+	          + " fruitId=" + b.nodeID
+	          + " targetInternodeId=" + i.nodeID
+	          + " parentInternodeId=" + (p != null ? String.valueOf(p.nodeID) : "null")
+	          + " parentOk=" + parentOk
+	          + " templateId=" + (tpl != null ? String.valueOf(tpl.nodeID) : "none"));
+
+	    if (tpl == null) return;
+
+	    try {
+	      FruitService.FruitInitState sb = b.captureInitState();
+	      FruitService.FruitInitState st = tpl.captureInitState();
+	      if (sb == null || st == null) return;
+
+	      println(label + " [add-check/init/state]"
+	            + " FW_new=" + fmtAddCheck(sb.freshWeight_mg)
+	            + " FW_tpl=" + fmtAddCheck(st.freshWeight_mg)
+	            + " DW_new=" + fmtAddCheck(sb.dryWeight_mg)
+	            + " DW_tpl=" + fmtAddCheck(st.dryWeight_mg)
+	            + " ageD_new=" + fmtAddCheck(sb.ageD_day)
+	            + " ageD_tpl=" + fmtAddCheck(st.ageD_day)
+	            + " scFruit_new=" + fmtAddCheck(sb.sugarConcentration_fruit_g_per_g)
+	            + " scFruit_tpl=" + fmtAddCheck(st.sugarConcentration_fruit_g_per_g));
+
+	      if (isFiniteAddCheck(st.sugarConcentration_fruit_g_per_g)
+	          && st.sugarConcentration_fruit_g_per_g > 0
+	          && (!isFiniteAddCheck(sb.sugarConcentration_fruit_g_per_g)
+	              || sb.sugarConcentration_fruit_g_per_g <= 0)) {
+	        println(label + " [add-check/init] WARN new fruit sugarConcentration_fruit did not copy from template.");
+	      }
+	    } catch (Throwable t) {
+	      println(label + " [add-check/init] WARN state compare failed: " + t);
+	    }
+  }
+
+  static void copyInitStateFromTemplate(Object dst, Object src) {
+    copyNumericField(dst, src, "dryMass");
+    copyNumericField(dst, src, "DW");
+    copyNumericField(dst, src, "freshMass");
+    copyNumericField(dst, src, "FW");
+    copyNumericField(dst, src, "mass");
+    copyNumericField(dst, src, "biomass");
+    copyNumericField(dst, src, "age");
+    copyNumericField(dst, src, "fruitAge");
+    copyNumericField(dst, src, "diameter");
+    copyNumericField(dst, src, "length");
+  }
+
+  static void copyNumericField(Object dst, Object src, String name) {
+    if (dst == null || src == null || name == null) return;
+    try {
+      java.lang.reflect.Field fs = src.getClass().getField(name);
+      java.lang.reflect.Field fd = dst.getClass().getField(name);
+      Object v = fs.get(src);
+      if (!(v instanceof Number)) return;
+
+      if (fd.getType() == double.class) {
+        fd.setDouble(dst, ((Number) v).doubleValue());
+      } else if (fd.getType() == float.class) {
+        fd.setFloat(dst, ((Number) v).floatValue());
+      } else if (fd.getType() == int.class) {
+        fd.setInt(dst, ((Number) v).intValue());
+      } else {
+        fd.set(dst, v);
+      }
+    } catch (Throwable t) {}
+  }
+
+  
+
+  // ========================================================================
+  // BASIC OPERATIONS & UTILITIES
+  // ========================================================================
+
+  static Internode getParentInternode(Organ obj) {
+    if (obj == null) return null;
+    Internode itn = null;
+    try {
+      itn = (Internode) obj.getParent();
+    } catch (Throwable t) {}
+    return itn;
+  }
+
+  static void removeFlower(Flower fl) {
+    if (fl == null) return;
+    try { [ fl ==>> ; ]; } catch (Throwable t) {}
+  }
+
+  static void removeFruit(FruitService fr) {
+    if (fr == null) return;
+    try { [ fr ==>> ; ]; } catch (Throwable t) {}
+  }
+
+  // --- Safe field reader (reflection) -------------------------------------
+  static Double getDoubleField(Object obj, String name) {
+    try {
+      if (obj == null) return null;
+      java.lang.reflect.Field f = obj.getClass().getField(name);
+      Object v = f.get(obj);
+      if (v instanceof Number)
+        return Double.valueOf(((Number) v).doubleValue());
+      if (v instanceof String)
+        return Double.valueOf(Double.parseDouble((String) v));
+    } catch (Throwable t) {}
+    return null;
+  }
+
+  // Approximate biomass used for stats & "size" ranking
+  static double getBiomass(Object organ) {
+    Double d;
+
+    d = getDoubleField(organ, "dryMass");
+    if (d != null) return Math.max(0.0, d.doubleValue());
+
+    d = getDoubleField(organ, "DW");
+    if (d != null) return Math.max(0.0, d.doubleValue());
+
+    d = getDoubleField(organ, "freshMass");
+    if (d != null) return Math.max(0.0, d.doubleValue());
+
+    d = getDoubleField(organ, "FW");
+    if (d != null) return Math.max(0.0, d.doubleValue());
+
+    d = getDoubleField(organ, "mass");
+    if (d != null) return Math.max(0.0, d.doubleValue());
+
+    d = getDoubleField(organ, "biomass");
+    if (d != null) return Math.max(0.0, d.doubleValue());
+
+    return 0.0;
+  }
+
+  // For ranking: use biomass as "size" proxy
+  static double getOrganSize(Object organ) {
+    return getBiomass(organ);
+  }
+
+  static double zBase(Organ itn) {
+    Double v = getDoubleField(itn, "z");
+    if (v == null) v = getDoubleField(itn, "Z");
+    if (v == null) v = getDoubleField(itn, "zCoord");
+    return (v != null) ? v.doubleValue() : 0.0;
+  }
+
+  static double zTip(Organ itn) {
+    Double v = getDoubleField(itn, "endZ");
+    if (v == null) v = getDoubleField(itn, "tipZ");
+    if (v == null) v = getDoubleField(itn, "Z_end");
+    return (v != null) ? v.doubleValue() : zBase(itn);
+  }
+
+  static double midZ(Internode itn) {
+    if (itn == null) return 0.0;
+    return 0.5 * (zBase(itn) + zTip(itn));
+  }
+
+  // local row coordinate; same as LeafPlanner.localXRow
+  static double localXRow(Organ obj) {
+    try { obj.update3D(); } catch (Throwable t) {}
+
+    Double xwD = getDoubleField(obj, "x");
+    if (xwD == null) xwD = getDoubleField(obj, "X");
+
+    Double ywD = getDoubleField(obj, "y");
+    if (ywD == null) ywD = getDoubleField(obj, "Y");
+
+    double xw = (xwD != null) ? xwD.doubleValue() : 0.0;
+    double yw = (ywD != null) ? ywD.doubleValue() : 0.0;
+
+    double dx = xw - tx;
+    double dy = yw - ty;
+    double th = rowOrientation * Math.PI / 180.0;
+
+    return dx * Math.cos(th) + dy * Math.sin(th);
+  }
+
+  static int uprightRegionIndex(double z, double uMin, double uMax, int regionCount) {
+    double eps = 1.0e-9;
+    int n = (regionCount > 0) ? regionCount : 3;
+    double h = uMax - uMin;
+    if (h < eps) return Math.min(1, n - 1);
+    double t = (z - uMin) / h;
+    if (t < (1.0 / 3.0)) return 0;
+    if (t < (2.0 / 3.0)) return Math.min(1, n - 1);
+    return n - 1;
+  }
+
+  static String uprightRegionName(int idx) {
+    if (idx == 0) return "low";
+    if (idx == 1) return "mid";
+    if (idx == 2) return "upper";
+    return "region" + idx;
+  }
+
+  static void setAddUprightRegionConstraint(UprightRegionFruitSnap s) {
+    if (s == null) {
+      clearAddUprightRegionConstraint();
+      return;
+    }
+    addUprightRegionRootID = (s.root != null) ? s.root.getId() : -1L;
+    addUprightRegionUprightZMin = s.uprightZMin;
+    addUprightRegionUprightZMax = s.uprightZMax;
+    addUprightRegionIdx = s.idx;
+  }
+
+  static void clearAddUprightRegionConstraint() {
+    addUprightRegionRootID = -1L;
+    addUprightRegionUprightZMin = 0.0;
+    addUprightRegionUprightZMax = 0.0;
+    addUprightRegionIdx = -1;
+  }
+
+  static boolean matchesAddUprightRegionConstraint(Internode i) {
+    if (addUprightRegionRootID <= 0L || addUprightRegionIdx < 0) return true;
+    if (i == null) return false;
+    Internode root = orderRootKeyCompat(i, Math.max(1, MgmtUprightOrder));
+    if (root == null || root.getId() != addUprightRegionRootID) return false;
+    int idx = uprightRegionIndex(midZ(i), addUprightRegionUprightZMin, addUprightRegionUprightZMax, 3);
+    return idx == addUprightRegionIdx;
+  }
+
+  static void autoFitGridBoundsToCurrentTree(Cfg cfg, String label) {
+    if (cfg == null) return;
+    if (cfg.gridNx <= 0 || cfg.gridNz <= 0) return;
+
+    double xmin = 1e30, xmax = -1e30;
+    double zmax = -1e30;
+    int seen = 0;
+
+    for (Internode itn : (* i:Internode, (i.plantNumber == 1) *)) {
+      if (itn == null) continue;
+      double xr = localXRow(itn);
+      double zr = zBase(itn);
+      if (Double.isNaN(xr) || Double.isInfinite(xr)) continue;
+      if (Double.isNaN(zr) || Double.isInfinite(zr)) continue;
+      if (xr < xmin) xmin = xr;
+      if (xr > xmax) xmax = xr;
+      if (zr > zmax) zmax = zr;
+      seen++;
+    }
+    for (Leaf lf : (* l:Leaf, (l.plantNumber == 1) *)) {
+      if (lf == null) continue;
+      double xr = localXRow(lf);
+      double zr = zBase(lf);
+      if (Double.isNaN(xr) || Double.isInfinite(xr)) continue;
+      if (Double.isNaN(zr) || Double.isInfinite(zr)) continue;
+      if (xr < xmin) xmin = xr;
+      if (xr > xmax) xmax = xr;
+      if (zr > zmax) zmax = zr;
+      seen++;
+    }
+    for (FruitService fr : (* f:FruitService, (f.plantNumber == 1) *)) {
+      if (fr == null) continue;
+      double xr = localXRow(fr);
+      double zr = zBase(fr);
+      if (Double.isNaN(xr) || Double.isInfinite(xr)) continue;
+      if (Double.isNaN(zr) || Double.isInfinite(zr)) continue;
+      if (xr < xmin) xmin = xr;
+      if (xr > xmax) xmax = xr;
+      if (zr > zmax) zmax = zr;
+      seen++;
+    }
+    for (Flower fl : (* f:Flower, (f.plantNumber == 1) *)) {
+      if (fl == null) continue;
+      double xr = localXRow(fl);
+      double zr = zBase(fl);
+      if (Double.isNaN(xr) || Double.isInfinite(xr)) continue;
+      if (Double.isNaN(zr) || Double.isInfinite(zr)) continue;
+      if (xr < xmin) xmin = xr;
+      if (xr > xmax) xmax = xr;
+      if (zr > zmax) zmax = zr;
+      seen++;
+    }
+
+    if (seen == 0) return;
+    if (xmin > xmax) { xmin = -0.5; xmax = 0.5; }
+    if (zmax < 0.0) zmax = 0.5;
+
+    double oldXmin = cfg.gridXmin;
+    double oldXmax = cfg.gridXmax;
+    double oldZmin = cfg.gridZmin;
+    double oldZmax = cfg.gridZmax;
+
+    cfg.gridXmin = xmin - 0.05;
+    cfg.gridXmax = xmax + 0.05;
+    cfg.gridZmin = 0.0;
+    cfg.gridZmax = zmax + 0.05;
+
+    if (cfg.gridXmax <= cfg.gridXmin) cfg.gridXmax = cfg.gridXmin + 0.1;
+    if (cfg.gridZmax <= cfg.gridZmin) cfg.gridZmax = cfg.gridZmin + 0.1;
+
+    if (Math.abs(oldXmin - cfg.gridXmin) > 1e-9
+        || Math.abs(oldXmax - cfg.gridXmax) > 1e-9
+        || Math.abs(oldZmin - cfg.gridZmin) > 1e-9
+        || Math.abs(oldZmax - cfg.gridZmax) > 1e-9) {
+      println(label + " auto-fit grid bounds:"
+            + " x=[" + round3(cfg.gridXmin) + "," + round3(cfg.gridXmax) + "]"
+            + " z=[" + round3(cfg.gridZmin) + "," + round3(cfg.gridZmax) + "]"
+            + " fromTreeMinX=" + round3(xmin)
+            + " maxX=" + round3(xmax)
+            + " maxZ=" + round3(zmax)
+            + " n=" + seen);
+    }
+  }
+
+  static boolean useAutoFitTwinningGridBoundsMode() {
+    try {
+      return "AUTO_FIT".equalsIgnoreCase(twinningGridBoundsMode);
+    } catch (Throwable t) {}
+    return false;
+  }
+
+  static Cfg buildWholeTreeBalancingGridCfg(Cfg baseCfg, String label) {
+    Cfg g = new Cfg();
+    if (baseCfg != null) {
+      g.gridNx = baseCfg.gridNx;
+      g.gridNz = baseCfg.gridNz;
+      g.gridXmin = baseCfg.gridXmin;
+      g.gridXmax = baseCfg.gridXmax;
+      g.gridZmin = baseCfg.gridZmin;
+      g.gridZmax = baseCfg.gridZmax;
+    }
+    if (g.gridNx <= 0) {
+      try { g.gridNx = Math.max(2, twinningNx); } catch (Throwable t) { g.gridNx = 3; }
+    }
+    if (g.gridNz <= 0) {
+      try { g.gridNz = Math.max(2, twinningNz); } catch (Throwable t) { g.gridNz = 3; }
+    }
+    if (g.gridNx <= 0 || g.gridNz <= 0) return null;
+    if (!useAutoFitTwinningGridBoundsMode()) {
+      try { g.gridXmin = twinningXMin; } catch (Throwable t) {}
+      try { g.gridXmax = twinningXMax; } catch (Throwable t) {}
+      try { g.gridZmin = twinningZMin; } catch (Throwable t) {}
+      try { g.gridZmax = twinningZMax; } catch (Throwable t) {}
+    }
+    if (!(g.gridXmax > g.gridXmin && g.gridZmax > g.gridZmin)) {
+      autoFitGridBoundsToCurrentTree(g, label + "/wholeTree");
+    }
+    if (!(g.gridXmax > g.gridXmin && g.gridZmax > g.gridZmin)) return null;
+    g.gridMode = true;
+    return g;
+  }
+
+  static int[] countOrgansByGrid(Cfg cfg, boolean thinFlowers) {
+    if (cfg == null) return null;
+    int cells = cfg.gridNx * cfg.gridNz;
+    if (cells <= 0) return null;
+    int[] counts = new int[cells];
+    int c;
+
+    if (thinFlowers) {
+      for (Flower fl : (* f:Flower, (f.plantNumber == 1) *)) {
+        c = gridIndex(cfg, localXRow(fl), zBase(fl));
+        if (c >= 0 && c < cells) counts[c]++;
+      }
+    } else {
+      for (FruitService fr : (* f:FruitService, (f.plantNumber == 1) *)) {
+        c = gridIndex(cfg, localXRow(fr), zBase(fr));
+        if (c >= 0 && c < cells) counts[c]++;
+      }
+    }
+    return counts;
+  }
+
+  static int sumIntArray(int[] arr) {
+    if (arr == null) return 0;
+    int s = 0;
+    for (int i = 0; i < arr.length; i++) s += arr[i];
+    return s;
+  }
+
+  static int sumRoundedGridTargets(double[] arr) {
+    if (arr == null) return 0;
+    int s = 0;
+    for (int i = 0; i < arr.length; i++) {
+      s += (int) Math.round(arr[i]);
+    }
+    return s;
+  }
+
+  static int[] buildBalancedCellTargetsFromCurrentCounts(int[] currentCounts, int targetTotal) {
+    if (currentCounts == null) return null;
+    int cells = currentCounts.length;
+    if (cells <= 0) return null;
+
+    int[] targets = new int[cells];
+    System.arraycopy(currentCounts, 0, targets, 0, cells);
+
+    int curTotal = sumIntArray(targets);
+    if (targetTotal < 0) targetTotal = 0;
+
+    while (curTotal > targetTotal) {
+      int idxMax = -1;
+      int maxCount = -1;
+      for (int c = 0; c < cells; c++) {
+        if (targets[c] > maxCount) {
+          maxCount = targets[c];
+          idxMax = c;
+        }
+      }
+      if (idxMax < 0 || maxCount <= 0) break;
+      targets[idxMax]--;
+      curTotal--;
+    }
+
+    while (curTotal < targetTotal) {
+      int idxMin = -1;
+      int minCount = Integer.MAX_VALUE;
+      for (int c = 0; c < cells; c++) {
+        if (targets[c] < minCount) {
+          minCount = targets[c];
+          idxMin = c;
+        }
+      }
+      if (idxMin < 0) break;
+      targets[idxMin]++;
+      curTotal++;
+    }
+
+    return targets;
+  }
+
+  static double[] toDoubleArray(int[] arr) {
+    if (arr == null) return null;
+    double[] out = new double[arr.length];
+    for (int i = 0; i < arr.length; i++) out[i] = arr[i];
+    return out;
+  }
+
+  static int[] deficitsFromCurrentAndTargets(int[] currentCounts, int[] targetCounts) {
+    if (currentCounts == null || targetCounts == null) return null;
+    int n = Math.min(currentCounts.length, targetCounts.length);
+    int[] d = new int[n];
+    for (int i = 0; i < n; i++) {
+      int v = targetCounts[i] - currentCounts[i];
+      if (v < 0) v = 0;
+      d[i] = v;
+    }
+    return d;
+  }
+
+  static int gridIndex(Cfg cfg, double xr, double zr) {
+    if (xr < cfg.gridXmin || xr > cfg.gridXmax) return -1;
+    if (zr < cfg.gridZmin || zr > cfg.gridZmax) return -1;
+
+    double dx = (cfg.gridXmax - cfg.gridXmin) / cfg.gridNx;
+    double dz = (cfg.gridZmax - cfg.gridZmin) / cfg.gridNz;
+
+    int ix = (int) ((xr - cfg.gridXmin) / dx);
+    int iz = (int) ((zr - cfg.gridZmin) / dz);
+
+    if (ix < 0 || ix >= cfg.gridNx) return -1;
+    if (iz < 0 || iz >= cfg.gridNz) return -1;
+
+    return iz * cfg.gridNx + ix;
+  }
+
+  static double round3(double v) {
+    return Math.round(v * 1000.0) / 1000.0;
+  }
+  
+
+
+
+  // ------------------------------------------------------------------------
+  // DEBUG HELPERS
+  // ------------------------------------------------------------------------
+  public static void debugFruitSummary(String tag) {
+    int nFlw   = (int) count((* f:Flower,      (f.plantNumber == 1) *));
+    int nFruit = (int) count((* f:FruitService,(f.plantNumber == 1) *));
+    double biomass = 0.0;
+
+    for (Flower fl : (* f:Flower, (f.plantNumber == 1) *)) {
+      biomass += getBiomass(fl);
+    }
+    for (FruitService fr : (* f:FruitService, (f.plantNumber == 1) *)) {
+      biomass += getBiomass(fr);
+    }
+
+    println("[FruitPlanner] DEBUG [" + tag + "]:"
+          + " nFlowers=" + nFlw
+          + " nFruits="  + nFruit
+          + " totalBiomass≈" + round3(biomass));
+  }
+
+}

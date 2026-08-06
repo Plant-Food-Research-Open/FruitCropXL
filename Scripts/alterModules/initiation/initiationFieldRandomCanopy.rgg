@@ -1,0 +1,297 @@
+import java.util.ArrayList;
+import fieldBase.*;
+import plantBase.*;
+import rootSystem.*;
+import environment.*;
+import soil.*;
+import fineRoot.*;
+import structuralRoot.*;
+import leaf.*;
+import static main.*;
+import static globalParameters.*;
+import static modelOptions.*;
+import static lightInterception.*;
+import static plantParameters.*;
+import static initialConditions.*;
+import static fieldBase.*;
+import static plantBase.*;
+import static rootSystem.*;
+import static environment.*;
+import static soil.*;
+import static fineRoot.*;
+import static structuralRoot.*;
+import static leaf.*;
+import static canopy.*;
+import static fieldCanopyReader.*;
+import static initiationBase.*;
+
+public class InitiationFieldRandomCanopy extends InitiationService {
+	private static final long serialVersionUID = 2338947351342121361L;
+	private transient PlantBase fieldCanopyPlantBase;
+	private boolean canopyInitiated = false;
+
+	public void initiate() {[
+		{
+			continueRunning = true;
+			focalPlants = 0;
+			canopyInitiated = false;
+			fieldCanopyPlantBase = null;
+
+			if (useCTRAM && !fieldCanopy_allowCTRAM) {
+				println("[fieldRandomCanopy] CTRAM disabled because fieldRandomCanopy has no explicit shoot transport topology.");
+				useCTRAM = false;
+			}
+			if (fieldCanopy_createTerrainPatch) {
+				println("[fieldRandomCanopy] createTerrainPatch=true is not implemented in FruitCropXL; using flat/nearest-neighbour terrain offsets only.");
+			}
+		}
+
+		Axiom ==>
+			temp
+				if(isRayTracingLightMode() && useDirectRadiation) (
+				[dir:DirectLight] { dir.update(); }
+			)
+				if(isRayTracingLightMode() && useDiffuseRadiation) (
+				[dif:DiffuseLight] { dif.update(); }
+			)
+			RH(rowOrientation)
+			FieldBase
+			[
+				{
+					int i = 1;
+					int row = 1;
+					int pos = 1;
+					int strip = 1;
+				}
+
+				pi:PlantIdentifier
+				pb:PlantBase
+				[RU(180) rb:RootBase]
+				{
+					pi.initiate(i, row, pos, strip, species);
+					pb.initiate(i, row, pos, strip, pi);
+					rb.initiate_pb(pb, numofSoilLayers);
+					pb.addRootBase(rb);
+					fieldCanopyPlantBase = pb;
+					if (pb.border == false) focalPlants++;
+				}
+
+				[
+					RU(180)
+					for (int r = 0; r < numofSoilLayers; r++) (
+						sl:Soil { sl.initiate(r, pb); }
+						[ M(-sl.length) sr:StructuralRoot [fr:FineRoot] ]
+						{
+							fr.initiate_pb(r, pb);
+							fr.addSoilArray(sl);
+							sr.initiate_pb(r, pb);
+							rb.addChildSoilRoot(r, sl, fr, sr);
+						}
+					)
+				]
+			]
+		;
+	]}
+
+	public void initArchitecture() {
+		if (canopyInitiated) return;
+		canopyInitiated = true;
+
+		fieldCanopy_totalLeafNumber = 0;
+		fieldCanopy_totalLeafArea = 0.0;
+		fieldCanopy_targetLeafArea = 0.0;
+		fieldCanopy_patchCountUsed = 0;
+
+		if ("plot".equals(fieldCanopy_sourceMode)) {
+			buildPlotCanopy();
+		} else {
+			buildFieldCanopy();
+		}
+
+		initializeReportableFieldMetadata();
+
+		totalPlants = 1;
+		if (fieldCanopy_usePatchAreaForFocalArea) {
+			focalArea = fieldCanopy_gridLength * fieldCanopy_gridWidth * Math.max(1, fieldCanopy_patchCountUsed);
+			totalArea = focalArea;
+			dens = focalPlants / Math.max(1e-9, focalArea);
+		} else {
+			totalArea = rowDistance * plantDistance * totalPlants;
+			focalArea = rowDistance * plantDistance * focalPlants;
+			dens = 1.0 / Math.max(1e-9, rowDistance * plantDistance);
+		}
+
+		if (focalArea <= 0.0) {
+			println("[fieldRandomCanopy] ERROR: focalArea <= 0; forcing focalArea to one patch area.");
+			focalArea = Math.max(1e-9, fieldCanopy_gridLength * fieldCanopy_gridWidth);
+			totalArea = focalArea;
+		}
+
+		println("[fieldRandomCanopy] sourceMode: " + fieldCanopy_sourceMode);
+		println("[fieldRandomCanopy] total leaf number: " + fieldCanopy_totalLeafNumber);
+		println("[fieldRandomCanopy] total target leaf area: " + fieldCanopy_targetLeafArea);
+		println("[fieldRandomCanopy] total realized leaf area: " + fieldCanopy_totalLeafArea);
+		println("[fieldRandomCanopy] focalArea: " + focalArea);
+		println("[fieldRandomCanopy] LAI: " + (fieldCanopy_totalLeafArea / Math.max(1e-9, focalArea)));
+
+		if (fieldCanopy_exportObj) {
+			derive();
+			export3DScene(PATH_OUTPUT + "fieldRandomCanopy.obj", "obj");
+			if (fieldCanopy_exportOnly) {
+				continueRunning = false;
+			}
+		}
+	}
+
+	private PlantBase getFieldCanopyPlantBase() {
+		if (fieldCanopyPlantBase != null) return fieldCanopyPlantBase;
+		fieldCanopyPlantBase = first((* p:PlantBase, (p.plantNumber == 1) *));
+		return fieldCanopyPlantBase;
+	}
+
+	private void buildFieldCanopy() {
+		ArrayList patches = FieldCanopyReader.readCentres();
+		if (patches == null || patches.size() == 0) {
+			println("[fieldRandomCanopy] No patches were read; canopy is empty.");
+			return;
+		}
+
+		ArrayList dtm = null;
+		if (fieldCanopy_useTerrain) {
+			dtm = FieldCanopyReader.readDTM();
+		}
+
+		int firstPatch = Math.max(0, fieldCanopy_startingPatch);
+		int lastPatch = fieldCanopy_endingPatch;
+		if (lastPatch < 0 || lastPatch >= patches.size()) {
+			lastPatch = patches.size() - 1;
+		}
+
+		for (int p = firstPatch; p <= lastPatch; p += fieldCanopy_patchStep) {
+			FieldCanopyPatch patch = (FieldCanopyPatch) patches.get(p);
+			double terrainZ = 0.0;
+			if (fieldCanopy_useTerrain && dtm != null) {
+				terrainZ = FieldCanopyReader.getNearestTerrainZ(dtm, patch.x, patch.y);
+			}
+
+			ArrayList layers = FieldCanopyReader.readPatchLayers(patch.patchId);
+			if (layers == null || layers.size() == 0) {
+				println("[fieldRandomCanopy] No layers for patch " + patch.patchId);
+				continue;
+			}
+			fieldCanopy_patchCountUsed++;
+
+			for (int li = 0; li < layers.size(); li++) {
+				FieldCanopyLayer layer = (FieldCanopyLayer) layers.get(li);
+				buildLayerCanopy(getFieldCanopyPlantBase(), patch.x, patch.y, terrainZ, patch.patchId, layer);
+			}
+		}
+	}
+
+	private void buildPlotCanopy() {
+		if (fieldCanopy_plotFile == null || fieldCanopy_plotFile.length() == 0) {
+			println("[fieldRandomCanopy] plot sourceMode requires fieldCanopy_plotFile.");
+			return;
+		}
+
+		ArrayList layers = FieldCanopyReader.readPlotLayers(fieldCanopy_plotFile);
+		if (layers == null || layers.size() == 0) {
+			println("[fieldRandomCanopy] No plot layers were read; canopy is empty.");
+			return;
+		}
+
+		double x = fieldCanopy_gridLength / 2.0;
+		double y = fieldCanopy_gridWidth / 2.0;
+		double z = 0.0;
+
+		fieldCanopy_patchCountUsed = 1;
+
+		for (int li = 0; li < layers.size(); li++) {
+			FieldCanopyLayer layer = (FieldCanopyLayer) layers.get(li);
+			buildLayerCanopy(getFieldCanopyPlantBase(), x, y, z, 1, layer);
+		}
+	}
+
+	private void buildLayerCanopy(PlantBase pb,
+								  double patchX,
+								  double patchY,
+								  double terrainZ,
+								  int patchId,
+								  FieldCanopyLayer layer) {
+		if (pb == null) {
+			println("[fieldRandomCanopy] No PlantBase available; skipping layer " + layer.layerId);
+			return;
+		}
+
+		double targetLeafArea =
+			layer.leafAreaDensity
+			* fieldCanopy_layerDepth
+			* fieldCanopy_gridLength
+			* fieldCanopy_gridWidth;
+
+		if (targetLeafArea <= 0.0) return;
+
+		FieldRandomCanopy can = new FieldRandomCanopy(
+			fieldCanopy_gridLength,
+			fieldCanopy_gridWidth,
+			layer.zmin - terrainZ,
+			fieldCanopy_layerDepth,
+			fieldCanopy_fractionBorder,
+			layer.leafAngles,
+			fieldCanopy_meanLeafLength
+		);
+
+		double cumulativeLeafArea = 0.0;
+		int leafCount = 0;
+
+		[
+			==>> ^
+			Translate((float) patchX, (float) patchY, (float) terrainZ)
+			for (int leafTrial = 0; leafTrial < fieldCanopy_maxLeavesPerLayer; leafTrial++) (
+				if(cumulativeLeafArea < targetLeafArea) (
+					{
+						double lx = can.generateX();
+						double ly = can.generateY();
+						double lz = can.generateZ();
+						double az = can.generateAzimuth();
+						double dec = can.generateDeclination();
+						double leafLength = can.generateLeafLength();
+					}
+
+					[
+						Translate((float) lx, (float) ly, (float) lz)
+						RH((float) az)
+						RL((float) dec)
+						lf:Leaf
+						{
+							lf.initiate_fieldRandomCanopy(pb, leafLength, patchId, layer.layerId,
+														  layer.zmin, layer.leafAreaDensity);
+							lf.shapeSpecies = leafShapeSpecies;
+							lf.initFromFieldCanopy = true;
+							cumulativeLeafArea += lf.area;
+							leafCount++;
+						}
+					]
+				)
+			)
+			;
+		]
+
+		if (leafCount >= fieldCanopy_maxLeavesPerLayer) {
+			println("[fieldRandomCanopy] WARNING: maxLeavesPerLayer reached at patch "
+					+ patchId + ", layer " + layer.layerId);
+		}
+
+		fieldCanopy_totalLeafNumber += leafCount;
+		fieldCanopy_totalLeafArea += cumulativeLeafArea;
+		fieldCanopy_targetLeafArea += targetLeafArea;
+
+		println("[fieldRandomCanopy] patch=" + patchId
+			+ ", layer=" + layer.layerId
+			+ ", zmin=" + layer.zmin
+			+ ", LAD=" + layer.leafAreaDensity
+			+ ", targetArea=" + targetLeafArea
+			+ ", realizedArea=" + cumulativeLeafArea
+			+ ", leaves=" + leafCount);
+	}
+}

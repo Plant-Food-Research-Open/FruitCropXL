@@ -1,0 +1,2205 @@
+/* ################################## MODULES ################################*/
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileReader;
+import java.io.FileWriter;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.PrintWriter;
+import java.io.InputStreamReader;
+import java.io.StringWriter;
+import java.io.FileNotFoundException;
+import java.io.Serializable;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Properties;
+import java.util.StringTokenizer;
+import java.util.UUID;
+import java.util.Vector;
+
+import java.util.function.Consumer;
+
+import javax.vecmath.Tuple3d;
+import javax.vecmath.Tuple3f;
+
+// regex + date/time (Java 1.5–compatible)
+import java.util.regex.Pattern;
+import java.util.regex.Matcher;
+import java.util.Calendar;
+import java.util.TimeZone;
+import java.time.LocalDateTime;
+import java.time.Year;
+import java.time.format.DateTimeFormatter;
+
+import de.grogra.util.WrapException;
+
+// Jackson
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.annotation.PropertyAccessor;
+import com.fasterxml.jackson.annotation.JsonAutoDetect.Visibility;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.dataformat.csv.CsvMapper;
+import com.fasterxml.jackson.dataformat.csv.CsvSchema;
+import com.fasterxml.jackson.dataformat.csv.CsvSchema.Builder;
+
+import io.github.fruitcropxl.config.adapters.*;
+import io.github.fruitcropxl.output.util.StepwiseCsvWriter;
+
+import org.apache.commons.math3.distribution.*;
+//own modules
+import static globalParameters.*;
+import static modelOptions.*;
+import static lightInterception.*;
+import static initialConditions.*;
+import static environment.*;
+import static absOrgan.*;
+import static leaf.*;
+import static plantBase.*;
+import static fieldBase.*;
+import static shoot.*;
+import static rootSystem.*;
+import static diagnosticTables.*;
+
+
+ 
+/**
+ * The CommandLineArgs class provides methods to interact with the command line arguments and properties,
+ * allowing retrieval of raw and parsed properties and arguments.
+ * 
+ * This class is used to access properties and arguments passed to the application and parse them if they are
+ * in JSON format.
+ */
+public class CommandLineArgs implements Serializable {
+    
+    /**
+     * Retrieves the raw property value associated with the specified key.
+     * 
+     * This method fetches the raw string value of a property by calling the underlying application logic.
+     * The property value is returned as a string without any parsing.
+     *
+     * @param key the property key whose value is to be retrieved
+     * @return the raw property value as a string, or null if the key does not exist or the value is not set
+     */
+    public String getRawProperty(String key) {
+        // Fetches the raw property using an external application method
+        String rawProperty = de.grogra.pf.boot.Main.getProperty(key);
+        return rawProperty;
+    }
+
+    /**
+     * Retrieves the property value associated with the specified key, parsed as a JSON object.
+     * 
+     * This method first retrieves the raw property value using {@link #getRawProperty(String)} and attempts
+     * to parse it into a JsonNode object. If the property value is null or empty, null is returned.
+     *
+     * @param key the property key whose value is to be retrieved and parsed
+     * @return the parsed JSON property value as a JsonNode, or null if the raw property is not found or invalid
+     */
+    public JsonNode getProperty(String key) {
+        String rawProperty = getRawProperty(key);
+        if (rawProperty == null) {
+            return null;
+        }
+
+        ObjectMapper objectMapper = new ObjectMapper();
+        JsonNode prop = objectMapper.readTree(rawProperty);
+        return prop;
+    }
+
+    /**
+     * Retrieves the count of command-line arguments passed to the application.
+     * 
+     * This method returns the total number of arguments that were passed to the application when it was started.
+     * The count includes all arguments, whether they are named or unnamed.
+     *
+     * @return the number of arguments passed to the application
+     */
+    public int getArgCount() {
+        return de.grogra.pf.boot.Main.getArgCount();
+    }
+
+    /**
+     * Retrieves the raw command-line argument at the specified index.
+     * 
+     * This method returns the argument at the given index as a string without any parsing or modification.
+     * The argument is retrieved using an external application method and returned as is.
+     *
+     * @param index the index of the argument to retrieve
+     * @return the raw argument value at the specified index, or null if the index is out of bounds
+     */
+    public String getRawArg(int index) {
+        String rawArg = de.grogra.pf.boot.Main.getArg(index);
+        return rawArg;
+    }
+
+    /**
+     * Retrieves the command-line argument at the specified index, parsed as a JSON object.
+     * 
+     * This method retrieves the raw argument using {@link #getRawArg(int)} and attempts to parse it into a JsonNode object.
+     * If the raw argument is null or invalid, null is returned.
+     *
+     * @param index the index of the argument to retrieve and parse
+     * @return the parsed argument value as a JsonNode, or null if the raw argument is not found or invalid
+     */
+    public JsonNode getArg(int index) {
+        String rawArg = getRawArg(index);
+        if (rawArg == null) {
+            return null;
+        }
+
+        ObjectMapper objectMapper = new ObjectMapper();
+        JsonNode arg = objectMapper.readTree(rawArg);
+        return arg;
+    }
+}
+
+
+/** 
+ * output the result to a csv file with table heads
+ *
+ * @param String filename - the name of the output file name
+ * @param int i - which table for output
+ *
+ */
+ //String filename = "Carbon-optimization" +"_"+scenario + ".csv";
+/* public static void outputTableData(String filename, int t){
+   PrintWriter tmpfile = new PrintWriter(new FileWriter(PATH_OUTPUT + filename));
+   Dataset dataset = outputTables.OUTPUT_TABLES[t].resolve();
+   //if (printFlag) { println("RowCount::"+dataset.getRowCount()); }
+   //if (printFlag) { println("ColumnCount::"+dataset.getColumnCount()); }
+                  
+    StringBuilder sb = new StringBuilder();
+    for(int i=0; i<dataset.getColumnCount(); i++)
+    {
+	   sb.append(dataset.getColumnKey(i));
+	   if(i!=dataset.getColumnCount()-1) {sb.append(",");}            
+    }
+    sb.append("\n");
+    
+    //if (printFlag) { println(sb.toString()); }
+    
+    tmpfile.write(sb.toString());
+               
+   for(int i=0;i<dataset.getRowCount(); i++) {
+				  for(int j=0;j<dataset.getColumnCount(); j++) {
+								 //if (printFlag) { println(dataset.getCell(i,j)); }
+								 tmpfile.print(dataset.getCell(i,j)+",");
+				  }
+				  tmpfile.print("\n");
+   }
+   tmpfile.flush();
+   tmpfile.close();
+} */
+
+static List datasetToJsonList(Dataset dataset) {
+	ObjectMapper mapper = new ObjectMapper();
+	List nodeList = new ArrayList();
+	
+	for(int row = 0; row < dataset.getRowCount(); row++) {
+	  ObjectNode node = mapper.createObjectNode();
+  
+	  for(int col = 0; col < dataset.getColumnCount(); col++) {
+		String key = dataset.getColumnKey(col).toString();
+		double value = dataset.getCell(row, col).getX();
+		node.put(key, value);
+	  }
+	  nodeList.add(node);
+	}
+	
+	return nodeList;
+}
+  
+static void outputChartData(String filename, int t){
+   PrintWriter tmpfile = new PrintWriter(new FileWriter(filename));
+   Dataset dataset = charts.DATASETS[t].resolve();
+   //if (printFlag) { println("RowCount::"+dataset.getRowCount()); }
+   //if (printFlag) { println("ColumnCount::"+dataset.getColumnCount()); }
+                  
+    StringBuilder sb = new StringBuilder();
+    for(int i=0; i<dataset.getColumnCount(); i++)
+    {
+	   sb.append(dataset.getColumnKey(i));
+	   if(i!=dataset.getColumnCount()-1) {sb.append(",");}            
+    }
+    sb.append("\n");
+    
+    //if (printFlag) { println(sb.toString()); }
+    
+    tmpfile.write(sb.toString());
+               
+   for(int i=0;i<dataset.getRowCount(); i++) {
+				  for(int j=0;j<dataset.getColumnCount(); j++) {
+								 //if (printFlag) { println(dataset.getCell(i,j)); }
+								 tmpfile.print(dataset.getCell(i,j)+",");
+				  }
+				  tmpfile.print("\n");
+   }
+   tmpfile.flush();
+   tmpfile.close();
+}
+
+
+/**
+ * Splits the given string into separate substrings based on the characters "_" and ".",
+ * and combines the middle words into a single new string to extract a flexible portion of the filename.
+ * 
+ * @param str the input string to be split and processed
+ * @return a string representing the portion between "model.options." and ".json"
+ */
+public static String splitAndCombine(String str) {
+    // Check if the string contains "model.options." and ".json"
+    int modelOptionsIndex = str.indexOf("model.options.");
+    int jsonIndex = str.lastIndexOf(".json");
+
+    // Ensure "model.options." and ".json" exist in the string
+    if (modelOptionsIndex == -1 || jsonIndex == -1 || modelOptionsIndex >= jsonIndex) {
+        return "";  // Return empty if not a valid input
+    }
+
+    // Extract the substring between "model.options." and ".json"
+    String substring = str.substring(modelOptionsIndex + "model.options.".length(), jsonIndex);
+
+    // Split the extracted substring by special characters: ".", "_", and "-"
+    String[] splitValues = substring.split("[._-]");
+
+    // Combine the parts using underscores
+    StringBuilder result = new StringBuilder();
+    for (String part : splitValues) {
+        if (!part.isEmpty()) { // Avoid appending empty strings
+            result.append(part).append("_");
+        }
+    }
+
+    // Remove the trailing underscore
+    if (result.length() > 0 && result.charAt(result.length() - 1) == '_') {
+        result.setLength(result.length() - 1);
+    }
+
+    return result.toString();
+}
+
+public static String extractOrGenerateUUID(String filename) {
+        // Regex for UUID at the end, before ".json"
+        Pattern pattern = Pattern.compile("([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\\.json$");
+        Matcher matcher = pattern.matcher(filename);
+        if (matcher.find()) {
+            return matcher.group(1);
+        } else {
+            return UUID.randomUUID().toString();
+        }
+    }
+
+
+
+
+
+/** 
+ * measure stick to have a visual comparison
+ *
+ * @param steps - number of steps
+ * @param stepsize - length of one step (in meter)
+ *
+ */
+module measureStick(int steps, float stepsize) ==>
+{
+	float width = (0.5*stepsize<0.75)?(0.5*stepsize):0.75;
+}
+	// position	
+	RU(90) M(5* stepsize) RU(-90)
+	// constructing the stick
+	for(int i:(1:steps))( 
+		F(stepsize, width ).(setShader((i%2==0)?WHITE:GRAY), setLayer(0)) 
+		[
+			RU(90) M(2* width) RU(-90) 
+			//round, multiply and divied, because of java has problems with simple calculations :-(
+			TextLabel( (Math.round((i*stepsize)*100)/100f)+" m" ).(
+				setColor(new Color3f(0,0,0)),
+				setLayer(1)
+			)
+		]
+	)
+;
+
+
+
+// simulation time measurement
+static double start;						// starting system time (ms)
+static double stop;							// stopping system time (ms)
+static double realTime;						// simulation running time (s)
+static double simRate;						// current rate of simulation (model time step per second)
+static double avgRate;						// average rate of simulation (model time step per second)
+
+static void calcSimTime() {
+    if (step == 0) {
+        start = System.currentTimeMillis();
+        realTime = 0;
+        simRate = 0;
+    } else {
+        double prev = realTime;
+        realTime = (System.currentTimeMillis() - start) / 1000;
+        simRate = 0.01 * Math.round(100 * (realTime - prev));
+    }
+ 
+}
+//random integer function
+public static int random_int(int Min, int Max)
+{
+     return (int) (Math.random()*(Max-Min))+Min;
+}
+
+
+
+public static double betaRGR(double t, double tm, double te) {
+  // A flexible sigmoid function as the derivative of the beta Growth rate Function.
+  // It calculates rate of relative growth in dependence of organ age in 
+  // effective growing days (in correponding with amber's other work on phenology)
+  //Because w is initially assumed to be zero (as in the Weibull equation), 
+  //RGR is infinite at the start of growth; it then declines monotonically to zero at time te. 
+  //Thereafter, both rates remain zero due to the restriction that w is wmax if t > te.
+  //Although RGR may have advantage, like more stable
+  // Args: 
+  // t, organ age effective growing days 
+  // tm, the time at which the maximum growth RATE is obtained (0 < tm < te)
+  // te, the time at which Lmax is obtained 
+  // Error handling
+  double RGR = 0;
+  if(tm > te) if (printFlag) { println("error in input arguements"); }
+  if(t == 0) RGR = 0;
+  if(t >= te) RGR = 0;
+  if(t < te & t > 0) RGR = ((2*te-tm)*(te-t)) / ((te-tm)*(2*te-tm-t)*t);
+  //if (printFlag) { println("RGR" + RGR); }
+  return(RGR);
+}
+
+public static double betaGrowthRate(double t, double Lmax, double tm, double te) {
+  // A flexible sigmoid function as the derivative of the beta Growth rate Function.
+  // It calculates rate of growth in dependence of organ potential size and organ age in 
+  // effective growing days (in correponding with amber's other work on phenology)
+  
+  // Args: 
+  // t, organ age effective growing days 
+  // Lmax, the maximum value for weight or length
+  // tm, the time at which the maximum growth RATE is obtained (0 < tm < te)
+  // te, the time at which Lmax is obtained 
+  // Error handling
+  double maxGrowthRate = Lmax * ((2*te-tm)/(te*(te-tm)))*(tm/te)**(tm/(te-tm));
+  double growthRate = 0;
+  
+  if(tm > te) if (printFlag) { println("error in input arguements"); }
+  if(t == 0) growthRate = 0;
+  if(t >= te) growthRate = 0;
+  if(t < te & t > 0) 
+  {
+	 growthRate = maxGrowthRate * ((te-t)/(te-tm))*(t/tm)**(tm/(te-tm));
+  }
+  //if (printFlag) { println("RGR" + RGR); }
+  return(growthRate);
+}
+
+// Yin's sigmoid beta growth function for describing organ size over time
+
+
+/**
+ * Seasonal beta growth curve with explicit Ymax scaling.
+ *
+ * <p>Units:
+ * <ul>
+ *   <li>x, tm, te: time base chosen by caller (days or thermal days)</li>
+ *   <li>y, ymax: caller-defined output units (commonly dimensionless)</li>
+ * </ul>
+ */
+public static double betaGrowthCurve(double x, double tm, double te, double ymax) {
+	if (ymax <= 0) return 0.0;
+	if (te <= 0 || te <= tm) {
+		if (printFlag) println("WARN betaGrowthCurve invalid te/tm; returning ymax");
+		return ymax;
+	}
+	if (x <= 0) return 0.0;
+	if (x >= te) return ymax;
+
+	double denom = te - tm;
+	double term1 = 1.0 + (te - x) / denom;
+	double expo = te / denom;
+	double ratio = x / te;
+	if (ratio <= 0) return 0.0;
+	double y = ymax * term1 * Math.pow(ratio, expo);
+	if (y < 0) y = 0;
+	if (y > ymax) y = ymax;
+	return y;
+}
+
+public static float betaGrowthFunction(float t, float tm, float te) {
+		float result = 1*(1+(te-t)/(te-tm))*(t/te)**(te/(te-tm));
+		if (t > te) {
+			return 1;
+		} else {
+			return result;
+		}
+	}
+
+	
+/**
+ * Calculates the water stress response based on the logistic function.
+ * This function models how a plant's (grwoth) response to water stress changes as its water potential decreases.
+ * other functions are used for shoot conductance based on HydroShoot
+ * The response is defined by the equation:
+ * <pre>
+ * response = 1 / (1 + exp(a * (meanWaterPotential - b)))
+ * </pre>
+ * where:
+ * - meanWaterPotential: The current water potential of the organ.
+ * - growth_a: A constant that controls the steepness of the curve. 
+ * 	 Negative for stress response, and positive for percentage of loss
+ * - growth_b: A constant that shifts the curve horizontally, 
+ 		representing water potential (MPa) at 50% of maximum growth.
+ * 
+ * The function returns a value between 0 and 1, where 1 represents no stress (optimal water potential) and
+ * 0 represents maximum stress (severe water deficit).
+ *
+ * @param waterPotential The current mean water potential of the organ (in MPa).
+ * @param growth_a The parameter that affects the steepness of the curve.
+ * @param growth_b The parameter that sets the threshold for stress (water potential).
+ * @return The simulated water stress response as a value between 0 and 1.
+ */
+public static double waterPotentialRes(double waterPotential, double growth_a, double growth_b) {
+	// Calculate the water stress response based on the logistic function
+	double response = 1 / (1 + Math.exp(growth_a * (waterPotential - growth_b)));
+	return response;
+}
+
+public static double calcHourlyDegradationRate(double dayLength) {
+    double nightLength = 24 - dayLength;
+    double targetFraction = 0.8; // 90% degraded over the night
+    double hourlyRate = 1 - Math.exp(Math.log(1 - targetFraction) / nightLength);
+    return hourlyRate;
+}
+
+
+//Eyring (1935), Arrhenius equation, Johnson et al., (1942):
+//Parent et al., 2010
+public static double tempRes_enzyme(float Tair)
+ {
+   /* # """Effect of the temperature on maximal enzyme activity
+   #       Should multiply the rate at 25 oC
+   # 
+   #       :param float Tair: Air temperature (?C)
+   # 
+   #       :return: Correction to apply to enzyme activity
+   #       :rtype: float
+   #       """
+   # Tair = 20 */
+   float Tref = 20 + 273.15;
+   float Tk = Tair + 273.15;
+   float R = 8.3144;      //#: Physical parameter: Gas constant (J mol-1 K-1)
+   float deltaHa = 55;    //#: Enthalpie of activation of parameter pname (kJ mol-1)
+   float deltaS = 0.48;  //#: entropy term of parameter pname (kJ mol-1 K-1)
+   float deltaHd = 154;  //#: Enthalpie of deactivation of parameter pname (kJ mol-1)
+   
+   double f_activation = Math.exp((deltaHa * (Tk - Tref)) / (R * 1E-3 * Tref * Tk));  //#: Energy of activation (normalized to unity)
+   
+   double f_deactivation = (1 + Math.exp((Tref * deltaS - deltaHd) / (Tref * R * 1E-3))) / (1 + Math.exp((Tk * deltaS - deltaHd) / (Tk * R * 1E-3)));  //#: Energy of deactivation (normalized to unity)
+   
+   return(f_activation * f_deactivation);
+   //return(1);
+ }
+
+
+//temperature compensation 
+public static double wangEngelTempFunction(double Tair, double MinTemp, 
+										   double OptTemp, double MaxTemp) {
+   //skewed bell shap curve, similar to gamma distribution by Wang and Engel 1998, 
+   //Args: 
+  // Tair, mean daily temperature or hourly temperature depends on the calculation
+  // minTemp, minimum temperature
+  // maxTemp, maximum temperature
+  // optTemp, optimum temperature in which the response is 1
+  double p = 0; double relEff = 0;
+   p = Math.log(2.0) / Math.log((MaxTemp - MinTemp) / (OptTemp - MinTemp));
+  
+   if((Tair > MinTemp) & (Tair < MaxTemp)) 
+  	{ 
+		relEff = (2 * Math.pow((Tair - MinTemp), p) * Math.pow((OptTemp - MinTemp), p) - 
+		   		Math.pow((Tair - MinTemp), (2*p))) /Math.pow((OptTemp - MinTemp), (2*p));
+	} else 
+	{ relEff = 0; }  
+  return(relEff);
+  //return(1);
+}
+
+public static double wangEngelTempFunction(float T, double MIN_TEMP, 
+										   double OPT_TEMP, double MAX_TEMP, 
+										   double REF_TEMP) {
+   //skewed bell shap curve, similar to gamma distribution by Wang and Engel 1998, 
+   //Args: 
+  // Tair, mean daily temperature or hourly temperature depends on the calculation
+  // minTemp, minimum temperature
+  // maxTemp, maximum temperature
+  // optTemp, optimum temperature in which the response is 1
+ 	double RelEff = 0.0;
+	double RelEffRefTemp = 1.0;
+    double p = 0.0;
+            
+    if ((T > MIN_TEMP) && (T < MAX_TEMP))
+    {
+        p = Math.log(2.0) / Math.log((MAX_TEMP - MIN_TEMP) / (OPT_TEMP - MIN_TEMP));
+        RelEff = (2 * Math.pow(T - MIN_TEMP, p) * Math.pow(OPT_TEMP - MIN_TEMP, p) - 
+        		 Math.pow(T - MIN_TEMP, 2 * p)) / Math.pow(OPT_TEMP - MIN_TEMP, 2 * p);
+    }
+
+    if ((REF_TEMP > MIN_TEMP) && (REF_TEMP < MAX_TEMP))
+    {
+        p = Math.log(2.0) / Math.log((MAX_TEMP - MIN_TEMP) / (OPT_TEMP - MIN_TEMP));
+        RelEffRefTemp = (2 * Math.pow(REF_TEMP - MIN_TEMP, p) * Math.pow(OPT_TEMP - MIN_TEMP, p) - 
+        				Math.pow(REF_TEMP - MIN_TEMP, 2 * p)) / Math.pow(OPT_TEMP - MIN_TEMP, 2 * p);
+    }
+    
+    return (RelEff / RelEffRefTemp);
+}
+
+public static double stddev(double[] values, double meanValue) {
+    int n = values.length;
+    double sumSquares = 0.0;
+
+    for (int i = 0; i < n; i++) {
+        sumSquares += Math.pow(values[i] - meanValue, 2);
+    }
+
+    return Math.sqrt(sumSquares / (n - 1)); // n - 1 for sample standard deviation
+}
+
+
+/**
+ * Calculates the days since winter solstice based on the given year and day of the year.
+ *
+ * @param year The year to calculate for.
+ * @param doy  The day of year to calculate for.
+ * @param latitude The latitude to determine the Winter Solstice DOY. Positive for the Northern Hemisphere, negative for the Southern Hemisphere.
+ * @return The days since the winter solstice.
+ */
+public static int calcDaysSinceWinterSolstice(int year, int doy, double latitude) {
+    // Determine the Winter Solstice DOY based on the latitude
+    int winterSolsticeDOY = latitude > 0 ? 356 : 172;  // 356 for Northern Hemisphere, 172 for Southern Hemisphere
+
+    // Calculate if the previous year was a leap year
+    boolean isLeapYear = Year.isLeap(year - 1);
+
+    // Calculate DAWS
+    int daws;
+    if (isLeapYear) {
+        daws = doy >= winterSolsticeDOY ? doy - winterSolsticeDOY : 366 - winterSolsticeDOY + doy;
+    } else {
+        daws = doy >= winterSolsticeDOY ? doy - winterSolsticeDOY : 365 - winterSolsticeDOY + doy;
+    }
+
+    return daws;
+}
+
+
+// function for reading csv files
+	protected static String fileType = "csv";
+	protected static char separatorChar = ',';
+	protected static char decimalChar = '.';
+	protected static char quoteChar = '"';
+	protected static boolean header = true; // keep head or not, however current version can not include head.
+	protected static int skipLines = 0; // skip number of lines
+	
+	public static String PATH; 
+	
+	//static String fileName = "D:\\PhD project\\FSPM\\Wheat maize intercropping model\\coef.blade.length.csv\\";
+	static List dataRecord = new ArrayList();
+	
+	/* #####################  read two dimensional arrays from csv file  ####################*/
+	
+	 public static double [][] readData(String filename) {
+			 try {
+				
+			 //create BufferedReader to read csv file
+			 BufferedReader br = new BufferedReader(new FileReader(PATH + filename));
+			 String strLine = "";
+             StringTokenizer st = null;
+             int lineNumber = 0, tokenNumber = 0;
+             
+			 // skip the header line
+			 if(header == false) br.readLine();
+			 
+			 // skip lines
+ 	 for (int i = 0; i < skipLines; i++) {
+                br.readLine();
+				lineNumber++;
+             } 
+			 
+			 //read file line by line
+			 while( (strLine = br.readLine()) != null) {
+				 lineNumber++;
+				 
+				 //replacing decimalChar if it is not a dot by dot
+				 if(decimalChar!='.') strLine = strLine.replaceAll(decimalChar, '.');
+				 
+                 //break line using separatorChar as separator.
+                 st = new StringTokenizer(strLine, separatorChar);
+                 
+				 if(lineNumber==1 + skipLines) {
+					 for (int i = 0; i < st.countTokens(); i++) {
+						 dataRecord.add(new Vector());
+					 }
+				 }
+				 
+				 Vector tmp;
+				 String token;
+                 while(st.hasMoreTokens()) {
+					 tmp = (Vector)dataRecord.get(tokenNumber);
+					 tmp.add(st.nextToken().replaceAll('"',' '));
+					 tokenNumber++;
+				 }
+				 //reset token number
+				 tokenNumber = 0;
+			 }
+         } catch (IndexOutOfBoundsException e) {
+			println("FileReaderC: Error: IndexOutOfBoundsException - " + e.getMessage());
+		} catch (Exception e) {
+			println("FileReaderC: General Error: " + e.getMessage());
+		}
+
+	     int rowNumber = getColumn(1).size();
+		 int columnNumber = dataRecord.size();
+		 if (printFlag) { println(rowNumber+"   "+columnNumber); }
+		 double dataArray[][] = new double[rowNumber][columnNumber]; 
+		 int row = 0, column = 0;
+		  for ( row = 0; row < rowNumber; row++) {
+			 for( column = 0; column < columnNumber; column++ ) {
+				 try{
+					 dataArray[row][column] = Double.parseDouble((String)getElement(column,row));
+				 } catch(NumberFormatException e) {
+					if(debug) println("NumberFormatException row = "+row+" column = "+column+"  "+getElement(column,row));							 
+				 }
+			 }
+		 }
+		 row = 0; column = 0;
+		// for(int i:(0:dataArray.length-1)) if (printFlag) { println(Arrays.toString(dataArray[i])); }
+		 dataRecord.clear();
+		 return(dataArray);
+		
+	}
+
+
+	public static List getDataRecord() {
+		return dataRecord;
+	}
+
+	public static Vector getColumn(int i) {
+		return (Vector)dataRecord.get(i);
+	}
+
+	public static Object[] getRow(int i) {
+		Object[] tmp = new Object[dataRecord.size()];
+		for(int j = 0; j<tmp.length; j++) {
+			tmp[j] = getColumn(j).get(i);
+		}
+		return tmp;
+	}
+
+	public static Object getElement(int column, int row) {
+		return getColumn(column).get(row);
+	}
+	
+
+
+static Shader getLeafShader(double age, double fabs, boolean border) {
+		Shader s;
+			if (!isGpuLightMode()) {
+			double col = 1;
+			double refAlim = 8;
+			double refT = 10;
+			double refEP = 8E-5;
+			if(!organGrowthMethod.equals("TempLimited")) {
+				s = new AlgorithmSwitchShader(new RGBAShader(0,globalRadiation > LIGHT_THRESHOLD ?col*fabs : 0, 0),LightShader);
+			} else if(organGrowthMethod.equals("TempLimited")) {
+				s = new AlgorithmSwitchShader(new RGBAShader(0, 1, 0), LightShader);
+				//s = new AlgorithmSwitchShader(new RGBAShader((fabs-25)/refT,(fabs-25)/refT,0),leafSideSwitchShader);
+			} else { 
+					s = LightShader;
+				}
+				return s;
+		}
+		} 
+		
+static Shader getBerryShader(double age) {
+		Shader s;
+		float color_red;
+		float color_green;
+		float color_blue;
+		color_red = age <= 500 ? 0 : age < 800 ?(age-480)/1000.0 :0.3;
+		color_green = age<=500? 1: age<800 ?1-(age-480)/300.0:0.0;
+		color_blue = age<=500?0:age< 800 ?(age-480)/600.0:0.5;
+		s = new RGBAShader(color_red,color_green,color_blue);
+		return s;
+} 
+
+
+
+/* ######################### Mathematical FUNCTIONS ##########################*/
+
+/**
+ * Chepman-Richards growth function
+ *
+ * funktion: h(time):= m(1-exp(-k*time))^n +y0
+ *
+ * @param  time .. time
+ * @param  parameter .. array with parameters [m,k,n, y0] (m=asymthote)
+ */
+public static double evaluateChepmanRichards(double time, double[] parameter) {
+	return parameter[0]*Math.pow(1- Math.exp(-parameter[1]*time) , parameter[2])+ parameter[3];
+}
+
+
+/**
+ * Lorentz function
+ *
+ * funktion: h(time):= 2*A/PI*w/(4*(time-xc)^2+w^2) +y0
+ *
+ * @param  time .. time
+ * @param  parameter .. array with parameters [A,xc,w,y0]
+ */
+public static double evaluateLorentz(double time, double[] parameter) {
+	return 2*parameter[0]/Math.PI*parameter[2]/(4*(time-parameter[1])*(time-parameter[1])+parameter[2]*parameter[2]) + parameter[3];
+}
+
+
+/**
+ * Logistic function
+ *
+ * funktion: h(time):= A2+(A1-A2)/(1+(time/x0)^p) +y0
+ *
+ * @param  time .. time
+ * @param  parameter .. array with parameters [A1, A2, x0, p, y0]
+ */
+public static double evaluateLogistic(double time, double[] parameter) {
+	return parameter[1]+(parameter[0]-parameter[1])/Math.pow(1+(time/parameter[2]), parameter[3]) + parameter[4];
+}
+
+
+/**
+ * Derivative of logistic function
+ *
+ * funktion: h(time):= (p*A2*exp(-p*(time-x0))) / (exp(-p*(time-x0))+1)^2 +y0
+ *
+ * @param  maxdim .. time
+ * @param  parameter .. array with parameters [A2, x0, p, y0]
+ */
+public static double evaluateLogisticDerivative(double time, double[] parameter) {
+	return (parameter[2]*parameter[0]*Math.exp(-parameter[2]*(time-parameter[1]))) / Math.pow(Math.exp(-parameter[2]*(time-parameter[1]))+1, 2) +parameter[3];
+}
+
+
+/**
+ * Peak-normalized Gaussian seasonal response.
+ *
+ * The returned value is 1.0 at time = center and declines symmetrically
+ * around the center. Width controls the duration of the active window.
+ *
+ * h(time) = exp(-2 * ((time - center) / width)^2)
+ *
+ * Interpretation:
+ * - center: timing of maximum secondary/radial growth rate
+ * - width: seasonal spread; FWHM is approximately 1.18 * width
+ *
+ * @param time   Time in days since winter solstice.
+ * @param center Day since winter solstice of maximum growth rate.
+ * @param width  Width of the growth window in days.
+ * @return Seasonal activity scalar in the range 0..1.
+ */
+public static double evaluateGaussPeakNormalized(double time, double center, double width) {
+    if (Double.isNaN(time) || Double.isInfinite(time)) return 0.0;
+    if (Double.isNaN(center) || Double.isInfinite(center)) return 0.0;
+    if (Double.isNaN(width) || Double.isInfinite(width) || width <= 0.0) return 0.0;
+
+    return Math.exp(-2.0 * Math.pow((time - center) / width, 2.0));
+}
+
+/**
+ * Boltzmann function
+ *
+ * funktion: h(time):= A2+(A1-A2)/(1+exp((time-x0)/dx)) +y0
+ *
+ * @param  time .. time
+ * @param  parameter .. array with parameters [A1, A2, x0, dx, y0]
+ */
+public static double evaluateBoltzmann(double time, double[] parameter) {
+	return parameter[1]+(parameter[0]-parameter[1])/(1+Math.exp((time-parameter[2])/parameter[3])) + parameter[4];
+}
+
+
+/**
+ * Beta function, after Yin et al. 2003
+ *
+ * funktion: h(time):= wmax*(1+(te-time)/(te-tm))*(time/te)**(te/(te-tm));
+ *
+ * @param  time .. time
+ * @param  parameter .. array with parameters [wmax, te, tm]
+ */
+public static double evaluateBeta(double time, double[] parameter) {
+	return parameter[0]*(1+(parameter[1]-time)/(parameter[1]-parameter[2]))*(time/parameter[1])**(parameter[1]/(parameter[1]-parameter[2]));
+}
+
+
+/**
+ * Beta function Derivative (growth rate), after Yin et al. 2003
+ *
+ * funktion: cm = wmax*((2*te-tm)/(te*(te-tm)))*(tm/te)**(tm/(te-tm));
+ *			 h(time):= cm*((te-x)/(te-tm))*(x/tm)**(tm/(te-tm))
+ *
+ * @param  time .. time
+ * @param  parameter .. array with parameters [wmax, te, tm]
+ */
+public static double evaluateBetaDerivative(double time, double[] parameter) {
+	if (time > parameter[1]) return 0;
+	//max. growth rate in the linear phase: cm
+	float cm = parameter[0]*((2*parameter[1]-parameter[2])/(parameter[1]*(parameter[1]-parameter[2])))*(parameter[2]/parameter[1])**(parameter[2]/(parameter[1]-parameter[2]));
+	// the growth rate at time t:
+	return  cm*((parameter[1]-time)/(parameter[1]-parameter[2]))*(time/parameter[2])**(parameter[2]/(parameter[1]-parameter[2]));
+} 
+
+/**
+     * Reduces the size of a 2D array to a specified number of rows.
+     *
+     * @param array       The original 2D array.
+     * @param startRow    The starting row index.
+     * @param numberOfRows The number of rows to keep.
+     * @return The reduced 2D array.
+     */
+    public static double[][] reduceArraySize(double[][] array, int startRow, int numberOfRows) {
+        double[][] reducedArray = new double[numberOfRows][];
+        System.arraycopy(array, startRow, reducedArray, 0, numberOfRows);
+        return reducedArray;
+    }
+
+    /**
+     * Reduces the size of an ArrayList to a specified number of rows.
+     *
+     * @param list         The original ArrayList.
+     * @param startRow     The starting row index.
+     * @param numberOfRows The number of rows to keep.
+     * @return The reduced ArrayList.
+     */
+    public static ArrayList reduceListSize(ArrayList list, int startRow, int numberOfRows) {
+        return new ArrayList(list.subList(startRow, startRow + numberOfRows -1));
+    }
+
+    /**
+     * Initializes an output file by deleting it if it already exists.
+     *
+     * @param filePath The file path of the output file.
+     */
+    public static void initializeOutputFile(String filePath) {
+        File outputFile = new File(filePath);
+        if (outputFile.exists()) {
+            outputFile.delete();
+        }
+    }
+
+    public static void writeObjectNodeToCsv(ObjectNode output, String filePath) {
+        writeObjectNodeToCsv(output, filePath, 0); // Default beginWriteStep = 0
+    }
+
+    /**
+     * Writes an ObjectNode to a file in CSV format, 
+     *
+     * @param output         The ObjectNode to write. Mainly for the fruit module
+     * @param filePath       The file path where the CSV should be written.
+     * @param beginWriteStep The step to begin writing (prevents writing empty values if they have not been initialized before a certain step)
+     */
+    public static void writeObjectNodeToCsv(ObjectNode output, String filePath, int beginWriteStep) {
+        try {
+            // Convert Jackson ObjectNode to CSV: https://www.baeldung.com/java-converting-json-to-csv
+            
+            ObjectMapper objectMapper = new ObjectMapper();
+
+            String jsonString = objectMapper.writeValueAsString(output);
+            JsonNode jsonNode = objectMapper.readTree(jsonString);
+
+            // Build schema with header from columns
+            Builder csvSchemaBuilder = CsvSchema.builder();
+
+            Iterator fieldNames = jsonNode.fieldNames();
+            while (fieldNames.hasNext()) {
+                String fieldName = fieldNames.next().toString();
+                csvSchemaBuilder.addColumn(fieldName);
+            }
+            CsvSchema csvSchema = csvSchemaBuilder.build().withHeader();
+            CsvMapper csvMapper = new CsvMapper();
+
+            // Write output as a CSV row
+            (new StepwiseCsvWriter(filePath, csvMapper))
+                .setSchema(csvSchema)
+                .deleteFileIf(step == beginWriteStep) // Delete existing file and write new data
+                .write(jsonNode);
+
+        } catch (IOException e) {
+            e.printStackTrace();
+            println(e);
+        }
+    }
+
+    /**
+     * Writes an ObjectNode to a file in JSON format, 
+     *
+     * @param output   The ObjectNode to write. Mainly for the fruit module
+     * @param filePath The file path where the JSON should be written.
+     */
+    public static void writeJsonToFile(ObjectNode output, String filePath) {
+        ObjectMapper objectMapper = new ObjectMapper();
+        FileWriter fileWriter = null;
+        try {
+            fileWriter = new FileWriter(filePath, true);
+            String jsonString = objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(output);
+            fileWriter.append("\n");
+            fileWriter.append(jsonString);
+        } catch (IOException e) {
+            e.printStackTrace();
+        } finally {
+            if (fileWriter != null) {
+                try {
+                    fileWriter.close();
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+            }
+        }
+    }
+
+    /**
+     * Insert an object with its fields and current step as a new entry in a JSON file. 
+     * If the step is 1 and the file exists, the existing file is deleted and a new one is created.
+     * 
+     * @param rb       The object to write in JSON format.
+     * @param filePath The path where the JSON file will be written.
+     */
+    public static void insertObjectToJsonFile(Object object, String filePath) {
+        ObjectMapper mapper = new ObjectMapper();
+        mapper.setVisibility(PropertyAccessor.ALL, Visibility.NONE);
+        mapper.setVisibility(PropertyAccessor.FIELD, Visibility.DEFAULT);
+        
+        File file = new File(filePath);
+        FileWriter fileWriter = null;
+        ObjectNode outputJson;
+        
+        if (!file.exists()) {
+			try {
+				file.createNewFile();
+			} catch (IOException e) {
+				e.printStackTrace();
+			}
+		} 
+			
+        try {
+            // If step == 1 and file exists, delete and create a new one
+            if (step == 1 && file.exists()) {
+                file.delete();
+                file.createNewFile();
+
+                // Write initial JSON structure
+                outputJson = mapper.createObjectNode();
+            } else {
+                // Read existing JSON object in file
+                JsonNode inputJson = mapper.readTree(new File(filePath));
+                //println("filePath: " + filePath);
+                if (!inputJson.isObject()) {
+                    throw new Exception("Cannot insert a new object to JSON that is not an object.");
+                }
+                outputJson = (ObjectNode) inputJson;
+            }
+            
+            JsonNode objectJson = mapper.valueToTree(object);
+            outputJson.set(step, objectJson);
+
+            fileWriter = new FileWriter(filePath);
+            fileWriter.write(outputJson.toPrettyString());
+        } catch (Exception e) {
+            e.printStackTrace();
+            println(e);
+        } finally {
+            // Explicit FileWriter handling as try-with-resources is not supported with GroIMP Java version
+            if (fileWriter != null) {
+                try {
+                    fileWriter.close();
+                } catch (IOException e) {
+                    e.printStackTrace();
+                    println(e);
+                }
+            }
+        }
+    }
+
+    /**
+     * Calculates the diameter of a sphere given its mass.
+     * calculateDiameter function takes mass in kilograms and returns the diameter in meters. 
+     * This is based on the assumption that the density used is that of water (approximately 1000 kg/m³) and
+     * that the fruit is approximated as a sphere.
+     * Radius and Diameter Calculation: The radius is calculated using the formula for the volume of a sphere, V = 4/3 πr³, which is rearranged to solve for the radius (r). The radius is then doubled to get the diameter. 
+     * The unit of the radius, and thus the diameter, is meters (m), 
+     * as the volume used in the calculation is in cubic meters (m³).
+     * @param mass The mass of the sphere.
+     * @return The calculated diameter in meter.
+     */
+    public static double calculateDiameter(double mass) {
+        // kg/m^3
+        double volume = mass / DENSITY_OF_WATER;
+        double radius = Math.cbrt(3.0 * volume / (4.0 * Math.PI));
+        return 2 * radius;
+    }
+
+// Step function for calculating maximum internode length.
+// Schmidt et al. 2019, Equation 4
+static float calcMaxInternodeLength(int rank) {
+	float a1 = 0.5562;
+	float b1 = 1.5727;
+	float a2 = 0.7212;
+	float b2 = 9.0909;
+	float maxLengthCm = 0;	// Maximum internode length in cm
+	if (rank <= 7) {
+		maxLengthCm = rank * a1 + b1;
+	} else {
+		maxLengthCm = ((rank + 1) % 3) * a2 + b2;
+	}
+	return maxLengthCm / 100;
+}
+
+/**calculate the volume of an cylinder*/
+static double calcVol(float length, float width)
+{
+	return(Math.PI * length * (width/2)**2);
+}
+
+
+
+/**
+ * Update growing degree days (ageGdd).
+ * Only accumulate when Ta > baseT, otherwise add nothing.
+ */
+static double deltaAgeGdd(double Ta, double baseT, double DT) {
+	double dGdd = 0.0;
+	if (Ta > baseT) {
+		dGdd = (Ta - baseT) * DT;   // degree-days increment
+	}
+	return dGdd;
+}
+
+/**
+ * Calculates the mean of soil water potential from an ArrayList of doubles.
+ *
+ * @param soilWaterPotentialArray ArrayList of soil water potential values.
+ * @return The mean value of soil water potential.
+ */
+public static double mean(ArrayList soilWaterPotentialArray) {
+    if (soilWaterPotentialArray == null || soilWaterPotentialArray.isEmpty()) {
+        return 0.0; // Return 0 if the array list is empty or null
+    }
+
+    double sum = 0.0;
+    for (Double value : soilWaterPotentialArray) {
+        sum += value;
+    }
+    
+    return sum / soilWaterPotentialArray.size();
+}
+
+// Method to load properties from a file path
+public static Properties loadPropertyFile(String filePath) {
+	Properties prop = new Properties();
+	try {
+		FileInputStream fis = new FileInputStream(filePath);
+		prop.load(fis);
+	} catch (IOException e) {
+		System.err.println("Failed to load properties file: " + e.getMessage()); 
+		return null;
+	}
+	return prop;
+}
+
+
+/**ideas on using array to reduce graph search. 
+maybe it is not neccessary as in general, ::> is quite fast */
+public static double sumBiomassFromArray(GrowingOrgan[] organArray) {
+    double sum = 0.0;
+
+    for (GrowingOrgan organ : organArray) {
+    	organ.calcAge();
+        sum += organ.biomass;  // Direct field access
+    }
+
+    return sum;
+}
+
+
+
+
+/**
+ * This class provides a function to modify specified properties within a properties file.
+ * The modifyProperties method takes the path to the properties file, an ID, an array of keys,
+ * and an array of corresponding values as input, then writes the modified properties to a new file.
+ */
+
+/**
+ * Modifies the specified properties in the given properties file and writes the changes
+ * to a new file named with the provided ID.
+ *
+ * @param FRUIT_PARAMS Path to the properties file
+ * @param ID          Identifier for the output file name
+ * @param keys        Keys to modify
+ * @param values      Corresponding values for the keys
+	 @example
+	 String FRUIT_PARAMS = "PATH_TO_YOUR_SCENARIOS" + "properties/GS_apple_sim.properties"; // Adjust the path
+	 /* int ID = 1234; // Example ID
+	 String[] keys = {"Growth.stot0", "Growth.w0"}; // Example keys
+	 String[] values = {"0.0106351314108216", "0.0329235058637275"}; // Corresponding values
+	 modifyProperties(FRUIT_PARAMS, ID, keys, values); 
+ */
+ 
+public static void modifyProperties(String input_params, String output_params, String[] keys, String[] values) {
+    if (keys.length != values.length) {
+        if (printFlag) { println("Keys and values arrays must have the same length."); }
+        return;
+    }
+
+    try {
+        // Load the properties file
+        FileInputStream inps = new FileInputStream(input_params);
+        Properties props = new Properties();
+        props.load(inps);
+        inps.close();
+
+        // Modify the values for the provided keys if the key exists
+        for (int i = 0; i < keys.length; i++) {
+            if (props.containsKey(keys[i])) {
+                props.setProperty(keys[i], values[i]);
+            } else {
+                if (printFlag) { println("Key " + keys[i] + " not found, skipping update."); }
+            }
+        }
+
+        // Save the modified properties to the new file
+        FileOutputStream out = new FileOutputStream(output_params);
+        props.store(out, "Updated properties");
+        out.close();
+
+        //if (printFlag) { println("Properties file updated successfully! New file: " + output_params); }
+    } catch (IOException e) {
+        if (printFlag) { println("An error occurred while updating the properties file: " + e.getMessage()); }
+    }
+}
+
+
+   /**
+     * Generates a sample from a normal distribution and adjusts it to fall within the 95% confidence interval.
+     * @param mean The mean value of the distribution.
+     * @param CV The coefficient of variation of the distribution.
+     * @return A sample value adjusted to be within the 95% confidence interval.
+     */
+    public static double generateSampleWithinCI(double mean, double CV) {
+        // Calculate standard deviation from CV
+        double stdDev = mean * CV;
+        
+        // Instantiate a normal distribution with the calculated standard deviation
+        NormalDistribution fruit_nor = new NormalDistribution(mean, stdDev);
+        
+        // Calculate the "95% CI" range
+        double lowerBound = mean - (1.96 * stdDev);
+        double upperBound = mean + (1.96 * stdDev);
+        
+        // Sample from the distribution
+        double sample = fruit_nor.sample();
+        
+        // Adjust the sampled value to be within the calculated range
+        double adjustedSample = Math.min(Math.max(sample, lowerBound), upperBound);
+        
+        return adjustedSample;
+    }
+
+   /**
+ * Checks if any of the specified variables are Not a Number (NaN) and optionally prints their values.
+ * <p>
+ * This method accepts pairs of arguments where the first argument in each pair
+ * is a String representing the variable's name, and the second argument is a Double
+ * representing the variable's value. It iterates over these pairs, checks each value for NaN,
+ * and conditionally prints the variable name along with its value based on the printFlag value.
+ * If NaN is found, it prints a specific message indicating which variable is NaN.
+ * </p>
+ * <p>
+ * The method uses a raw Map and LinkedHashMap to store the variable names and values. 
+ * This is done for compatibility with Java 1.5, which does not support generic types in collections.
+ * </p>
+ *
+ * @param printFlag       If true, prints the name and value of each variable, regardless of whether it is NaN.
+ *                        If false, only prints the name and value of variables that are NaN.
+ * @param nameValuePairs  An even number of arguments representing pairs of variable names and their values.
+ *                        Each variable name should be a String, and each variable value should be a Double.
+ *                        The number of arguments must be even, as they are processed in pairs.
+ * @return {@code true} if any of the values is NaN; {@code false} otherwise.
+ * @throws IllegalArgumentException if the number of arguments is odd, or if the arguments
+ *                                  are not in the correct format (i.e., if a variable name is not a String,
+ *                                  or a variable value is not a Double).
+ * @example checkForNaN("sugarConcentration_phloem", sugarConcentration_phloem, 
+            "km_pri", km_pri, 
+            "biomass", biomass, 
+            // ... continue with other variables
+           );
+ * @see java.util.Map
+ * @see java.util.LinkedHashMap
+ */
+public static boolean checkForNaN(boolean printFlag, Object... nameValuePairs) {
+    if (nameValuePairs.length % 2 != 0) {
+        throw new IllegalArgumentException("Arguments should be in pairs of name and value.");
+    }
+
+    Map variablesMap = new LinkedHashMap();
+    for (int i = 0; i < nameValuePairs.length; i += 2) {
+        if (!(nameValuePairs[i] instanceof String)) {
+            throw new IllegalArgumentException("Variable name (argument " + i + ") should be a string.");
+        }
+        if (!(nameValuePairs[i + 1] instanceof Double) && !(nameValuePairs[i + 1] instanceof Float)) {
+            throw new IllegalArgumentException("Variable value (argument " + (i + 1) + ") should be a double or float.");
+        }
+
+        double value = ((Number) nameValuePairs[i + 1]).doubleValue();
+        variablesMap.put(nameValuePairs[i], value);
+    }
+
+    boolean nanFound = false;
+    boolean needToPrint = printFlag;
+    for (Iterator it = variablesMap.entrySet().iterator(); it.hasNext();) {
+        Map.Entry entry = (Map.Entry) it.next();
+        double variableValue = (Double) entry.getValue();
+        if (Double.isNaN(variableValue)) {
+            nanFound = true;
+            needToPrint = true;
+            break;
+        }
+    }
+
+    if (needToPrint) {
+        for (Iterator it = variablesMap.entrySet().iterator(); it.hasNext();) {
+            Map.Entry entry = (Map.Entry) it.next();
+            String variableName = (String) entry.getKey();
+            double variableValue = (Double) entry.getValue();
+            if (printFlag) { println(variableName + ": " + String.format("%.5f",variableValue)); }
+
+			if(Double.isNaN(variableValue)) {
+				if (printFlag) { println("NaN found in " + variableName); }
+			} 
+	
+		}
+    }
+    return nanFound;
+}
+
+
+
+
+/********************************************************************  ****  
+several events are orchestrated to load configuration data for a system. 
+Here's a description of how different events unfold:
+
+1. **Initialization of `ConfigLoader`:**
+   - An instance of `ConfigLoader` is created with a specific `LoadCommand` implementation.
+   This command encapsulates the logic needed to load properties from a given file name.
+
+2. **Loading Configuration Files:**
+   - The `load` methods in the `ConfigLoader` class are responsible for reading configuration
+   files and triggering the loading of properties.
+   - If the file path is provided without a group name, the file path is used as the default 
+   group name for the configuration.
+   - The configuration file is read, and its contents are added as a new group to the 
+	 Config Module (`CONFIG`). This process involves parsing the JSON file and ensuring it exists
+	 at the provided file path.
+
+3. **Executing Load Commands:**
+   - After successfully reading the file and creating a configuration group,
+   the `loadProperties` command is executed.
+   - This command uses the group name as an argument and loads the parsed properties into the Config Module.
+   - Any exceptions during this process are caught and their 
+   stack traces are printed to the console. An error flag is returned to indicate failure.
+
+4. **Component Parameter Loading:**
+   - A separate method, `loadLocalParameters`, is called after initializing the
+   `ConfigLoader`. This method delegates the task of loading the parameters specific to each component
+	 in the system, such as `Fruit`, `PhotosynthesisAndTranspiration`, `RootSystem`, `Soil`, and `Leaf`.
+   - Components implement the `Configurable` interface to retrieve parameters unique to them that should be 
+	 loaded on their initialization.
+
+5. **Error Handling:**
+   - Throughout the loading process, error handling is a crucial part of the workflow. 
+   If any step fails, such as a file not being found or a runtime exception occurring,
+   an error flag is set, and the error details are logged.
+   - The system can then respond to these errors appropriately, 
+   possibly by aborting the initialization process or by providing feedback to the
+   user for corrective action.
+
+The sequence of these events ensures that the system is configurable and that 
+its components can load and update their parameters based on external configuration files. 
+This setup facilitates flexibility and extensibility in the system's behavior.
+***********************************************************************/
+
+/**
+ * The LoadCommand interface extends the Command pattern specific to actions that
+ * require a file name as an argument for execution.
+ */
+public interface LoadCommand {
+	void execute(String file_name);
+}
+
+/**
+ * The ConfigLoader class is responsible for coordinating the loading of configuration
+ * files and executing the associated commands to apply these configurations.
+ */
+public class ConfigLoader {
+    /**
+     * The prefix substring of the key for each layer in DocumentHybridCategoryName tables.
+     * TODO: consider removing this when table access is more defined
+     */
+    public static final String TABLE_ROW_PREFIX = "layer_";
+    
+	private LoadCommand loadProperties;
+
+	/**
+	 * Constructor for ConfigLoader that initializes with a specific LoadCommand.
+	 *
+	 * @param loadProperties the LoadCommand that will be executed to load properties
+	 */
+	public ConfigLoader(LoadCommand loadProperties) {
+		this.loadProperties = loadProperties;
+	}	
+
+    /**
+     * @param index the index of the layer/row
+     * @return the name of the table layer depending on the given index
+     */
+    public static String getTableLayerName(int index) {
+        return ConfigLoader.TABLE_ROW_PREFIX + (index + 1); // Layers in the soil parameter file count from 1
+    }
+
+	/**
+	 * Loads the configuration file and uses its path as the name for the configuration group.
+	 * 
+	 * @param file_path the path to the configuration file
+	 * @return true if an error occurs during loading, false otherwise
+	 */
+	public boolean load(String file_path) {
+		return this.load(file_path, file_path);
+	}
+
+	/**
+	 * Loads the configuration file into a specified configuration group.
+	 *
+	 * @param groupName the name of the configuration group
+	 * @param file_path the path to the configuration file
+	 * @return true if an error occurs during loading, false otherwise
+	 * method signatures for getDoubleArray in the configure module
+	 * public double[] getDoubleArray(String key, double[] defaultValue) - returns defaultValue if not found
+	 * Default to empty array if not provided in phenology file.
+	 * Example usage: BUDBURST_CANE_DIFF = CONFIG.getDoubleArray("BUDBURST_CANE_DIFF", new double[0]); 
+	 */
+	public boolean load(String groupName, String file_path) {
+		try {
+			// Attempts to read the JSON configuration file and add it as a new group.
+			CONFIG.addGroup(groupName, new JsonFileReader(file_path));
+		} catch (FileNotFoundException e) {
+			if (printFlag) { println(e); }
+			return true;  // Indicate an error occurred
+		}
+		
+		// Executes the loadProperties command with the newly added group name.
+		try {
+			this.loadProperties.execute(groupName);
+		} catch (RuntimeException e) {
+			// Catch and print any runtime exceptions during execution
+			StringWriter sw = new StringWriter();
+			PrintWriter pw = new PrintWriter(sw);
+			e.printStackTrace(pw);
+			println(sw.toString());  // Print the stack trace to the console
+			
+			return true;  // Indicate an error occurred
+		}
+		return false;  // No errors, indicate successful loading
+	}
+}
+/**
+ * Returns true if a string is considered null, invalid, or empty.
+ */
+public static boolean isStringNull(String s) {
+    // List of strings considered null or invalid
+    String[] NULL_STRINGS = { "null", "na", "none", "undefined", "n/a", "-", "" };
+
+    // Check if the string is null
+    if (s == null || s.equals("null")) {
+        return true;
+    }
+
+    // Trim and normalize the string
+    s = s.trim().toLowerCase(); // Remove whitespace and normalize to lowercase
+
+    // Check if the string matches any null-like strings
+    for (String nullString : NULL_STRINGS) {
+        if (s.equals(nullString)) {
+            return true;
+        }
+    }
+
+    return false; // The string is valid
+}
+
+/**
+ * Recursively delete a file or directory (Java 1.5 compatible).
+ *
+ * @param f file or directory to delete
+ */
+static void deleteRecursively(File f) {
+    if (f == null || !f.exists()) return;
+    if (f.isDirectory()) {
+        File[] children = f.listFiles();
+        if (children != null) {
+            for (int i = 0; i < children.length; i++) {
+                deleteRecursively(children[i]);
+            }
+        }
+    }
+    f.delete();
+}
+
+
+/**
+ * Creates a directory if it does not exist.
+ * If it exists, removes all contents (files and subdirectories).
+ */
+public static void createOrClearDirectory(String path) {
+    File directory = new File(path);
+
+    if (directory.exists()) {
+        clearDirectory(directory);
+    } else {
+        directory.mkdirs();
+    }
+}
+
+/**
+ * Remove all contents of a directory but keep the directory itself.
+ *
+ * @param dir the directory to clear
+ */
+public static void clearDirectory(File dir) {
+    if (dir == null || !dir.exists() || !dir.isDirectory()) return;
+
+    File[] files = dir.listFiles();
+    if (files != null) {
+        for (int i = 0; i < files.length; i++) {
+            deleteRecursively(files[i]); // reuse your existing method
+        }
+    }
+}
+
+
+/**
+ * Get the timestamp for the given year, dayOfYear and hourOfDay in ISO date-time format.
+ */
+public static String getTimestamp(int year, int dayOfYear, int hourOfDay) {
+    final int FIXED_MINUTE = 30; // The model steps through outputting the hour average, so set minute to 30
+
+    // Convert dayOfYear to date (month and day)
+    Year y = Year.of(year);
+    LocalDateTime ld = y.atDay(dayOfYear).atTime(hourOfDay, FIXED_MINUTE);
+
+    return DateTimeFormatter.ISO_LOCAL_DATE_TIME.format(ld);
+}
+
+
+/**
+ * Handles the application of shading factors in light interception.
+ *
+ * <p>A clamping shading factor is introduced to accelerate simulations.
+ * When {@code useShadingFactor = true}, a canopy-level shading factor is
+ * applied to single-tree cases in validation tests, effectively scaling light
+ * interception by a predefined factor. If no shading factor file is provided,
+ * the default factor is set to {@code 1.0}, corresponding to an isolated tree
+ * without additional shading. When {@code useShadingFactor = false},
+ * simulations can instead rely on explicit grid clones to represent
+ * inter-tree shading.</p>
+ */
+ 
+/**
+ * Shading factor lookup table for fPARlow/mid/up.
+ * CSV expected columns (order-insensitive beyond the first 6 tokens):
+ *   year, day, hour, fPARlow, fPARmid, fPARup, [optional extra columns...]
+ * Returns shading factors for a given target key. If the key is found, returns its values.
+ * If the key is missing, computes the mean shading factor for the corresponding hour.
+ *
+ * @param keys    sorted array of integer keys (e.g. day-hour index)
+ * @param vals    array of shading factor values corresponding to keys
+ * @param target  the target key to retrieve
+ * @return        a double[3] array containing [fPARlow, fPARmid, fPARup]
+ * Rules:
+ *  - Blank or NaN values -> 1.0, I set this to 1 because if no shading factor is given, 
+ * then i can use the value of the single plant simulation
+ *  - Exact (year, DOY, hour) match returned if present
+ *  - Otherwise returns the nearest entry in time (absolute hour distance)
+ *  - Timestamp column, if present, is ignored (extra columns are ignored)
+ * // 1) Load once at startup (e.g., after you set organSize_file etc.)
+ *	ShadingFactorTable SFT = new ShadingFactorTable();
+ *	SFT.load("/path/to/shading_factor_ANTONY_2010.csv"); // your uploaded file
+	
+ *	// 2) When you need values:
+ *	double[] fpar = SFT.getFpar(year, doy, hour);
+ *	// or individually:
+ *	double fLow = SFT.getFparLow(year, doy, hour);
+ *	double fMid = SFT.getFparMid(year, doy, hour);
+ * 	double fUp  = SFT.getFparUp (year, doy, hour);
+ */
+public class ShadingFactorTable implements Serializable {
+
+    private static final int IDX_FPAR_LOW = 0;
+    private static final int IDX_FPAR_MID = 1;
+    private static final int IDX_FPAR_UP = 2;
+    private static final int IDX_FABS_SOIL = 3;
+    private static final int IDX_FPAR_SOIL = 4;
+    private static final int IDX_FABS_FAR_RED = 5;
+    private static final int VALUE_COUNT = 6;
+
+    private int[] keys = new int[0];
+    private double[][] vals = new double[0][];
+    private boolean loaded = false;
+
+    private double[][][] sumDOYHour = new double[367][24][VALUE_COUNT];
+    private int[][] cntDOYHour      = new int[367][24];
+    private double[][] sumDOY       = new double[367][VALUE_COUNT];
+    private int[] cntDOY            = new int[367];
+    private double[][] sumHour      = new double[24][VALUE_COUNT];
+    private int[] cntHour           = new int[24];
+
+    public void load(String csvPath) throws IOException {
+        ArrayList keyList = new ArrayList();
+        ArrayList valList = new ArrayList();
+        int debugRowsPrinted = 0;
+
+        keys = new int[0];
+        vals = new double[0][];
+        loaded = false;
+        sumDOYHour = new double[367][24][VALUE_COUNT];
+        cntDOYHour = new int[367][24];
+        sumDOY = new double[367][VALUE_COUNT];
+        cntDOY = new int[367];
+        sumHour = new double[24][VALUE_COUNT];
+        cntHour = new int[24];
+
+        BufferedReader br = null;
+        Map headerMap = null;
+        try {
+            br = new BufferedReader(new InputStreamReader(new FileInputStream(csvPath), "UTF-8"));
+            String line;
+            boolean first = true;
+            while ((line = br.readLine()) != null) {
+                if (line == null) continue;
+                line = line.trim();
+                if (line.length() == 0) continue;
+                if (first && line.length() > 0 && line.charAt(0) == '﻿') line = line.substring(1);
+                first = false;
+
+                String[] t = splitCSV(line);
+                if (t.length < 3) continue;
+
+                if (headerMap == null && !isInt(t[0])) {
+                    headerMap = buildHeaderMap(t);
+                    continue;
+                }
+
+                Integer yearObj = null;
+                Integer doyObj = null;
+                Integer hourObj = null;
+                if (headerMap != null) {
+                    yearObj = parseIndexedInt(t, headerMap, new String[] {"year"});
+                    doyObj = parseIndexedInt(t, headerMap, new String[] {"day", "doy", "dayofyear"});
+                    hourObj = parseIndexedInt(t, headerMap, new String[] {"hour", "hr"});
+                }
+                if (yearObj == null || doyObj == null || hourObj == null) {
+                    if (t.length < 6) continue;
+                    yearObj = Integer.valueOf(parseIntSafe(t[0]));
+                    doyObj = Integer.valueOf(parseIntSafe(t[1]));
+                    hourObj = Integer.valueOf(parseIntSafe(t[2]));
+                }
+
+                int year = yearObj.intValue();
+                int doy  = clamp(doyObj.intValue(), 1, 366);
+                int hour = clamp(hourObj.intValue(), 0, 23);
+                if (year == 0) continue;
+
+                double[] row = parseRowValues(t, headerMap);
+                int k = serializeHour(year, doy, hour);
+                if (printFlag && debugRowsPrinted < 3) {
+                    println(formatDebugRow("[SFT] parsed", year, doy, hour, row));
+                    debugRowsPrinted++;
+                }
+
+                keyList.add(Integer.valueOf(k));
+                valList.add(row);
+
+                for (int i = 0; i < VALUE_COUNT; i++) {
+                    sumDOYHour[doy][hour][i] += row[i];
+                    sumDOY[doy][i] += row[i];
+                    sumHour[hour][i] += row[i];
+                }
+                cntDOYHour[doy][hour]++;
+                cntDOY[doy]++;
+                cntHour[hour]++;
+            }
+        } finally {
+            if (br != null) try { br.close(); } catch (Exception e) {}
+        }
+
+        int n = keyList.size();
+        int[] kArr = new int[n];
+        double[][] vArr = new double[n][];
+        for (int i = 0; i < n; i++) {
+            kArr[i] = ((Integer) keyList.get(i)).intValue();
+            vArr[i] = (double[]) valList.get(i);
+        }
+
+        for (int i = 1; i < n; i++) {
+            int mk = kArr[i]; double[] mv = vArr[i];
+            int j = i - 1;
+            while (j >= 0 && kArr[j] > mk) { kArr[j+1] = kArr[j]; vArr[j+1] = vArr[j]; j--; }
+            kArr[j+1] = mk; vArr[j+1] = mv;
+        }
+
+        this.keys = kArr;
+        this.vals = vArr;
+        this.loaded = true;
+        if (printFlag) {
+            println("[SFT] loaded " + n + " rows from " + csvPath);
+            if (n > 0) {
+                int[] firstKey = deserializeHour(kArr[0]);
+                int[] lastKey = deserializeHour(kArr[n - 1]);
+                println(formatDebugRow("[SFT] first", firstKey[0], firstKey[1], firstKey[2], vArr[0]));
+                println(formatDebugRow("[SFT] last", lastKey[0], lastKey[1], lastKey[2], vArr[n - 1]));
+            }
+        }
+    }
+
+    public double[] getFpar(int year, int doy, int hour) {
+        double[] row = getValues(year, doy, hour);
+        return new double[] { row[IDX_FPAR_LOW], row[IDX_FPAR_MID], row[IDX_FPAR_UP] };
+    }
+
+    public double getFparLow(int y,int d,int h){ return getFpar(y,d,h)[0]; }
+    public double getFparMid(int y,int d,int h){ return getFpar(y,d,h)[1]; }
+    public double getFparUp(int y,int d,int h) { return getFpar(y,d,h)[2]; }
+
+    public double getFabsSoilRatio(int y, int d, int h) { return getValues(y, d, h)[IDX_FABS_SOIL]; }
+    public double getFparSoilRatio(int y, int d, int h) { return getValues(y, d, h)[IDX_FPAR_SOIL]; }
+    public double getFabsFarRedCorrection(int y, int d, int h) { return getValues(y, d, h)[IDX_FABS_FAR_RED]; }
+
+    public double getFabsLowRatio(int y, int d, int h) { return getValues(y, d, h)[IDX_FPAR_LOW]; }
+    public double getFabsMidRatio(int y, int d, int h) { return getValues(y, d, h)[IDX_FPAR_MID]; }
+    public double getFabsUpRatio(int y, int d, int h) { return getValues(y, d, h)[IDX_FPAR_UP]; }
+
+    private double[] getValues(int year, int doy, int hour) {
+        if (!loaded || keys.length == 0) return defaultValues();
+        int cdoy  = clamp(doy, 1, 366);
+        int chour = clamp(hour, 0, 23);
+
+        int target = serializeHour(year, cdoy, chour);
+        int idx = Arrays.binarySearch(keys, target);
+        if (idx >= 0) return copyValues(vals[idx]);
+
+        int c = cntDOYHour[cdoy][chour];
+        if (c > 0) return meanValues(sumDOYHour[cdoy][chour], c);
+
+        int cd = cntDOY[cdoy];
+        if (cd > 0) return meanValues(sumDOY[cdoy], cd);
+
+        int ch = cntHour[chour];
+        if (ch > 0) return meanValues(sumHour[chour], ch);
+
+        return defaultValues();
+    }
+
+    private double[] parseRowValues(String[] t, Map headerMap) {
+        double[] row = defaultValues();
+        if (headerMap != null) {
+            row[IDX_FPAR_LOW] = parseIndexedRatio(t, headerMap, new String[] {"fparlowratio", "fparlow"}, -1, row[IDX_FPAR_LOW]);
+            row[IDX_FPAR_MID] = parseIndexedRatio(t, headerMap, new String[] {"fparmidratio", "fparmid"}, -1, row[IDX_FPAR_MID]);
+            row[IDX_FPAR_UP] = parseIndexedRatio(t, headerMap, new String[] {"fparupratio", "fparup"}, -1, row[IDX_FPAR_UP]);
+            row[IDX_FABS_SOIL] = parseIndexedRatio(t, headerMap, new String[] {"fabssoilratio", "fabssoil"}, -1, row[IDX_FABS_SOIL]);
+            row[IDX_FPAR_SOIL] = parseIndexedRatio(t, headerMap, new String[] {"fparsoilratio", "fparsoil"}, -1, row[IDX_FPAR_SOIL]);
+            row[IDX_FABS_FAR_RED] = parseIndexedRatio(t, headerMap, new String[] {"fabsfarredcorrection", "fabsfarred"}, -1, row[IDX_FABS_FAR_RED]);
+            return row;
+        }
+
+        if (t.length >= 11) {
+            row[IDX_FPAR_LOW] = parseRatioOrOne(indexOrNull(t, 5));
+            row[IDX_FPAR_MID] = parseRatioOrOne(indexOrNull(t, 6));
+            row[IDX_FPAR_UP] = parseRatioOrOne(indexOrNull(t, 7));
+            row[IDX_FABS_SOIL] = parseRatioOrOne(indexOrNull(t, 8));
+            row[IDX_FPAR_SOIL] = parseRatioOrOne(indexOrNull(t, 9));
+            row[IDX_FABS_FAR_RED] = parseRatioOrOne(indexOrNull(t, 10));
+        } else if (t.length >= 9) {
+            row[IDX_FPAR_LOW] = parseRatioOrOne(indexOrNull(t, 3));
+            row[IDX_FPAR_MID] = parseRatioOrOne(indexOrNull(t, 4));
+            row[IDX_FPAR_UP] = parseRatioOrOne(indexOrNull(t, 5));
+            row[IDX_FABS_SOIL] = parseRatioOrOne(indexOrNull(t, 6));
+            row[IDX_FPAR_SOIL] = parseRatioOrOne(indexOrNull(t, 7));
+            row[IDX_FABS_FAR_RED] = parseRatioOrOne(indexOrNull(t, 8));
+        } else if (t.length >= 6) {
+            row[IDX_FPAR_LOW] = parseRatioOrOne(indexOrNull(t, 3));
+            row[IDX_FPAR_MID] = parseRatioOrOne(indexOrNull(t, 4));
+            row[IDX_FPAR_UP] = parseRatioOrOne(indexOrNull(t, 5));
+        }
+        return row;
+    }
+
+    private static Map buildHeaderMap(String[] headerTokens) {
+        Map headerMap = new LinkedHashMap();
+        for (int i = 0; i < headerTokens.length; i++) {
+            String key = normalizeHeader(headerTokens[i]);
+            if (key.length() > 0) headerMap.put(key, Integer.valueOf(i));
+        }
+        return headerMap;
+    }
+
+    private static Integer parseIndexedInt(String[] tokens, Map headerMap, String[] keys) {
+        Integer idx = findHeaderIndex(headerMap, keys);
+        if (idx == null) return null;
+        if (idx.intValue() < 0 || idx.intValue() >= tokens.length) return null;
+        String v = tokens[idx.intValue()];
+        if (!isInt(v)) return null;
+        return Integer.valueOf(parseIntSafe(v));
+    }
+
+    private static double parseIndexedRatio(String[] tokens, Map headerMap, String[] keys, int fallbackPos, double defaultValue) {
+        Integer idx = findHeaderIndex(headerMap, keys);
+        if (idx != null && idx.intValue() >= 0 && idx.intValue() < tokens.length) {
+            return parseRatioOrOne(tokens[idx.intValue()]);
+        }
+        if (fallbackPos >= 0 && fallbackPos < tokens.length) {
+            return parseRatioOrOne(tokens[fallbackPos]);
+        }
+        return defaultValue;
+    }
+
+    private static Integer findHeaderIndex(Map headerMap, String[] keys) {
+        if (headerMap == null || keys == null) return null;
+        for (int i = 0; i < keys.length; i++) {
+            Integer idx = (Integer) headerMap.get(normalizeHeader(keys[i]));
+            if (idx != null) return idx;
+        }
+        return null;
+    }
+
+    private static String indexOrNull(String[] tokens, int idx) {
+        if (idx < 0 || idx >= tokens.length) return null;
+        return tokens[idx];
+    }
+
+    private static String normalizeHeader(String s) {
+        if (s == null) return "";
+        return s.trim().toLowerCase().replace(" ", "").replace("_", "").replace("-", "");
+    }
+
+    private static String[] splitCSV(String line){ String[] r=line.split(",",-1); for(int i=0;i<r.length;i++) r[i]=r[i].trim(); return r; }
+    private static boolean isInt(String s){ try{ Integer.parseInt(s.trim()); return true; } catch(Exception e){ return false; } }
+    private static int parseIntSafe(String s){ try{ return Integer.parseInt(s.trim()); } catch(Exception e){ return 0; } }
+    private static int clamp(int v,int lo,int hi){ return v<lo?lo:(v>hi?hi:v); }
+    private static double parseRatioOrOne(String s){
+        if (s == null) return 1.0;
+        String t = s.trim(); if (t.length()==0) return 1.0;
+        if ("na".equalsIgnoreCase(t) || "nan".equalsIgnoreCase(t) || "null".equalsIgnoreCase(t)) return 1.0;
+        try {
+            Double d = Double.valueOf(t);
+            double v = d.doubleValue();
+            if (Double.isNaN(v) || Double.isInfinite(v)) return 1.0;
+            return v;
+        } catch(Exception e){ return 1.0; }
+    }
+    private static double[] copyValues(double[] src){
+        double[] out = new double[VALUE_COUNT];
+        for (int i = 0; i < VALUE_COUNT; i++) out[i] = src[i];
+        return out;
+    }
+    private static double[] meanValues(double[] sum, int count) {
+        double[] out = new double[VALUE_COUNT];
+        if (count <= 0) return defaultValues();
+        for (int i = 0; i < VALUE_COUNT; i++) out[i] = sum[i] / count;
+        return out;
+    }
+    private static double[] defaultValues(){
+        return new double[] {1.0,1.0,1.0,1.0,1.0,1.0};
+    }
+
+    private static int serializeHour(int year, int doy, int hour){
+        Calendar c = Calendar.getInstance(TimeZone.getTimeZone("UTC"));
+        c.clear();
+        c.set(Calendar.YEAR, year);
+        c.set(Calendar.DAY_OF_YEAR, doy);
+        c.set(Calendar.HOUR_OF_DAY, hour);
+        long ms = c.getTimeInMillis();
+        return (int)(ms / 3600000L);
+    }
+
+    private static int[] deserializeHour(int serialHour) {
+        Calendar c = Calendar.getInstance(TimeZone.getTimeZone("UTC"));
+        c.setTimeInMillis(((long) serialHour) * 3600000L);
+        return new int[] {
+            c.get(Calendar.YEAR),
+            c.get(Calendar.DAY_OF_YEAR),
+            c.get(Calendar.HOUR_OF_DAY)
+        };
+    }
+
+    public static String formatDebugRow(String prefix, int year, int doy, int hour, double[] row) {
+        return prefix
+            + " year=" + year
+            + " day=" + doy
+            + " hour=" + hour
+            + " fPARLow=" + row[IDX_FPAR_LOW]
+            + " fPARMid=" + row[IDX_FPAR_MID]
+            + " fPARUp=" + row[IDX_FPAR_UP]
+            + " fabsSoil=" + row[IDX_FABS_SOIL]
+            + " fparSoil=" + row[IDX_FPAR_SOIL]
+            + " fabsFarRed_correction=" + row[IDX_FABS_FAR_RED];
+    }
+}
+
+
+/**
+ * Convenience accessor that returns {fLow,fMid,fUp} or {1,1,1} when SFT is disabled/not loaded.
+ * Java 1.5-compatible; no generics or Optional.
+ */
+static double[] getFparOrOne(int year, int doy, int hour) {
+    if (useShadingFactor && SFT != null) {
+        return SFT.getFpar(year, doy, hour);
+    }
+    return new double[] {1.0, 1.0, 1.0};
+}
+
+/**
+ * Returns the low-canopy shading ratio or 1.0 when shading factors are disabled.
+ */
+static double getFabsLowRatioOrOne(int year, int doy, int hour) {
+    if (useShadingFactor && SFT != null) {
+        return SFT.getFabsLowRatio(year, doy, hour);
+    }
+    return 1.0;
+}
+
+/**
+ * Returns the mid-canopy shading ratio or 1.0 when shading factors are disabled.
+ */
+static double getFabsMidRatioOrOne(int year, int doy, int hour) {
+    if (useShadingFactor && SFT != null) {
+        return SFT.getFabsMidRatio(year, doy, hour);
+    }
+    return 1.0;
+}
+
+/**
+ * Returns the upper-canopy shading ratio or 1.0 when shading factors are disabled.
+ */
+static double getFabsUpRatioOrOne(int year, int doy, int hour) {
+    if (useShadingFactor && SFT != null) {
+        return SFT.getFabsUpRatio(year, doy, hour);
+    }
+    return 1.0;
+}
+
+/**
+ * Returns the soil absorbed-radiation ratio or 1.0 when shading factors are disabled or unspecified.
+ */
+static double getFabsSoilRatioOrOne(int year, int doy, int hour) {
+    if (useShadingFactor && SFT != null) {
+        return SFT.getFabsSoilRatio(year, doy, hour);
+    }
+    return 1.0;
+}
+
+/**
+ * Returns the soil fPAR ratio or 1.0 when shading factors are disabled or unspecified.
+ */
+static double getFparSoilRatioOrOne(int year, int doy, int hour) {
+    if (useShadingFactor && SFT != null) {
+        return SFT.getFparSoilRatio(year, doy, hour);
+    }
+    return 1.0;
+}
+
+/**
+ * Returns the far-red correction ratio or 1.0 when shading factors are disabled or unspecified.
+ */
+static double getFabsFarRedCorrectionOrOne(int year, int doy, int hour) {
+    if (useShadingFactor && SFT != null) {
+        return SFT.getFabsFarRedCorrection(year, doy, hour);
+    }
+    return 1.0;
+}
+
+/**
+ * Formats the active shading-factor values for step-level debug output.
+ */
+static String formatActiveShadingFactorDebugRow(String prefix, int year, int doy, int hour) {
+    return prefix
+        + " year=" + year
+        + " day=" + doy
+        + " hour=" + hour
+        + " fPARLow=" + getFabsLowRatioOrOne(year, doy, hour)
+        + " fPARMid=" + getFabsMidRatioOrOne(year, doy, hour)
+        + " fPARUp=" + getFabsUpRatioOrOne(year, doy, hour)
+        + " fabsSoil=" + getFabsSoilRatioOrOne(year, doy, hour)
+        + " fparSoil=" + getFparSoilRatioOrOne(year, doy, hour)
+        + " fabsFarRed_correction=" + getFabsFarRedCorrectionOrOne(year, doy, hour);
+}
+
+// Clamp to [0,1] and sanitize NaN
+static double clamp01(double x) {
+    if (x != x) return 0.0; // NaN
+    if (x < 0.0) return 0.0;
+    if (x > 1.0) return 1.0;
+    return x;
+}
+
+// Java 1.5-friendly helpers (no generics / Optional)
+ static Integer parseIntOrNull(String s) {
+    if (s == null) return null;
+    s = s.trim();
+    if (s.length() == 0) return null;
+    if ("null".equalsIgnoreCase(s)) return null;
+    try {
+        return Integer.valueOf(s); // 1.5 ok
+    } catch (NumberFormatException e) {
+        return null;
+    }
+}
+
+
+
+
+// ================== aligned debug print helpers ==================
+static String fmtLine(String label, double value, String unit, int precision) {
+    final int LABEL_W = 22;
+    final int NUM_W = 11;
+    String safeLabel = (label == null) ? "" : label;
+    String safeUnit = (unit == null || unit.length() == 0) ? "-" : unit;
+    int p = (precision < 0) ? 0 : precision;
+    String fmt = "%-" + LABEL_W + "s : %" + NUM_W + "." + p + "f %s";
+    return String.format(fmt, safeLabel, Double.valueOf(value), safeUnit);
+}
+
+static String fmtLine(String label, String valueStr, String unit) {
+    final int LABEL_W = 22;
+    String safeLabel = (label == null) ? "" : label;
+    String safeValue = (valueStr == null) ? "" : valueStr;
+    String safeUnit = (unit == null) ? "" : unit;
+    if (safeUnit.length() == 0) {
+        return String.format("%-" + LABEL_W + "s : %s", safeLabel, safeValue);
+    }
+    return String.format("%-" + LABEL_W + "s : %s %s", safeLabel, safeValue, safeUnit);
+}
+
+static String fmtLine(String label, String valueStr) {
+    return fmtLine(label, valueStr, "");
+}
+
+static String fmtSection(String title) {
+    String safeTitle = (title == null) ? "" : title;
+    return "\n--- " + safeTitle + " ---";
+}
+
+static String fmtStepHeader(int step) {
+    return String.format("\n==== Step: %d ====", Integer.valueOf(step));
+}
+// ================== end aligned debug print helpers ==================
+
+
+// ================== put near your globals ==================
+global java.util.Map warnOnceFlags = new java.util.HashMap();  // raw types for Java 1.5
+
+static void warnOnce(String key, String msg) {
+    try {
+        Object seen = warnOnceFlags.get(key);
+        if (!(seen instanceof java.lang.Boolean) || !((java.lang.Boolean) seen).booleanValue()) {
+            println(msg);
+            warnOnceFlags.put(key, java.lang.Boolean.TRUE);
+        }
+    } catch (Throwable t) {
+        // swallow; never let warning infra break the sim
+    }
+}
+
+static void clearWarn(String key) {
+    try { warnOnceFlags.remove(key); } catch (Throwable t) { }
+}
+
+// Safe getters: never throw, never cast without instanceof
+static PlantBase safeGetPlantBase(long id) {
+    try {
+        Object n = graph().getNodeForId(id);
+        if (n instanceof PlantBase) {
+            clearWarn("pb_missing");
+            return (PlantBase) n;
+        } else if (n != null) {
+            warnOnce("pb_missing", "⚠️ PlantBase id doesn't point to PlantBase (suppressing repeats).");
+        } else {
+            warnOnce("pb_missing", "⚠️ PlantBase not available yet (suppressing repeats).");
+        }
+    } catch (Throwable t) {
+        warnOnce("pb_missing", "⚠️ PlantBase not available yet (suppressing repeats).");
+    }
+    return null;
+}
+
+static RootBase safeGetRootBase(long id) {
+    try {
+        Object n = graph().getNodeForId(id);
+        if (n instanceof RootBase) {
+            clearWarn("rb_missing");
+            return (RootBase) n;
+        } else if (n != null) {
+            warnOnce("rb_missing", "⚠️ RootBase id doesn't point to RootBase (suppressing repeats).");
+        } else {
+            warnOnce("rb_missing", "⚠️ RootBase not available yet (suppressing repeats).");
+        }
+    } catch (Throwable t) {
+        warnOnce("rb_missing", "⚠️ RootBase not available yet (suppressing repeats).");
+    }
+    return null;
+}
+
+static Trunk safeGetTrunk(long id) {
+    try {
+        Object n = graph().getNodeForId(id);
+        if (n instanceof Trunk) {
+            clearWarn("trunk_missing");
+            return (Trunk) n;
+        } else if (n != null) {
+            warnOnce("trunk_missing", "⚠️ Trunk id doesn't point to Trunk (suppressing repeats).");
+        } else {
+            warnOnce("trunk_missing", "⚠️ Trunk not available yet (suppressing repeats).");
+        }
+    } catch (Throwable t) {
+        warnOnce("trunk_missing", "⚠️ Trunk not available yet (suppressing repeats).");
+    }
+    return null;
+}
+
+static FieldBase safeGetFieldBase(long id) {
+    try {
+        Object n = graph().getNodeForId(id);
+        if (n instanceof FieldBase) {
+            clearWarn("fb_missing");
+            return (FieldBase) n;
+        } else if (n != null) {
+            warnOnce("fb_missing", "⚠️ FieldBase id doesn't point to FieldBase (suppressing repeats).");
+        } else {
+            warnOnce("fb_missing", "⚠️ FieldBase not available yet (suppressing repeats).");
+        }
+    } catch (Throwable t) {
+        warnOnce("fb_missing", "⚠️ FieldBase not available yet (suppressing repeats).");
+    }
+    return null;
+}
+
+
+/** Write one sampled, read-only leaf-expansion diagnostic row. */
+static void writeLeafExpansionDiagnostic(Leaf lf) {
+    if (lf == null || !outputLeafGrowthDiagnostics) {
+        return;
+    }
+
+    // Compatibility guard: old model-option files may omit the sampling key.
+    int sampleEvery = 24;
+    try {
+        sampleEvery = debugLeafExpansionSampleEvery;
+    } catch (RuntimeException e) {
+        sampleEvery = 24;
+    }
+    if (sampleEvery <= 0) {
+        sampleEvery = 1;
+    }
+    if ((step % sampleEvery) != 0) {
+        return;
+    }
+
+    LeafExpansionDiagnosticOutputData row =
+        new LeafExpansionDiagnosticOutputData();
+    row.timestamp = timestamp;
+    row.step = step;
+    row.year = year;
+    row.dayOfYear = dayOfYear;
+    row.hourOfDay = hourOfDay;
+    row.scenario = scenario;
+    row.simuuid = simUUID;
+    row.plantNumber = lf.plantNumber;
+    row.fieldInstanceId = lf.fieldInstanceId;
+    row.cordonNumber = lf.cordonNumber;
+    row.nodeNumber = lf.nodeNumber;
+    row.rank = lf.rank;
+    row.leafId = lf.nodeID;
+    row.appleLeafDevelopmentClass =
+        (lf.appleLeafDevelopmentClass == null)
+            ? ""
+            : lf.appleLeafDevelopmentClass;
+    row.fastEarlyExpansionLeaf = lf.fastEarlyExpansionLeaf;
+    row.rosetteExpansionScaleUsed = lf.rosetteExpansionScaleUsed;
+    row.debugValid = lf.dbg_validStep == step;
+    row.dbg_validStep = lf.dbg_validStep;
+    row.age = lf.age;
+    row.isGrowing = lf.age < lf.te;
+    row.dbg_growthActive = lf.dbg_growthActive;
+    row.length = lf.length;
+    row.area = lf.area;
+    row.potentialFinalSize = lf.potentialFinalSize;
+    row.realizedFinalSize = lf.realizedFinalSize;
+    row.profileFinalSizeLocked = lf.profileFinalSizeLocked;
+    row.currentAreaToRealizedFinalRatio =
+        lf.currentAreaToRealizedFinalRatio;
+    row.maxLength = lf.maxLength;
+    row.potLength = lf.potLength;
+    row.tm = lf.tm;
+    row.te = lf.te;
+    row.parentID = lf.parentID;
+    row.plantBaseID = lf.plantBaseID;
+    row.earlyLeafFallbackUsedThisStep =
+        lf.earlyLeafFallbackUsedThisStep;
+    row.hasValidLeafLightForPhotosynthesis =
+        lf.hasValidLeafLightForPhotosynthesis;
+    row.incPARm2 = lf.incPARm2;
+    row.absm2 = lf.absm2;
+    row.absPAR = lf.absPAR;
+    row.PAnet = lf.Alim;
+    row.Anet = lf.AlimActual;
+    row.waterFluxPotential = lf.waterFluxPotential;
+    row.Lpot = lf.dbg_Lpot;
+    row.fw = lf.dbg_fw;
+    row.fc = lf.dbg_fc;
+    row.dL_pot = lf.dbg_dL_pot;
+    row.dL_w = lf.dbg_dL_w;
+    row.dL_final = lf.dbg_dL_final;
+    row.dA_pot = lf.dbg_dA_pot;
+    row.dA_w = lf.dbg_dA_w;
+    row.dA_final = lf.dbg_dA_final;
+    row.waterPotential = lf.waterPotential;
+    row.sugarConcentration_phloem = lf.dbg_sc_phloem;
+    row.structureDM_PRI_PT = lf.structureDM_PRI_PT;
+    row.structureDM = lf.structureDM;
+    row.unloading = lf.unloading;
+    row.carbon_nonStructure = lf.carbon_nonStructure;
+    row.fNSC = lf.fNSC;
+    row.loading = lf.loading;
+    row.carbonAssimilation = lf.carbonAssimilation;
+    row.maintenanceDM = lf.maintenanceDM;
+
+    DiagnosticTableCoordinator.writeLeafExpansion(row);
+}

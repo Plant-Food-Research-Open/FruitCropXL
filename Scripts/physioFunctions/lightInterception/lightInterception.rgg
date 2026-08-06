@@ -1,0 +1,1687 @@
+import java.io.BufferedInputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.InputStream;
+import java.io.Serializable;
+import java.lang.reflect.Field;
+import java.security.MessageDigest;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.MappingIterator;
+import com.fasterxml.jackson.dataformat.csv.CsvMapper;
+import com.fasterxml.jackson.dataformat.csv.CsvSchema;
+
+import de.grogra.graph.impl.Node;
+import de.grogra.gpuflux.scene.experiment.Measurement;
+import de.grogra.gpuflux.tracer.FluxLightModelTracer.MeasureMode;
+import de.grogra.ray.physics.Spectrum3d;
+
+import static globalParameters.*;
+import static modelOptions.*;
+import static environment.*;
+import static extraTools.*;
+import static absOrgan.*;
+import static fieldBase.*;
+import static fruitBase.*;
+import static interfaces.*;
+import static leaf.*;
+import static photosynthesisAndTranspiration.*;
+
+// Centralized light-interception backend and normalized result contract.
+public static final String LIGHT_MODE_CPU = "cpu";
+public static final String LIGHT_MODE_GPU = "gpu";
+public static final String LIGHT_MODE_EMPIRICAL = "empiricalRegression";
+public static final String LIGHT_MODE_SURROGATE = "surrogateModel";
+public static final String LIGHT_MODE_DIRECT = "directInput";
+
+private static boolean lightInterceptionStepPrepared = false;
+private static String initializedLightMode = null;
+private static String initializedAssetSignature = null;
+private static LightLinearModel activeLinearModel = null;
+private static BeerLambertLaiLightModel activeBeerLambertModel = null;
+private static File resolvedLightInterceptionModelAsset = null;
+private static boolean legacyLightModelPathWarningPrinted = false;
+private static boolean legacyLinearEmpiricalWarningPrinted = false;
+private static Map reducedLightPredictions = new HashMap();
+private static Map directLightRows = new HashMap();
+private static String directIdentityColumn = null;
+private static String directLightResolution = null;
+private static boolean fallbackActivatedForCurrentInitialization = false;
+private static boolean lightInterceptionProvenanceRefreshPending = false;
+
+
+/** Raw three-channel result returned by GroIMP CPU/GPU light engines. */
+private class RawLightMeasurement implements Serializable {
+	private static final long serialVersionUID = 3474457789206145043L;
+
+	double channel0;
+	double channel1;
+	double channel2;
+	double integrated;
+	boolean valid;
+}
+
+
+/** One ordered predictor in a self-describing deterministic linear model. */
+private class LightLinearPredictor implements Serializable {
+	private static final long serialVersionUID = -8464971328976341057L;
+
+	int order;
+	String name;
+	String units;
+	String transformation;
+	double coefficient;
+	double validMin;
+	double validMax;
+}
+
+
+/** Parsed empirical regression or manifest-gated deterministic test surrogate. */
+private class LightLinearModel implements Serializable {
+	private static final long serialVersionUID = 7210231772094624958L;
+
+	String modelVersion;
+	String responseVariable;
+	String responseUnits;
+	String radiationComponents;
+	String spatialResolution;
+	double intercept;
+	List predictors = new ArrayList();
+}
+
+
+/** Parsed parameters for the nonlinear Beer-Lambert LAI-above provider. */
+private class BeerLambertLaiLightModel implements Serializable {
+	private static final long serialVersionUID = 1L;
+
+	int schemaVersion;
+	String modelVersion;
+	String responseVariable;
+	String responseUnits;
+	String radiationComponents;
+	String spatialResolution;
+	double topRelativePAR;
+	double extinctionCoefficient;
+	boolean useHeightCoefficient;
+	double heightCoefficient;
+	boolean strict;
+	double laiValidMin;
+	double laiValidMax;
+	double heightValidMin;
+	double heightValidMax;
+}
+
+
+/** One prescribed-light row after strict schema validation. */
+private class DirectLightRecord implements Serializable {
+	private static final long serialVersionUID = 3594312952578381449L;
+
+	String responseVariable;
+	double responseValue;
+	boolean hasAbsorbedFarRed;
+	double absorbedFarRed;
+	boolean hasAbsorbedTotal;
+	double absorbedTotal;
+}
+
+
+/** Normalize case-insensitive input and reject absent, empty, or unknown modes. */
+public static String normalizeLightInterceptionMode(String rawMode) {
+	if (rawMode == null || rawMode.trim().length() == 0) {
+		throw new IllegalArgumentException(
+			"lightInterceptionMode is empty. Valid modes: cpu, gpu, empiricalRegression, surrogateModel, directInput.");
+	}
+	String mode = rawMode.trim();
+	if (LIGHT_MODE_CPU.equalsIgnoreCase(mode)) return LIGHT_MODE_CPU;
+	if (LIGHT_MODE_GPU.equalsIgnoreCase(mode)) return LIGHT_MODE_GPU;
+	if (LIGHT_MODE_EMPIRICAL.equalsIgnoreCase(mode)) return LIGHT_MODE_EMPIRICAL;
+	if (LIGHT_MODE_SURROGATE.equalsIgnoreCase(mode)) return LIGHT_MODE_SURROGATE;
+	if (LIGHT_MODE_DIRECT.equalsIgnoreCase(mode)) return LIGHT_MODE_DIRECT;
+	throw new IllegalArgumentException("Unknown lightInterceptionMode '" + rawMode
+		+ "'. Valid modes: cpu, gpu, empiricalRegression, surrogateModel, directInput.");
+}
+
+
+public static boolean isCpuLightMode() {
+	return LIGHT_MODE_CPU.equals(normalizeLightInterceptionMode(lightInterceptionModeResolved));
+}
+
+
+public static boolean isGpuLightMode() {
+	return LIGHT_MODE_GPU.equals(normalizeLightInterceptionMode(lightInterceptionModeResolved));
+}
+
+
+public static boolean isRayTracingLightMode() {
+	return isCpuLightMode() || isGpuLightMode();
+}
+
+
+/** File-free direct light used only by leaf gas-exchange test scenarios. */
+public static boolean isMeteoDirectLeafLightMode() {
+	return LIGHT_MODE_DIRECT.equals(lightInterceptionModeResolved) && isLeafGasExchangeTestScenario();
+}
+
+
+public static boolean isLightInterceptionStepPrepared() {
+	return lightInterceptionStepPrepared;
+}
+
+
+/** Active model asset used by retained run-input snapshot handling. */
+public static File getResolvedLightInterceptionModelAsset() {
+	return resolvedLightInterceptionModelAsset;
+}
+
+
+/** True when the active empirical provider is the Beer-Lambert LAI-above model. */
+public static boolean hasActiveBeerLambertLightModel() {
+	return activeBeerLambertModel != null;
+}
+
+
+public static double getActiveBeerLambertTopRelativePAR() {
+	return activeBeerLambertModel == null ? Double.NaN : activeBeerLambertModel.topRelativePAR;
+}
+
+
+public static double getActiveBeerLambertExtinctionCoefficient() {
+	return activeBeerLambertModel == null ? Double.NaN : activeBeerLambertModel.extinctionCoefficient;
+}
+
+
+public static boolean getActiveBeerLambertUseHeightCoefficient() {
+	return activeBeerLambertModel != null && activeBeerLambertModel.useHeightCoefficient;
+}
+
+
+public static double getActiveBeerLambertHeightCoefficient() {
+	return activeBeerLambertModel == null ? Double.NaN : activeBeerLambertModel.heightCoefficient;
+}
+
+
+public static boolean getActiveBeerLambertStrict() {
+	return activeBeerLambertModel != null && activeBeerLambertModel.strict;
+}
+
+
+/**
+ * Consume a request for the configuration module to refresh run provenance.
+ * The request is raised only after a successful runtime fallback.
+ */
+public static boolean consumeLightInterceptionProvenanceRefreshRequest() {
+	boolean pending = lightInterceptionProvenanceRefreshPending;
+	lightInterceptionProvenanceRefreshPending = false;
+	return pending;
+}
+
+
+private static File resolveLightAsset(String configuredPath, String optionName) {
+	if (configuredPath == null || configuredPath.trim().length() == 0 || "null".equalsIgnoreCase(configuredPath.trim())) {
+		throw new IllegalArgumentException(optionName + " is required for lightInterceptionMode="
+			+ lightInterceptionModeResolved + ".");
+	}
+	File f = new File(configuredPath.trim());
+	if (!f.isAbsolute()) f = new File(PATH_INPUT, configuredPath.trim());
+	if (!f.isFile() || !f.canRead()) {
+		throw new IllegalArgumentException(optionName + " does not identify a readable file: " + f.getPath());
+	}
+	return f;
+}
+
+
+/** Resolve model artifacts from Model_scenarios, retaining an explicit legacy input fallback. */
+private static File resolveLightModelAsset(String configuredPath, String optionName) {
+	if (configuredPath == null || configuredPath.trim().length() == 0
+		|| "null".equalsIgnoreCase(configuredPath.trim())) {
+		throw new IllegalArgumentException(optionName + " is required for lightInterceptionMode="
+			+ lightInterceptionModeResolved + ".");
+	}
+	String path = configuredPath.trim();
+	File configured = new File(path);
+	if (configured.isAbsolute()) {
+		if (!configured.isFile() || !configured.canRead()) {
+			throw new IllegalArgumentException(optionName
+				+ " does not identify a readable absolute file: " + configured.getPath());
+		}
+		return configured;
+	}
+
+	File scenarioFile = new File(PATH_SCENARIOS, path);
+	if (scenarioFile.isFile() && scenarioFile.canRead()) return scenarioFile;
+
+	File legacyInputFile = new File(PATH_INPUT, path);
+	if (legacyInputFile.isFile() && legacyInputFile.canRead()) {
+		if (!legacyLightModelPathWarningPrinted) {
+			println("[LightInterception] Deprecated: " + optionName + " was resolved from Model_input: "
+				+ legacyInputFile.getPath() + ". Move empirical/surrogate model artifacts to Model_scenarios.");
+			legacyLightModelPathWarningPrinted = true;
+		}
+		return legacyInputFile;
+	}
+
+	throw new IllegalArgumentException(optionName + " does not identify a readable file. Tried "
+		+ scenarioFile.getPath() + " and legacy location " + legacyInputFile.getPath() + ".");
+}
+
+
+public static File resolveMeteoDirectClimateFile() {
+	if (!inputEnvironmentCondition || climate_file == null || climate_file.trim().length() == 0
+		|| "null".equalsIgnoreCase(climate_file.trim())) {
+		throw new IllegalArgumentException("lightInterceptionMode=directInput in leaf gas-exchange test mode requires "
+			+ "inputEnvironmentCondition=true and a climate_file containing totalRadiation in umol m-2 s-1.");
+	}
+	File file = new File(climate_file.trim());
+	if (!file.isAbsolute()) file = new File(PATH_INPUT, climate_file.trim());
+	if (!file.isFile() || !file.canRead()) {
+		throw new IllegalArgumentException("lightInterceptionMode=directInput in leaf gas-exchange test mode requires "
+			+ "a readable climate_file containing totalRadiation in umol m-2 s-1: " + file.getPath());
+	}
+	return file;
+}
+
+
+private static String checksumFile(File f) {
+	InputStream input = null;
+	try {
+		MessageDigest digest = MessageDigest.getInstance("SHA-256");
+		input = new BufferedInputStream(new FileInputStream(f));
+		byte[] buffer = new byte[8192];
+		int n;
+		while ((n = input.read(buffer)) >= 0) {
+			if (n > 0) digest.update(buffer, 0, n);
+		}
+		byte[] bytes = digest.digest();
+		StringBuilder sb = new StringBuilder();
+		for (int i = 0; i < bytes.length; i++) {
+			int b = bytes[i] & 0xff;
+			if (b < 16) sb.append('0');
+			sb.append(Integer.toHexString(b));
+		}
+		return sb.toString();
+	} catch (Exception e) {
+		throw new RuntimeException("Unable to calculate SHA-256 for " + f.getPath() + ": " + e.getMessage(), e);
+	} finally {
+		if (input != null) {
+			try { input.close(); } catch (Exception ignored) {}
+		}
+	}
+}
+
+
+private static String requiredText(JsonNode node, String name, String source) {
+	JsonNode v = node == null ? null : node.get(name);
+	if (v == null || v.isNull() || v.asText().trim().length() == 0) {
+		throw new IllegalArgumentException(source + " must declare non-empty '" + name + "'.");
+	}
+	return v.asText().trim();
+}
+
+
+private static double requiredFiniteDouble(JsonNode node, String name, String source) {
+	JsonNode v = node == null ? null : node.get(name);
+	if (v == null || v.isNull()) throw new IllegalArgumentException(source + " must declare numeric '" + name + "'.");
+	double d = v.asDouble(Double.NaN);
+	if (Double.isNaN(d) || Double.isInfinite(d)) {
+		throw new IllegalArgumentException(source + " contains non-finite '" + name + "'.");
+	}
+	return d;
+}
+
+
+private static int requiredInteger(JsonNode node, String name, String source) {
+	JsonNode v = node == null ? null : node.get(name);
+	if (v == null || v.isNull() || !v.isIntegralNumber()) {
+		throw new IllegalArgumentException(source + " must declare integer '" + name + "'.");
+	}
+	return v.asInt();
+}
+
+
+private static boolean requiredBoolean(JsonNode node, String name, String source) {
+	JsonNode v = node == null ? null : node.get(name);
+	if (v == null || v.isNull() || !v.isBoolean()) {
+		throw new IllegalArgumentException(source + " must declare boolean '" + name + "'.");
+	}
+	return v.asBoolean();
+}
+
+
+private static boolean isIncidentParResponse(String response) {
+	return "incidentPAR_umol_m2_s".equals(response);
+}
+
+
+private static boolean isRelativeParResponse(String response) {
+	return "relativePAR".equals(response);
+}
+
+
+private static void validateResponseDeclaration(String response, String units, String source) {
+	if (isIncidentParResponse(response)) {
+		if (!("umol m-2 s-1".equals(units) || "umol_m2_s".equals(units) || "umol m^-2 s^-1".equals(units))) {
+			throw new IllegalArgumentException(source + " responseUnits for incidentPAR_umol_m2_s must explicitly be umol m-2 s-1.");
+		}
+		return;
+	}
+	if (isRelativeParResponse(response)) {
+		if (!("1".equals(units) || "fraction".equalsIgnoreCase(units) || "dimensionless".equalsIgnoreCase(units))) {
+			throw new IllegalArgumentException(source + " responseUnits for relativePAR must be 1, fraction, or dimensionless.");
+		}
+		return;
+	}
+	throw new IllegalArgumentException(source + " responseVariable must be incidentPAR_umol_m2_s or relativePAR; found '"
+		+ response + "'.");
+}
+
+
+private static String expectedLightFeatureUnits(String featureName) {
+	if ("x".equals(featureName) || "y".equals(featureName) || "z".equals(featureName)
+		|| "endX".equals(featureName) || "endY".equals(featureName) || "endZ".equals(featureName)
+		|| "length".equals(featureName) || "adjustedWidth".equals(featureName)) return "m";
+	if ("area".equals(featureName) || "leafAreaAbove_plant".equals(featureName)
+		|| "leafAreaAbove_shoot".equals(featureName)) return "m2";
+	if ("leafAreaDensity_local".equals(featureName)) return "m2 m-3";
+	if ("globalRadiation".equals(featureName) || "incomingRadiation".equals(featureName)
+		|| "directRadiation".equals(featureName) || "diffuseRadiation".equals(featureName)) {
+		return "umol m-2 s-1";
+	}
+	if ("solarElevation".equals(featureName) || "azimuth".equals(featureName)
+		|| "rowOrientation".equals(featureName)) return "degree";
+	if ("Ta".equals(featureName)) return "degC";
+	if ("wind".equals(featureName)) return "m s-1";
+	if ("layer".equals(featureName) || "fDiffuseLight".equals(featureName)
+		|| "rh".equals(featureName) || "hourOfDay".equals(featureName)
+		|| "dayOfYear".equals(featureName)) return "1";
+	throw new IllegalArgumentException("Unsupported light-model predictor '" + featureName + "'.");
+}
+
+
+private static LightLinearModel readLinearModel(File file, String sourceLabel) {
+	try {
+		JsonNode root = (new ObjectMapper()).readTree(file);
+		LightLinearModel model = new LightLinearModel();
+		model.modelVersion = requiredText(root, "modelVersion", sourceLabel);
+		model.responseVariable = requiredText(root, "responseVariable", sourceLabel);
+		model.responseUnits = requiredText(root, "responseUnits", sourceLabel);
+		model.radiationComponents = requiredText(root, "radiationComponents", sourceLabel);
+		if (!"PAR".equalsIgnoreCase(model.radiationComponents)) {
+			throw new IllegalArgumentException(sourceLabel
+				+ " currently supports only radiationComponents=PAR; far-red predictions require a separate verified provider contract.");
+		}
+		model.radiationComponents = "PAR";
+		model.spatialResolution = requiredText(root, "spatialResolution", sourceLabel);
+		if (!"leaf".equalsIgnoreCase(model.spatialResolution)) {
+			throw new IllegalArgumentException(sourceLabel + " currently supports only spatialResolution=leaf.");
+		}
+		validateResponseDeclaration(model.responseVariable, model.responseUnits, sourceLabel);
+		model.intercept = requiredFiniteDouble(root, "intercept", sourceLabel);
+
+		JsonNode organTypes = root.get("supportedOrganTypes");
+		if (organTypes == null || !organTypes.isArray() || organTypes.size() != 1
+			|| !"leaf".equalsIgnoreCase(organTypes.get(0).asText())) {
+			throw new IllegalArgumentException(sourceLabel
+				+ " must declare supportedOrganTypes:[\"leaf\"]; other reduced-mode target types are not implemented.");
+		}
+
+		JsonNode predictors = root.get("predictors");
+		if (predictors == null || !predictors.isArray() || predictors.size() == 0) {
+			throw new IllegalArgumentException(sourceLabel + " must declare a non-empty ordered predictors array.");
+		}
+		for (int i = 0; i < predictors.size(); i++) {
+			JsonNode p = predictors.get(i);
+			LightLinearPredictor predictor = new LightLinearPredictor();
+			predictor.order = p.has("order") ? p.get("order").asInt(-1) : -1;
+			if (predictor.order != i) {
+				throw new IllegalArgumentException(sourceLabel + " predictor order must be contiguous and zero-based; expected "
+					+ i + " but found " + predictor.order + ".");
+			}
+			predictor.name = requiredText(p, "name", sourceLabel + " predictor " + i);
+			predictor.units = requiredText(p, "units", sourceLabel + " predictor " + i);
+			String expectedUnits = expectedLightFeatureUnits(predictor.name);
+			if (!expectedUnits.equals(predictor.units)) {
+				throw new IllegalArgumentException(sourceLabel + " predictor '" + predictor.name
+					+ "' declares units '" + predictor.units + "'; runtime units are '" + expectedUnits + "'.");
+			}
+			predictor.transformation = requiredText(p, "transformation", sourceLabel + " predictor " + i);
+			predictor.coefficient = requiredFiniteDouble(p, "coefficient", sourceLabel + " predictor " + i);
+			predictor.validMin = requiredFiniteDouble(p, "validMin", sourceLabel + " predictor " + i);
+			predictor.validMax = requiredFiniteDouble(p, "validMax", sourceLabel + " predictor " + i);
+			if (predictor.validMax < predictor.validMin) {
+				throw new IllegalArgumentException(sourceLabel + " predictor " + predictor.name + " has validMax < validMin.");
+			}
+			validateTransformation(predictor.transformation, sourceLabel + " predictor " + predictor.name);
+			model.predictors.add(predictor);
+		}
+		return model;
+	} catch (RuntimeException e) {
+		throw e;
+	} catch (Exception e) {
+		throw new RuntimeException("Unable to read " + sourceLabel + " from " + file.getPath() + ": " + e.getMessage(), e);
+	}
+}
+
+
+/** Read and validate the dedicated nonlinear Beer-Lambert LAI-above model schema. */
+private static BeerLambertLaiLightModel readBeerLambertLaiModel(File file, String sourceLabel) {
+	try {
+		JsonNode root = (new ObjectMapper()).readTree(file);
+		BeerLambertLaiLightModel model = new BeerLambertLaiLightModel();
+		model.schemaVersion = requiredInteger(root, "schemaVersion", sourceLabel);
+		if (model.schemaVersion != 1) {
+			throw new IllegalArgumentException(sourceLabel + " requires schemaVersion=1; found "
+				+ model.schemaVersion + ".");
+		}
+		String modelType = requiredText(root, "empiricalLightModel", sourceLabel);
+		if (!"beerLambertLaiAbove".equals(modelType)) {
+			throw new IllegalArgumentException(sourceLabel
+				+ " requires empiricalLightModel=beerLambertLaiAbove; found '" + modelType + "'.");
+		}
+
+		model.modelVersion = requiredText(root, "modelVersion", sourceLabel);
+		model.responseVariable = requiredText(root, "responseVariable", sourceLabel);
+		model.responseUnits = requiredText(root, "responseUnits", sourceLabel);
+		if (!"relativePAR".equals(model.responseVariable)
+			|| !"dimensionless".equalsIgnoreCase(model.responseUnits)) {
+			throw new IllegalArgumentException(sourceLabel
+				+ " must declare responseVariable=relativePAR and responseUnits=dimensionless.");
+		}
+		model.radiationComponents = requiredText(root, "radiationComponents", sourceLabel);
+		if (!"PAR".equalsIgnoreCase(model.radiationComponents)) {
+			throw new IllegalArgumentException(sourceLabel + " requires radiationComponents=PAR.");
+		}
+		model.radiationComponents = "PAR";
+		model.spatialResolution = requiredText(root, "spatialResolution", sourceLabel);
+		if (!"leaf".equalsIgnoreCase(model.spatialResolution)) {
+			throw new IllegalArgumentException(sourceLabel + " requires spatialResolution=leaf.");
+		}
+		model.spatialResolution = "leaf";
+
+		JsonNode organTypes = root.get("supportedOrganTypes");
+		if (organTypes == null || !organTypes.isArray() || organTypes.size() != 1
+			|| !"leaf".equalsIgnoreCase(organTypes.get(0).asText())) {
+			throw new IllegalArgumentException(sourceLabel
+				+ " must declare supportedOrganTypes:[\"leaf\"].");
+		}
+
+		model.topRelativePAR = requiredFiniteDouble(
+			root, "empiricalLightTopRelativePAR", sourceLabel);
+		if (model.topRelativePAR <= 0 || model.topRelativePAR > 1) {
+			throw new IllegalArgumentException(sourceLabel
+				+ " empiricalLightTopRelativePAR must satisfy 0 < value <= 1.");
+		}
+		model.extinctionCoefficient = requiredFiniteDouble(
+			root, "empiricalLightExtinctionCoefficient", sourceLabel);
+		if (model.extinctionCoefficient < 0) {
+			throw new IllegalArgumentException(sourceLabel
+				+ " empiricalLightExtinctionCoefficient must be >= 0.");
+		}
+		model.useHeightCoefficient = requiredBoolean(
+			root, "empiricalLightUseHeightCoefficient", sourceLabel);
+		model.heightCoefficient = requiredFiniteDouble(
+			root, "empiricalLightHeightCoefficient", sourceLabel);
+		model.strict = requiredBoolean(root, "empiricalLightStrict", sourceLabel);
+
+		JsonNode metadata = root.get("predictorMetadata");
+		if (metadata == null || !metadata.isObject()) {
+			throw new IllegalArgumentException(sourceLabel + " must declare predictorMetadata.");
+		}
+		JsonNode lai = metadata.get("laiAbove");
+		JsonNode height = metadata.get("height");
+		if (lai == null || !lai.isObject() || height == null || !height.isObject()) {
+			throw new IllegalArgumentException(sourceLabel
+				+ " predictorMetadata must declare laiAbove and height objects.");
+		}
+		if (!"dimensionless".equalsIgnoreCase(requiredText(lai, "units", sourceLabel + " laiAbove"))) {
+			throw new IllegalArgumentException(sourceLabel + " laiAbove units must be dimensionless.");
+		}
+		if (!"m".equals(requiredText(height, "units", sourceLabel + " height"))) {
+			throw new IllegalArgumentException(sourceLabel + " height units must be m.");
+		}
+		model.laiValidMin = requiredFiniteDouble(lai, "validMin", sourceLabel + " laiAbove");
+		model.laiValidMax = requiredFiniteDouble(lai, "validMax", sourceLabel + " laiAbove");
+		model.heightValidMin = requiredFiniteDouble(height, "validMin", sourceLabel + " height");
+		model.heightValidMax = requiredFiniteDouble(height, "validMax", sourceLabel + " height");
+		if (model.laiValidMax < model.laiValidMin) {
+			throw new IllegalArgumentException(sourceLabel + " laiAbove validMax is below validMin.");
+		}
+		if (model.heightValidMax < model.heightValidMin) {
+			throw new IllegalArgumentException(sourceLabel + " height validMax is below validMin.");
+		}
+		return model;
+	} catch (RuntimeException e) {
+		throw e;
+	} catch (Exception e) {
+		throw new RuntimeException("Unable to read " + sourceLabel + " from "
+			+ file.getPath() + ": " + e.getMessage(), e);
+	}
+}
+
+
+private static String declaredEmpiricalLightModelType(File file) {
+	try {
+		JsonNode root = (new ObjectMapper()).readTree(file);
+		JsonNode type = root == null ? null : root.get("empiricalLightModel");
+		if (type == null || type.isNull() || type.asText().trim().length() == 0) return null;
+		return type.asText().trim();
+	} catch (RuntimeException e) {
+		throw e;
+	} catch (Exception e) {
+		throw new RuntimeException("Unable to inspect empirical light model "
+			+ file.getPath() + ": " + e.getMessage(), e);
+	}
+}
+
+
+private static void validateTransformation(String transformation, String source) {
+	if ("identity".equals(transformation) || "log".equals(transformation)
+		|| "log1p".equals(transformation) || "sqrt".equals(transformation)
+		|| "square".equals(transformation)) return;
+	throw new IllegalArgumentException(source + " has unsupported transformation '" + transformation
+		+ "'. Supported transformations: identity, log, log1p, sqrt, square.");
+}
+
+
+private static void validateDeterministicSurrogateManifest(File manifestFile, LightLinearModel model) {
+	try {
+		JsonNode root = (new ObjectMapper()).readTree(manifestFile);
+		String adapter = requiredText(root, "adapter", "surrogate feature manifest");
+		if (!"deterministicLinearTest".equals(adapter) || !root.path("testOnly").asBoolean(false)) {
+			throw new IllegalArgumentException("Unsupported surrogate adapter '" + adapter
+				+ "'. This repository provides only the manifest-gated deterministicLinearTest adapter;"
+				+ " no production Java/GroIMP surrogate artifact is installed.");
+		}
+		String response = requiredText(root, "responseVariable", "surrogate feature manifest");
+		String units = requiredText(root, "responseUnits", "surrogate feature manifest");
+		if (!model.responseVariable.equals(response) || !model.responseUnits.equals(units)) {
+			throw new IllegalArgumentException("Surrogate manifest response declaration does not match the deterministic model artifact.");
+		}
+		String manifestModelVersion = requiredText(root, "modelVersion", "surrogate feature manifest");
+		String manifestResolution = requiredText(root, "spatialResolution", "surrogate feature manifest");
+		String manifestRadiation = requiredText(root, "radiationComponents", "surrogate feature manifest");
+		if (!model.modelVersion.equals(manifestModelVersion)
+			|| !model.spatialResolution.equalsIgnoreCase(manifestResolution)
+			|| !model.radiationComponents.equalsIgnoreCase(manifestRadiation)) {
+			throw new IllegalArgumentException("Surrogate manifest model version, resolution, or radiation components do not match the artifact.");
+		}
+		JsonNode organTypes = root.get("supportedOrganTypes");
+		if (organTypes == null || !organTypes.isArray() || organTypes.size() != 1
+			|| !"leaf".equalsIgnoreCase(organTypes.get(0).asText())) {
+			throw new IllegalArgumentException("Surrogate manifest must declare supportedOrganTypes:[\"leaf\"].");
+		}
+		JsonNode preprocessing = root.get("preprocessing");
+		if (preprocessing == null || preprocessing.isNull()) {
+			throw new IllegalArgumentException("Surrogate feature manifest must declare preprocessing/scaling, even when it is identity.");
+		}
+		String preprocessingType = preprocessing.isTextual() ? preprocessing.asText()
+			: requiredText(preprocessing, "type", "surrogate feature manifest preprocessing");
+		if (!"identity".equalsIgnoreCase(preprocessingType)) {
+			throw new IllegalArgumentException("The deterministicLinearTest surrogate adapter supports only identity preprocessing; found '"
+				+ preprocessingType + "'.");
+		}
+		JsonNode order = root.get("featureOrder");
+		JsonNode unitsNode = root.get("featureUnits");
+		JsonNode rangesNode = root.get("validRanges");
+		if (order == null || !order.isArray() || order.size() != model.predictors.size()) {
+			throw new IllegalArgumentException("Surrogate featureOrder must match the deterministic model predictors exactly.");
+		}
+		if (unitsNode == null || !unitsNode.isObject()) {
+			throw new IllegalArgumentException("Surrogate feature manifest must declare featureUnits by predictor name.");
+		}
+		if (rangesNode == null || !rangesNode.isObject()) {
+			throw new IllegalArgumentException("Surrogate feature manifest must declare validRanges by predictor name.");
+		}
+		for (int i = 0; i < model.predictors.size(); i++) {
+			LightLinearPredictor p = (LightLinearPredictor) model.predictors.get(i);
+			if (!p.name.equals(order.get(i).asText())) {
+				throw new IllegalArgumentException("Surrogate feature order mismatch at index " + i + ".");
+			}
+			JsonNode declaredUnit = unitsNode.get(p.name);
+			if (declaredUnit == null || !p.units.equals(declaredUnit.asText())) {
+				throw new IllegalArgumentException("Surrogate unit mismatch for feature '" + p.name + "'.");
+			}
+			JsonNode range = rangesNode.get(p.name);
+			if (range == null || !range.isObject()) {
+				throw new IllegalArgumentException("Surrogate valid range is missing for feature '" + p.name + "'.");
+			}
+			double declaredMin = requiredFiniteDouble(range, "min", "surrogate feature " + p.name);
+			double declaredMax = requiredFiniteDouble(range, "max", "surrogate feature " + p.name);
+			if (Math.abs(declaredMin - p.validMin) > 1e-12 || Math.abs(declaredMax - p.validMax) > 1e-12) {
+				throw new IllegalArgumentException("Surrogate valid-range mismatch for feature '" + p.name + "'.");
+			}
+		}
+	} catch (RuntimeException e) {
+		throw e;
+	} catch (Exception e) {
+		throw new RuntimeException("Unable to validate surrogate feature manifest " + manifestFile.getPath()
+			+ ": " + e.getMessage(), e);
+	}
+}
+
+
+private static int requiredInt(JsonNode row, String name, String source) {
+	JsonNode n = row.get(name);
+	if (n == null || n.isNull() || n.asText().trim().length() == 0) {
+		throw new IllegalArgumentException(source + " is missing integer column '" + name + "'.");
+	}
+	try {
+		return Integer.parseInt(n.asText().trim());
+	} catch (NumberFormatException e) {
+		throw new IllegalArgumentException(source + " has invalid integer '" + name + "': " + n.asText());
+	}
+}
+
+
+private static double optionalFiniteDouble(JsonNode row, String name, String source, double fallback) {
+	JsonNode n = row.get(name);
+	if (n == null || n.isNull() || n.asText().trim().length() == 0) return fallback;
+	try {
+		double d = Double.parseDouble(n.asText().trim());
+		if (Double.isNaN(d) || Double.isInfinite(d)) throw new NumberFormatException("non-finite");
+		return d;
+	} catch (NumberFormatException e) {
+		throw new IllegalArgumentException(source + " has invalid finite value in '" + name + "': " + n.asText());
+	}
+}
+
+
+private static String canonicalZone(String raw, String source) {
+	if (raw == null) throw new IllegalArgumentException(source + " is missing canopyZone.");
+	String v = raw.trim();
+	if ("0".equals(v) || "low".equalsIgnoreCase(v)) return "low";
+	if ("1".equals(v) || "mid".equalsIgnoreCase(v) || "middle".equalsIgnoreCase(v)) return "mid";
+	if ("2".equals(v) || "up".equalsIgnoreCase(v) || "upper".equalsIgnoreCase(v)) return "up";
+	throw new IllegalArgumentException(source + " has unsupported canopyZone '" + raw + "'; use low, mid, up, 0, 1, or 2.");
+}
+
+
+private static boolean hasDirectText(JsonNode row, String name) {
+	JsonNode value = row == null ? null : row.get(name);
+	return value != null && !value.isNull() && value.asText().trim().length() > 0;
+}
+
+
+private static String inferDirectInputResolution(JsonNode row, int rowNumber) {
+	String source = "direct-input row " + rowNumber;
+	if (hasDirectText(row, "organUUId") || hasDirectText(row, "nodeID")) return "leaf";
+	if (hasDirectText(row, "canopyZone")) return "canopyZone";
+	if (hasDirectText(row, "plantNumber")) return "plant";
+	if (hasDirectText(row, "fieldInstanceId")) return "field";
+	throw new IllegalArgumentException(source
+		+ " does not declare a supported identity. Use leaf identity, canopyZone, plantNumber, or fieldInstanceId columns.");
+}
+
+
+private static String buildDirectRowKey(JsonNode row, String resolution, int rowNumber) {
+	String source = "direct-input row " + rowNumber;
+	int rowYear = requiredInt(row, "year", source);
+	int rowDay = requiredInt(row, "day", source);
+	int rowHour = requiredInt(row, "hour", source);
+	String key = rowYear + "|" + rowDay + "|" + rowHour;
+	if ("field".equals(resolution)) {
+		return key + "|" + requiredInt(row, "fieldInstanceId", source);
+	}
+	int plant = requiredInt(row, "plantNumber", source);
+	int field = requiredInt(row, "fieldInstanceId", source);
+	key += "|" + plant + "|" + field;
+	if ("plant".equals(resolution)) return key;
+	if ("canopyZone".equals(resolution)) {
+		return key + "|" + canonicalZone(requiredText(row, "canopyZone", source), source);
+	}
+	boolean hasUuid = row.get("organUUId") != null && row.get("organUUId").asText().trim().length() > 0;
+	boolean hasNodeId = row.get("nodeID") != null && row.get("nodeID").asText().trim().length() > 0;
+	if (hasUuid == hasNodeId) {
+		throw new IllegalArgumentException(source
+			+ " must contain exactly one stable leaf identity column: organUUId (preferred) or nodeID (run-local compatibility).");
+	}
+	String rowIdentityColumn = hasUuid ? "organUUId" : "nodeID";
+	if (directIdentityColumn == null) {
+		directIdentityColumn = rowIdentityColumn;
+	} else if (!directIdentityColumn.equals(rowIdentityColumn)) {
+		throw new IllegalArgumentException(source + " switches leaf identity from " + directIdentityColumn
+			+ " to " + rowIdentityColumn + "; use one identity column consistently throughout the input file.");
+	}
+	return key + "|" + requiredText(row, directIdentityColumn, source);
+}
+
+
+private static void loadDirectInput(File file) {
+	directLightRows.clear();
+	directIdentityColumn = null;
+	directLightResolution = null;
+	try {
+		CsvSchema schema = CsvSchema.emptySchema().withHeader();
+		MappingIterator iterator = (new CsvMapper()).readerFor(JsonNode.class).with(schema).readValues(file);
+		List rows = iterator.readAll();
+		if (rows == null || rows.size() == 0) {
+			throw new IllegalArgumentException("Direct light input contains no data rows: " + file.getPath());
+		}
+		for (int i = 0; i < rows.size(); i++) {
+			JsonNode row = (JsonNode) rows.get(i);
+			String source = "direct-input row " + (i + 2);
+			String rowResolution = inferDirectInputResolution(row, i + 2);
+			if (directLightResolution == null) {
+				directLightResolution = rowResolution;
+			} else if (!directLightResolution.equals(rowResolution)) {
+				throw new IllegalArgumentException(source + " resolves to " + rowResolution
+					+ " but earlier rows resolve to " + directLightResolution
+					+ "; use one identity resolution consistently throughout the input file.");
+			}
+			String key = buildDirectRowKey(row, directLightResolution, i + 2);
+			if (directLightRows.containsKey(key)) {
+				throw new IllegalArgumentException("Duplicate direct-input match key at " + source + ": " + key);
+			}
+			boolean hasIncident = row.get("incidentPAR_umol_m2_s") != null
+				&& row.get("incidentPAR_umol_m2_s").asText().trim().length() > 0;
+			boolean hasRelative = row.get("relativePAR") != null
+				&& row.get("relativePAR").asText().trim().length() > 0;
+			if (hasIncident == hasRelative) {
+				throw new IllegalArgumentException(source
+					+ " must contain exactly one value column: incidentPAR_umol_m2_s or relativePAR.");
+			}
+			DirectLightRecord record = new DirectLightRecord();
+			record.responseVariable = hasIncident ? "incidentPAR_umol_m2_s" : "relativePAR";
+			record.responseValue = optionalFiniteDouble(row, record.responseVariable, source, Double.NaN);
+			if (Double.isNaN(record.responseValue)) {
+				throw new IllegalArgumentException(source + " has no finite prescribed-light value.");
+			}
+			if (record.responseValue < 0) {
+				println("[LightInterception] Clamping biologically impossible negative " + record.responseVariable
+					+ " to zero at " + source + ".");
+				record.responseValue = 0;
+			}
+			double farRed = optionalFiniteDouble(row, "absorbedFarRed_umol_s", source, Double.NaN);
+			record.hasAbsorbedFarRed = !Double.isNaN(farRed);
+			record.absorbedFarRed = record.hasAbsorbedFarRed ? Math.max(0, farRed) : 0;
+			double total = optionalFiniteDouble(row, "absorbedTotal_umol_s", source, Double.NaN);
+			record.hasAbsorbedTotal = !Double.isNaN(total);
+			record.absorbedTotal = record.hasAbsorbedTotal ? Math.max(0, total) : 0;
+			directLightRows.put(key, record);
+		}
+	} catch (RuntimeException e) {
+		throw e;
+	} catch (Exception e) {
+		throw new RuntimeException("Unable to read direct light input " + file.getPath() + ": " + e.getMessage(), e);
+	}
+}
+
+
+/** Validate assets and capabilities without constructing an unused ray tracer. */
+public static void validateLightInterceptionConfiguration() {
+	lightInterceptionModeResolved = normalizeLightInterceptionMode(lightInterceptionModeResolved);
+	if (lightInterceptionFallbackMode != null && lightInterceptionFallbackMode.trim().length() > 0
+		&& !"null".equalsIgnoreCase(lightInterceptionFallbackMode.trim())) {
+		lightInterceptionFallbackMode = normalizeLightInterceptionMode(lightInterceptionFallbackMode);
+	}
+	if (!calcLightInterception) return;
+
+	if (!isRayTracingLightMode() && useLightSensors) {
+		throw new IllegalArgumentException("lightInterceptionMode=" + lightInterceptionModeResolved
+			+ " does not support GroIMP LightSensor objects. Disable useLightSensors or select cpu/gpu.");
+	}
+	if (LIGHT_MODE_EMPIRICAL.equals(lightInterceptionModeResolved)) {
+		resolveLightModelAsset(lightInterceptionModelFile, "lightInterceptionModelFile");
+	} else if (LIGHT_MODE_SURROGATE.equals(lightInterceptionModeResolved)) {
+		resolveLightModelAsset(lightInterceptionModelFile, "lightInterceptionModelFile");
+		resolveLightAsset(lightInterceptionFeatureManifestFile, "lightInterceptionFeatureManifestFile");
+	} else if (LIGHT_MODE_DIRECT.equals(lightInterceptionModeResolved)) {
+		if (isMeteoDirectLeafLightMode()) {
+			resolveMeteoDirectClimateFile();
+			if (hasConfiguredFallback()) {
+				throw new IllegalArgumentException("Meteo direct leaf light does not permit lightInterceptionFallbackMode; "
+					+ "fix the climate input rather than running a CPU/GPU fallback.");
+			}
+		} else {
+			resolveLightAsset(lightInterceptionInputFile, "lightInterceptionInputFile");
+		}
+	}
+}
+
+
+private static String currentAssetSignature() {
+	return lightInterceptionModeResolved + "|" + String.valueOf(lightInterceptionModelFile)
+		+ "|" + String.valueOf(lightInterceptionFeatureManifestFile)
+		+ "|" + String.valueOf(lightInterceptionInputFile)
+		+ "|" + String.valueOf(climate_file) + "|" + String.valueOf(special_scenario)
+		+ "|" + inputEnvironmentCondition + "|" + useLightSensors + "|" + calcLightInterception;
+}
+
+
+private static void initializeResolvedBackend() {
+	validateLightInterceptionConfiguration();
+	String signature = currentAssetSignature();
+	if (lightInterceptionModeResolved.equals(initializedLightMode) && signature.equals(initializedAssetSignature)) return;
+
+	activeLinearModel = null;
+	activeBeerLambertModel = null;
+	resolvedLightInterceptionModelAsset = null;
+	reducedLightPredictions.clear();
+	directLightRows.clear();
+	directIdentityColumn = null;
+	directLightResolution = null;
+	lightInterceptionBackendVersion = null;
+	lightInterceptionAssetChecksum = null;
+	if (!calcLightInterception) {
+		lightInterceptionBackendVersion = "disabled";
+		initializedLightMode = lightInterceptionModeResolved;
+		initializedAssetSignature = signature;
+		return;
+	}
+
+	if (isCpuLightMode()) {
+		if (lm == null) lm = new LightModel(rayCount, depth);
+		lightInterceptionBackendVersion = "GroIMP LightModel";
+	} else if (isGpuLightMode()) {
+		if (FluxLM == null) {
+			FluxLM = new FluxLightModel(rayCount, depth, 1e-3, false);
+			FluxLM.setMeasureMode(MeasureMode.RGB);
+		}
+		FluxLM.setEnableSensors(useLightSensors);
+		lightInterceptionBackendVersion = "GroIMP FluxLightModel";
+	} else if (LIGHT_MODE_EMPIRICAL.equals(lightInterceptionModeResolved)) {
+		File modelFile = resolveLightModelAsset(lightInterceptionModelFile, "lightInterceptionModelFile");
+		resolvedLightInterceptionModelAsset = modelFile;
+		String empiricalModelType = declaredEmpiricalLightModelType(modelFile);
+		if ("beerLambertLaiAbove".equals(empiricalModelType)) {
+			activeBeerLambertModel = readBeerLambertLaiModel(
+				modelFile, "Beer-Lambert LAI-above model");
+			lightInterceptionBackendVersion = activeBeerLambertModel.modelVersion;
+		} else if (empiricalModelType == null) {
+			if (!legacyLinearEmpiricalWarningPrinted) {
+				println("[LightInterception] Deprecated: empirical model files without empiricalLightModel "
+					+ "are interpreted as legacy additive linear regressions.");
+				legacyLinearEmpiricalWarningPrinted = true;
+			}
+			activeLinearModel = readLinearModel(modelFile, "legacy empirical regression");
+			lightInterceptionBackendVersion = activeLinearModel.modelVersion;
+		} else {
+			throw new IllegalArgumentException("Unsupported empiricalLightModel '" + empiricalModelType
+				+ "' in " + modelFile.getPath()
+				+ ". Supported value: beerLambertLaiAbove; omit the field only for legacy linear files.");
+		}
+		lightInterceptionAssetChecksum = checksumFile(modelFile);
+	} else if (LIGHT_MODE_SURROGATE.equals(lightInterceptionModeResolved)) {
+		File modelFile = resolveLightModelAsset(lightInterceptionModelFile, "lightInterceptionModelFile");
+		resolvedLightInterceptionModelAsset = modelFile;
+		File manifestFile = resolveLightAsset(lightInterceptionFeatureManifestFile, "lightInterceptionFeatureManifestFile");
+		activeLinearModel = readLinearModel(modelFile, "deterministic surrogate test artifact");
+		validateDeterministicSurrogateManifest(manifestFile, activeLinearModel);
+		lightInterceptionBackendVersion = activeLinearModel.modelVersion + " [deterministicLinearTest]";
+		lightInterceptionAssetChecksum = checksumFile(modelFile) + ":" + checksumFile(manifestFile);
+	} else if (LIGHT_MODE_DIRECT.equals(lightInterceptionModeResolved)) {
+		if (isMeteoDirectLeafLightMode()) {
+			File climateFile = resolveMeteoDirectClimateFile();
+			lightInterceptionBackendVersion = "directInput-meteo-v1 [leaf]";
+			lightInterceptionAssetChecksum = checksumFile(climateFile);
+		} else {
+			File inputFile = resolveLightAsset(lightInterceptionInputFile, "lightInterceptionInputFile");
+			loadDirectInput(inputFile);
+			lightInterceptionBackendVersion = "directInput-v1 [" + directLightResolution + "]";
+			lightInterceptionAssetChecksum = checksumFile(inputFile);
+		}
+	}
+
+	initializedLightMode = lightInterceptionModeResolved;
+	initializedAssetSignature = currentAssetSignature();
+}
+
+
+private static boolean hasConfiguredFallback() {
+	return lightInterceptionFallbackMode != null && lightInterceptionFallbackMode.trim().length() > 0
+		&& !"null".equalsIgnoreCase(lightInterceptionFallbackMode.trim());
+}
+
+
+private static boolean activateConfiguredFallback(RuntimeException cause, boolean beforeGraphInitiation) {
+	if (!hasConfiguredFallback() || fallbackActivatedForCurrentInitialization) return false;
+	String fallback = normalizeLightInterceptionMode(lightInterceptionFallbackMode);
+	if (fallback.equals(lightInterceptionModeResolved)) return false;
+	boolean fallbackUsesRayTracing = LIGHT_MODE_CPU.equals(fallback) || LIGHT_MODE_GPU.equals(fallback);
+	if (!beforeGraphInitiation && !isRayTracingLightMode() && fallbackUsesRayTracing) {
+		throw new IllegalStateException("Cannot change from reduced lightInterceptionMode="
+			+ lightInterceptionModeResolved + " to ray-tracing fallback=" + fallback
+			+ " during a timestep because ray-tracing scene nodes were not initialized."
+			+ " Request cpu/gpu before initiation or use a reduced fallback.", cause);
+	}
+	println("[LightInterception] Backend '" + lightInterceptionModeResolved + "' failed: " + cause.getMessage());
+	println("[LightInterception] Applying explicit fallback mode '" + fallback + "'.");
+	lightInterceptionModeResolved = fallback;
+	initializedLightMode = null;
+	initializedAssetSignature = null;
+	fallbackActivatedForCurrentInitialization = true;
+	initializeResolvedBackend();
+	return true;
+}
+
+
+/** Initialize only the selected backend, applying only an explicitly configured fallback. */
+public static void initializeLightInterceptionBackend() {
+	fallbackActivatedForCurrentInitialization = false;
+	lightInterceptionConfigurationError = null;
+	try {
+		initializeResolvedBackend();
+	} catch (RuntimeException primary) {
+		try {
+			if (!activateConfiguredFallback(primary, true)) throw primary;
+		} catch (RuntimeException fallbackFailure) {
+			lightInterceptionConfigurationError = fallbackFailure.getMessage();
+			throw fallbackFailure;
+		}
+	}
+}
+
+
+private static void resetPhotosynthateLight(PhotosynthateOrgan target) {
+	target.abs = 0;
+	target.absm2 = 0;
+	target.incPARm2 = 0;
+	target.absPAR = 0;
+	target.absRed = 0;
+	target.absFarRed = 0;
+	target.fpar = 0;
+	target.fabs = 0;
+	if (target instanceof Leaf) {
+		Leaf resetLeaf = (Leaf) target;
+		resetLeaf.hasValidLeafLightForPhotosynthesis = false;
+		resetLeaf.cumulativeLaiAbove = Double.NaN;
+	}
+}
+
+
+private static void resetFruitLight(FruitService target) {
+	target.fruitIncidentPAR = 0;
+	target.fruitAbsorbedPAR = 0;
+	target.fruitAbsorbedRadiation = 0;
+	target.fruitAbsorbedRadiation_m2 = 0;
+	target.fruitLightArea_m2 = 0;
+	target.fruitBerryCountEffective = 0;
+}
+
+
+private static void resetTileLight(Tile target) {
+	target.abs = 0;
+	target.absm2 = 0;
+	target.absPAR = 0;
+	target.absFarRed = 0;
+	target.absPARm2 = 0;
+	target.fpar = 0;
+	target.fabs = 0;
+}
+
+
+private static void resetAllLightTargets() {[
+	phtarget:PhotosynthateOrgan ::> { resetPhotosynthateLight(phtarget); }
+	frtarget:FruitService ::> { resetFruitLight(frtarget); }
+	tiletarget:Tile ::> { resetTileLight(tiletarget); }
+	sensortarget:LightSensor ::> { sensortarget.abs = 0; }
+]}
+
+
+private static void refreshReducedLeafFeatures() {[
+	featureLeaf:Leaf ::>
+	{
+		featureLeaf.leafAreaAbove_plant = sum((* otherPlantLeaf:Leaf, (
+			otherPlantLeaf.plantNumber == featureLeaf.plantNumber
+			&& otherPlantLeaf.z > featureLeaf.z
+		) *)[area]);
+		featureLeaf.leafAreaAbove_shoot = sum((* otherShootLeaf:Leaf, (
+			otherShootLeaf.plantNumber == featureLeaf.plantNumber
+			&& otherShootLeaf.cordonNumber == featureLeaf.cordonNumber
+			&& otherShootLeaf.nodeNumber == featureLeaf.nodeNumber
+			&& otherShootLeaf.z > featureLeaf.z
+		) *)[area]);
+		double localHalfWidth = 0.2;
+		featureLeaf.leafAreaDensity_local = sum((* localLeaf:Leaf, (
+			localLeaf.plantNumber == featureLeaf.plantNumber
+			&& (localLeaf.x + localLeaf.endX) / 2 <= featureLeaf.x + localHalfWidth
+			&& (localLeaf.x + localLeaf.endX) / 2 >= featureLeaf.x - localHalfWidth
+			&& (localLeaf.y + localLeaf.endY) / 2 <= featureLeaf.y + localHalfWidth
+			&& (localLeaf.y + localLeaf.endY) / 2 >= featureLeaf.y - localHalfWidth
+			&& (localLeaf.z + localLeaf.endZ) / 2 <= featureLeaf.z + localHalfWidth
+			&& (localLeaf.z + localLeaf.endZ) / 2 >= featureLeaf.z - localHalfWidth
+		) *)[area]) / (localHalfWidth * localHalfWidth * localHalfWidth);
+	}
+]}
+
+
+/**
+ * Refresh dimensionless field-scale LAI strictly above every leaf.
+ * Leaves at the same height are assigned before their group area is accumulated.
+ */
+public static void updateCumulativeLaiAboveForLeaves(Leaf[] leaves, double groundArea) {
+	if (Double.isNaN(groundArea) || Double.isInfinite(groundArea) || groundArea <= 0) {
+		throw new IllegalArgumentException(
+			"Beer-Lambert empirical light requires finite focalArea > 0 m2; found " + groundArea + ".");
+	}
+	if (leaves == null || leaves.length == 0) return;
+	List orderedLeaves = new ArrayList();
+	for (int i = 0; i < leaves.length; i++) {
+		Leaf candidateLeaf = leaves[i];
+		if (candidateLeaf == null) continue;
+		candidateLeaf.cumulativeLaiAbove = Double.NaN;
+		if (Double.isNaN(candidateLeaf.z) || Double.isInfinite(candidateLeaf.z)) {
+			throw new IllegalArgumentException("Beer-Lambert empirical light cannot calculate LAI above "
+				+ "for leaf node=" + candidateLeaf.getId() + ", plantNumber=" + candidateLeaf.plantNumber
+				+ ", fieldInstanceId=" + candidateLeaf.fieldInstanceId + ": non-finite height="
+				+ candidateLeaf.z + ".");
+		}
+		orderedLeaves.add(candidateLeaf);
+	}
+
+	java.util.Collections.sort(orderedLeaves, new java.util.Comparator() {
+		public int compare(Object firstObject, Object secondObject) {
+			Leaf firstLeaf = (Leaf) firstObject;
+			Leaf secondLeaf = (Leaf) secondObject;
+			if (firstLeaf.fieldInstanceId < secondLeaf.fieldInstanceId) return -1;
+			if (firstLeaf.fieldInstanceId > secondLeaf.fieldInstanceId) return 1;
+			if (firstLeaf.isReportable != secondLeaf.isReportable) {
+				return firstLeaf.isReportable ? 1 : -1;
+			}
+			return -Double.compare(firstLeaf.z, secondLeaf.z);
+		}
+	});
+
+	int groupStart = 0;
+	double cumulativeArea = 0;
+	while (groupStart < orderedLeaves.size()) {
+		Leaf groupLeaf = (Leaf) orderedLeaves.get(groupStart);
+		if (groupStart == 0) {
+			cumulativeArea = 0;
+		} else {
+			Leaf previousLeaf = (Leaf) orderedLeaves.get(groupStart - 1);
+			if (previousLeaf.fieldInstanceId != groupLeaf.fieldInstanceId
+				|| previousLeaf.isReportable != groupLeaf.isReportable) {
+				cumulativeArea = 0;
+			}
+		}
+
+		int groupEnd = groupStart + 1;
+		while (groupEnd < orderedLeaves.size()) {
+			Leaf nextLeaf = (Leaf) orderedLeaves.get(groupEnd);
+			if (nextLeaf.fieldInstanceId != groupLeaf.fieldInstanceId
+				|| nextLeaf.isReportable != groupLeaf.isReportable
+				|| Double.compare(nextLeaf.z, groupLeaf.z) != 0) break;
+			groupEnd++;
+		}
+
+		double laiAbove = cumulativeArea / groundArea;
+		for (int i = groupStart; i < groupEnd; i++) {
+			Leaf assignedLeaf = (Leaf) orderedLeaves.get(i);
+			assignedLeaf.cumulativeLaiAbove = laiAbove;
+		}
+		for (int i = groupStart; i < groupEnd; i++) {
+			Leaf contributingLeaf = (Leaf) orderedLeaves.get(i);
+			double leafArea = contributingLeaf.area;
+			if (!contributingLeaf.border && !Double.isNaN(leafArea)
+				&& !Double.isInfinite(leafArea) && leafArea > 0) {
+				cumulativeArea += leafArea;
+			}
+		}
+		groupStart = groupEnd;
+	}
+}
+
+
+private static void prepareReducedLightPredictions() {
+	reducedLightPredictions.clear();
+	Leaf[] predictionLeaves = array((* selectedPredictionLeaf:Leaf *));
+	if (activeBeerLambertModel != null) {
+		updateCumulativeLaiAboveForLeaves(predictionLeaves, focalArea);
+	}
+	for (int i = 0; i < predictionLeaves.length; i++) {
+		Leaf predictionLeaf = predictionLeaves[i];
+		double prediction;
+		if (activeBeerLambertModel != null) {
+			prediction = predictBeerLambertLaiLight(predictionLeaf);
+		} else {
+			prediction = predictLinearLight(predictionLeaf, predictionLeaf.area);
+		}
+		reducedLightPredictions.put(predictionLeaf, Double.valueOf(prediction));
+	}
+}
+
+
+private static boolean reducedModelNeedsStructuralFeatures() {
+	if (activeLinearModel == null) return false;
+	for (int i = 0; i < activeLinearModel.predictors.size(); i++) {
+		LightLinearPredictor predictor = (LightLinearPredictor) activeLinearModel.predictors.get(i);
+		if ("leafAreaAbove_plant".equals(predictor.name)
+			|| "leafAreaAbove_shoot".equals(predictor.name)
+			|| "leafAreaDensity_local".equals(predictor.name)) return true;
+	}
+	return false;
+}
+
+
+private static void prepareSelectedBackend() {
+	boolean forceLightRebuild = carbonDeficitLeafRemovalOccurred;
+	if (isGpuLightMode()) {
+		if (useStaticArc || daysSinceWinterSolstice >= 172) {
+			if (step < 10 || forceLightRebuild) FluxLM.build();
+			FluxLM.compute(true, forceLightRebuild);
+		} else {
+			FluxLM.compute(true, true);
+		}
+	} else if (isCpuLightMode()) {
+		lm.compute(true);
+	} else if (LIGHT_MODE_EMPIRICAL.equals(lightInterceptionModeResolved)
+		|| LIGHT_MODE_SURROGATE.equals(lightInterceptionModeResolved)) {
+		if (reducedModelNeedsStructuralFeatures()) refreshReducedLeafFeatures();
+		prepareReducedLightPredictions();
+	}
+}
+
+
+private static void updateRayLightSources() {[
+	directSource:DirectLight ::> { if (useDirectRadiation) directSource.update(); }
+	diffuseSource:DiffuseLight ::> { if (useDiffuseRadiation) diffuseSource.update(); }
+]}
+
+
+private static void populateAllLightTargets() {[
+	interceptableTarget:ILightInterceptable ::> { interceptableTarget.calcLight(); }
+	targetTile:Tile ::> { if (associatePlantsToTiles) targetTile.calcLight(); }
+	targetSensor:LightSensor ::> { if (useLightSensors) targetSensor.update(); }
+]}
+
+
+public static void validateCurrentLightInterceptionGraphCapabilities() {
+	if (isRayTracingLightMode()) return;
+	FruitService existingFruit = first((* capabilityFruit:FruitService *));
+	if (existingFruit != null) {
+		throw new IllegalArgumentException("lightInterceptionMode=" + lightInterceptionModeResolved
+			+ " is leaf-only, but the current graph contains FruitService objects.");
+	}
+	if (associatePlantsToTiles) {
+		Tile existingTile = first((* capabilityTile:Tile *));
+		if (existingTile != null) {
+			throw new IllegalArgumentException("lightInterceptionMode=" + lightInterceptionModeResolved
+				+ " is leaf-only, but soil-tile interception is enabled.");
+		}
+	}
+}
+
+
+private static void executeLightInterceptionStep() {
+	validateCurrentLightInterceptionGraphCapabilities();
+	if (isRayTracingLightMode()) updateRayLightSources();
+	prepareSelectedBackend();
+	lightInterceptionStepPrepared = true;
+	populateAllLightTargets();
+}
+
+
+/**
+ * Shared Apple/Grapevine interception phase. The public committed flag becomes true
+ * only after every supported target has been populated successfully.
+ */
+public static void runLightInterceptionStep(boolean canopyAllowed) {
+	lightInterceptionComputed = false;
+	lightInterceptionStepPrepared = false;
+	reducedLightPredictions.clear();
+	resetAllLightTargets();
+	boolean meteoDirectLeaf = isMeteoDirectLeafLightMode();
+	if (!calcLightInterception || !runLightModel || (!canopyAllowed && !meteoDirectLeaf)) return;
+	if (!meteoDirectLeaf && globalRadiation <= LIGHT_THRESHOLD) return;
+
+	initializeLightInterceptionBackend();
+	fallbackActivatedForCurrentInitialization = false;
+	try {
+		executeLightInterceptionStep();
+	} catch (RuntimeException primary) {
+		lightInterceptionStepPrepared = false;
+		lightInterceptionComputed = false;
+		reducedLightPredictions.clear();
+		resetAllLightTargets();
+		if (!activateConfiguredFallback(primary, false)) throw primary;
+		executeLightInterceptionStep();
+		lightInterceptionProvenanceRefreshPending = true;
+	}
+	lightInterceptionComputed = true;
+	carbonDeficitLeafRemovalOccurred = false;
+}
+
+
+private static RawLightMeasurement getRawAbsorbedMeasurement(Object target) {
+	RawLightMeasurement raw = new RawLightMeasurement();
+	if (!(target instanceof Node)) {
+		throw new IllegalArgumentException("Light-interception target is not a GroIMP graph Node: " + target);
+	}
+	Node node = (Node) target;
+	if (isCpuLightMode()) {
+		Spectrum3d spectrum = lm.getAbsorbedPower3d(node);
+		if (spectrum != null) {
+			raw.channel0 = spectrum.x;
+			raw.channel1 = spectrum.y;
+			raw.channel2 = spectrum.z;
+			raw.integrated = spectrum.integrate();
+			raw.valid = allFinite(raw.channel0, raw.channel1, raw.channel2, raw.integrated);
+		}
+	} else if (isGpuLightMode()) {
+		Measurement measurement = FluxLM.getAbsorbedPowerMeasurement(node);
+		if (measurement != null && measurement.data != null && measurement.data.length > 2) {
+			raw.channel0 = measurement.data[0];
+			raw.channel1 = measurement.data[1];
+			raw.channel2 = measurement.data[2];
+			raw.integrated = measurement.integrate();
+			raw.valid = allFinite(raw.channel0, raw.channel1, raw.channel2, raw.integrated);
+		}
+	}
+	// Preserve legacy ray-tracer behavior for newly created or unmeasured nodes.
+	// Strict missing-data handling applies to reduced providers, not CPU/GPU measurements.
+	return raw;
+}
+
+
+private static boolean allFinite(double a, double b, double c, double d) {
+	return !Double.isNaN(a) && !Double.isInfinite(a)
+		&& !Double.isNaN(b) && !Double.isInfinite(b)
+		&& !Double.isNaN(c) && !Double.isInfinite(c)
+		&& !Double.isNaN(d) && !Double.isInfinite(d);
+}
+
+
+private static double nonNegativeFinite(double value) {
+	return Double.isNaN(value) || Double.isInfinite(value) || value < 0 ? 0 : value;
+}
+
+
+private static LightInterceptionResult reducedLeafResult(String responseVariable, double responseValue,
+		double area, double optionalFarRed, boolean hasFarRed, double optionalTotal, boolean hasTotal) {
+	LightInterceptionResult result = LightInterceptionResult.zero();
+	if (area <= 0) return result;
+	double totalRadiation = directRadiation + diffuseRadiation;
+	if (isRelativeParResponse(responseVariable)) {
+		result.incPARm2 = nonNegativeFinite(responseValue * fPAR * totalRadiation);
+	} else if (isIncidentParResponse(responseVariable)) {
+		result.incPARm2 = nonNegativeFinite(responseValue);
+	} else {
+		throw new IllegalArgumentException("Unsupported reduced light responseVariable '" + responseVariable + "'.");
+	}
+	double absorptancePAR = Math.max(0, 1 - reflectancePAR - transmittancePAR);
+	result.absPAR = result.incPARm2 * absorptancePAR * area;
+	result.absFarRed = hasFarRed ? nonNegativeFinite(optionalFarRed) : 0;
+	result.abs = hasTotal ? nonNegativeFinite(optionalTotal) : result.absPAR + result.absFarRed;
+	result.absm2 = result.abs / area;
+	result.absPARm2 = result.absPAR / area;
+	if (totalRadiation > 0 && fPAR > 0) {
+		result.fpar = result.incPARm2 / (fPAR * totalRadiation);
+		result.fabs = result.absm2 / totalRadiation;
+	}
+	return result;
+}
+
+
+private static LightInterceptionResult meteoDirectLeafResult(double area) {
+	LightInterceptionResult result = LightInterceptionResult.zero();
+	if (area <= 0) return result;
+	double meteoRadiation = globalRadiation;
+	double parFraction = fPAR;
+	boolean invalidRadiation = Double.isNaN(meteoRadiation) || Double.isInfinite(meteoRadiation) || meteoRadiation < 0;
+	boolean invalidFraction = meteoRadiation > 0 && (Double.isNaN(parFraction) || Double.isInfinite(parFraction)
+		|| parFraction < 0 || parFraction > 1);
+	if (invalidRadiation || invalidFraction) {
+		String message = "Invalid meteo direct light at year=" + year + ", day=" + dayOfYear
+			+ ", hour=" + hourOfDay + ", step=" + step + ", climate_file=" + climate_file
+			+ ": totalRadiation=" + meteoRadiation + ", fPAR=" + parFraction
+			+ ". Expected finite totalRadiation >= 0 and 0 <= fPAR <= 1.";
+		if (lightInterceptionStrict) throw new IllegalStateException(message);
+		println("[LightInterception] " + message + " Using zero because lightInterceptionStrict=false.");
+		meteoRadiation = 0;
+		parFraction = 0;
+	}
+	double incidentPAR = meteoRadiation * parFraction;
+	if (meteoRadiation <= 0) incidentPAR = 0;
+	if (Double.isNaN(incidentPAR) || Double.isInfinite(incidentPAR) || incidentPAR < 0) {
+		String message = "Invalid meteo direct incident PAR at year=" + year + ", day=" + dayOfYear
+			+ ", hour=" + hourOfDay + ", step=" + step + ", climate_file=" + climate_file
+			+ ": totalRadiation*fPAR=" + incidentPAR + ".";
+		if (lightInterceptionStrict) throw new IllegalStateException(message);
+		println("[LightInterception] " + message + " Using zero because lightInterceptionStrict=false.");
+		incidentPAR = 0;
+	}
+	double safeArea = Math.max(area, 1e-8);
+	result.incPARm2 = incidentPAR;
+	result.absPARm2 = incidentPAR;
+	result.absPAR = incidentPAR * safeArea;
+	result.absFarRed = 0;
+	result.absm2 = incidentPAR;
+	result.abs = incidentPAR * safeArea;
+	if (incidentPAR > 0) {
+		result.fpar = 1;
+		result.fabs = 1;
+	}
+	return result;
+}
+
+
+private static double featureValue(Object target, double area, String featureName) {
+	if (!(target instanceof Leaf)) {
+		throw new IllegalArgumentException("Reduced light providers currently support Leaf targets only.");
+	}
+	Leaf leafTarget = (Leaf) target;
+	if ("x".equals(featureName)) return leafTarget.x;
+	if ("y".equals(featureName)) return leafTarget.y;
+	if ("z".equals(featureName)) return leafTarget.z;
+	if ("endX".equals(featureName)) return leafTarget.endX;
+	if ("endY".equals(featureName)) return leafTarget.endY;
+	if ("endZ".equals(featureName)) return leafTarget.endZ;
+	if ("length".equals(featureName)) return leafTarget.length;
+	if ("adjustedWidth".equals(featureName)) return leafTarget.adjustedWidth;
+	if ("area".equals(featureName)) return area;
+	if ("leafAreaAbove_plant".equals(featureName)) return leafTarget.leafAreaAbove_plant;
+	if ("leafAreaAbove_shoot".equals(featureName)) return leafTarget.leafAreaAbove_shoot;
+	if ("leafAreaDensity_local".equals(featureName)) return leafTarget.leafAreaDensity_local;
+	if ("layer".equals(featureName)) return leafTarget.layer;
+	if ("globalRadiation".equals(featureName) || "incomingRadiation".equals(featureName)) return globalRadiation;
+	if ("directRadiation".equals(featureName)) return directRadiation;
+	if ("diffuseRadiation".equals(featureName)) return diffuseRadiation;
+	if ("fDiffuseLight".equals(featureName)) return fdiff;
+	if ("solarElevation".equals(featureName)) return solarElevation;
+	if ("azimuth".equals(featureName)) return azimuth;
+	if ("rowOrientation".equals(featureName)) return rowOrientation;
+	if ("Ta".equals(featureName)) return Ta;
+	if ("rh".equals(featureName)) return rh;
+	if ("wind".equals(featureName)) return wind;
+	if ("hourOfDay".equals(featureName)) return hourOfDay;
+	if ("dayOfYear".equals(featureName)) return dayOfYear;
+	throw new IllegalArgumentException("Unsupported light-model predictor '" + featureName + "'.");
+}
+
+
+private static double transformedFeature(double value, LightLinearPredictor predictor) {
+	if (value < predictor.validMin || value > predictor.validMax) {
+		println("[LightInterception] Predictor '" + predictor.name + "'=" + value
+			+ " is outside declared range [" + predictor.validMin + ", " + predictor.validMax + "].");
+	}
+	if ("identity".equals(predictor.transformation)) return value;
+	if ("square".equals(predictor.transformation)) return value * value;
+	if ("sqrt".equals(predictor.transformation)) {
+		if (value < 0) throw new IllegalArgumentException("sqrt predictor '" + predictor.name + "' is negative.");
+		return Math.sqrt(value);
+	}
+	if ("log".equals(predictor.transformation)) {
+		if (value <= 0) throw new IllegalArgumentException("log predictor '" + predictor.name + "' must be positive.");
+		return Math.log(value);
+	}
+	if ("log1p".equals(predictor.transformation)) {
+		if (value <= -1) throw new IllegalArgumentException("log1p predictor '" + predictor.name + "' must exceed -1.");
+		return Math.log1p(value);
+	}
+	throw new IllegalArgumentException("Unsupported predictor transformation '" + predictor.transformation + "'.");
+}
+
+
+private static double predictLinearLight(Object target, double area) {
+	if (activeLinearModel == null) throw new IllegalStateException("Reduced linear light model is not initialized.");
+	double prediction = activeLinearModel.intercept;
+	for (int i = 0; i < activeLinearModel.predictors.size(); i++) {
+		LightLinearPredictor predictor = (LightLinearPredictor) activeLinearModel.predictors.get(i);
+		double raw = featureValue(target, area, predictor.name);
+		if (Double.isNaN(raw) || Double.isInfinite(raw)) {
+			throw new IllegalArgumentException("Predictor '" + predictor.name + "' is non-finite for light target.");
+		}
+		prediction += predictor.coefficient * transformedFeature(raw, predictor);
+	}
+	if (Double.isNaN(prediction) || Double.isInfinite(prediction)) {
+		throw new IllegalStateException("Reduced light model returned a non-finite prediction.");
+	}
+	if (prediction < 0) {
+		println("[LightInterception] Clamping biologically impossible negative light prediction to zero.");
+		prediction = 0;
+	}
+	return prediction;
+}
+
+
+private static void validateEmpiricalPredictor(String predictorName, double value,
+		double validMin, double validMax, boolean strict, String leafContext) {
+	if (Double.isNaN(value) || Double.isInfinite(value)) {
+		throw new IllegalArgumentException("Beer-Lambert predictor '" + predictorName
+			+ "' is non-finite for " + leafContext + ": " + value + ".");
+	}
+	if (value < validMin || value > validMax) {
+		String message = "Beer-Lambert predictor '" + predictorName + "'=" + value
+			+ " is outside valid range [" + validMin + ", " + validMax + "] for "
+			+ leafContext + ".";
+		if (strict) throw new IllegalArgumentException(message);
+		println("[LightInterception] Warning: " + message
+			+ " Continuing without altering the predictor because empiricalLightStrict=false.");
+	}
+}
+
+
+private static double predictBeerLambertLaiLight(Leaf leaf) {
+	BeerLambertLaiLightModel model = activeBeerLambertModel;
+	if (model == null) {
+		throw new IllegalStateException("Beer-Lambert empirical light model is not initialized.");
+	}
+	if (leaf == null) {
+		throw new IllegalArgumentException("Beer-Lambert empirical light cannot predict a null Leaf.");
+	}
+	double laiAbove = leaf.cumulativeLaiAbove;
+	double height = leaf.z;
+	String leafContext = "leaf node=" + leaf.getId() + ", plantNumber=" + leaf.plantNumber
+		+ ", fieldInstanceId=" + leaf.fieldInstanceId + ", height=" + height
+		+ " m, LAI_above=" + laiAbove;
+	validateEmpiricalPredictor("laiAbove", laiAbove,
+		model.laiValidMin, model.laiValidMax, model.strict, leafContext);
+	validateEmpiricalPredictor("height", height,
+		model.heightValidMin, model.heightValidMax, model.strict, leafContext);
+
+	double exponent = -model.extinctionCoefficient * laiAbove;
+	if (model.useHeightCoefficient) {
+		exponent += model.heightCoefficient * height;
+	}
+	double relativePar = model.topRelativePAR * Math.exp(exponent);
+	if (Double.isNaN(relativePar) || Double.isInfinite(relativePar)) {
+		throw new IllegalStateException("Beer-Lambert empirical light model returned a non-finite "
+			+ "prediction for " + leafContext + ".");
+	}
+	return Math.max(0.0, Math.min(1.0, relativePar));
+}
+
+
+private static String reflectedOrganUuid(Object target) {
+	try {
+		Field f = target.getClass().getField("organUUId");
+		Object value = f.get(target);
+		if (value != null && value.toString().trim().length() > 0) return value.toString().trim();
+	} catch (Exception ignored) {}
+	return null;
+}
+
+
+private static String zoneForLeaf(Leaf target) {
+	if (target.layer == 0) return "low";
+	if (target.layer == 1) return "mid";
+	if (target.layer == 2) return "up";
+	throw new IllegalArgumentException("Leaf has unsupported canopy-zone layer " + target.layer + ".");
+}
+
+
+private static String directLookupKey(Object target) {
+	if (!(target instanceof Leaf)) {
+		throw new IllegalArgumentException("directInput currently supports Leaf targets only.");
+	}
+	Leaf leafTarget = (Leaf) target;
+	String resolution = directLightResolution;
+	if (resolution == null) {
+		throw new IllegalStateException("Direct-input identity resolution has not been inferred from the loaded input file.");
+	}
+	String key = year + "|" + dayOfYear + "|" + hourOfDay;
+	if ("field".equals(resolution)) return key + "|" + leafTarget.fieldInstanceId;
+	key += "|" + leafTarget.plantNumber + "|" + leafTarget.fieldInstanceId;
+	if ("plant".equals(resolution)) return key;
+	if ("canopyZone".equals(resolution)) return key + "|" + zoneForLeaf(leafTarget);
+	if ("organUUId".equals(directIdentityColumn)) {
+		String uuid = reflectedOrganUuid(target);
+		if (uuid == null) {
+			throw new IllegalArgumentException("Direct leaf input uses organUUId, but the current Leaf graph object has no public organUUId.");
+		}
+		return key + "|" + uuid;
+	}
+	if (!(target instanceof Node)) throw new IllegalArgumentException("Direct leaf target is not a GroIMP Node.");
+	return key + "|" + ((Node) target).getId();
+}
+
+
+private static DirectLightRecord directRecord(Object target) {
+	String key = directLookupKey(target);
+	DirectLightRecord record = (DirectLightRecord) directLightRows.get(key);
+	if (record == null) {
+		String message = "No direct-input light row matches key " + key + " at resolution "
+			+ directLightResolution + ". Interpolation is not performed.";
+		if (lightInterceptionStrict) throw new IllegalStateException(message);
+		println("[LightInterception] " + message + " Using explicit zero because lightInterceptionStrict=false.");
+	}
+	return record;
+}
+
+
+/** Final leaf/photosynthate result. Third argument is the already resolved layer shading factor. */
+public static LightInterceptionResult getPhotosynthateLightResult(Object target, double area, double layerFactor) {
+	if (!lightInterceptionStepPrepared || area <= 0) return LightInterceptionResult.zero();
+	if (isMeteoDirectLeafLightMode()) return meteoDirectLeafResult(area);
+	if (isRayTracingLightMode()) {
+		RawLightMeasurement raw = getRawAbsorbedMeasurement(target);
+		if (!raw.valid) return LightInterceptionResult.zero();
+		double effectiveLayer = Double.isNaN(layerFactor) || Double.isInfinite(layerFactor) || layerFactor < 0 ? 1 : layerFactor;
+		double farRedCorrection = Double.isNaN(fabsFarRedCorrection) || Double.isInfinite(fabsFarRedCorrection)
+			|| fabsFarRedCorrection < 0 ? 1 : fabsFarRedCorrection;
+		double farRedLayer = Math.max(0, Math.min(1, effectiveLayer * farRedCorrection));
+		double safeArea = Math.max(area, 1e-4);
+		double maxPerArea = 2 * globalRadiation;
+		double rawPar = nonNegativeFinite(fPAR * 3 * raw.channel0 * effectiveLayer);
+		double rawFarRed = nonNegativeFinite((1 - fPAR) * 3 * raw.channel2 * farRedLayer);
+		LightInterceptionResult result = LightInterceptionResult.zero();
+		result.absPARm2 = Math.max(0, Math.min(maxPerArea * fPAR, rawPar / safeArea));
+		double farRedM2 = Math.max(0, Math.min(maxPerArea * (1 - fPAR), rawFarRed / safeArea));
+		result.absPAR = result.absPARm2 * safeArea;
+		result.absFarRed = farRedM2 * safeArea;
+		result.abs = result.absPAR + result.absFarRed;
+		result.absm2 = result.abs / safeArea;
+		result.incPARm2 = Math.max(0, Math.min(maxPerArea, calcIinc((float) result.absPARm2)));
+		double totalRadiation = directRadiation + diffuseRadiation;
+		if (totalRadiation > 0 && fPAR > 0) {
+			result.fpar = result.incPARm2 / (fPAR * totalRadiation);
+			result.fabs = result.absm2 / totalRadiation;
+		}
+		return result;
+	}
+	if (LIGHT_MODE_EMPIRICAL.equals(lightInterceptionModeResolved)
+		|| LIGHT_MODE_SURROGATE.equals(lightInterceptionModeResolved)) {
+		Double cachedPrediction = (Double) reducedLightPredictions.get(target);
+		if (cachedPrediction == null) {
+			throw new IllegalStateException("No batched light prediction is available for the current Leaf target.");
+		}
+		double prediction = cachedPrediction.doubleValue();
+		String responseVariable = activeBeerLambertModel == null
+			? activeLinearModel.responseVariable : activeBeerLambertModel.responseVariable;
+		return reducedLeafResult(responseVariable, prediction, area, 0, false, 0, false);
+	}
+	if (LIGHT_MODE_DIRECT.equals(lightInterceptionModeResolved)) {
+		DirectLightRecord record = directRecord(target);
+		if (record == null) return LightInterceptionResult.zero();
+		return reducedLeafResult(record.responseVariable, record.responseValue, area,
+			record.absorbedFarRed, record.hasAbsorbedFarRed,
+			record.absorbedTotal, record.hasAbsorbedTotal);
+	}
+	throw new IllegalStateException("No photosynthate light provider for mode " + lightInterceptionModeResolved + ".");
+}
+
+
+/** Final fruit result. Arguments are single-fruit and effective light areas in m2. */
+public static LightInterceptionResult getFruitLightResult(Object target, double singleFruitArea, double effectiveArea) {
+	if (!lightInterceptionStepPrepared || effectiveArea <= 0) return LightInterceptionResult.zero();
+	if (!isRayTracingLightMode()) {
+		throw new IllegalArgumentException("lightInterceptionMode=" + lightInterceptionModeResolved
+			+ " does not declare fruit support.");
+	}
+	RawLightMeasurement raw = getRawAbsorbedMeasurement(target);
+	if (!raw.valid) return LightInterceptionResult.zero();
+	double singleArea = Math.max(1e-8, singleFruitArea);
+	double usedArea = Math.max(1e-8, effectiveArea);
+	double areaScale = usedArea / singleArea;
+	if (Double.isNaN(areaScale) || Double.isInfinite(areaScale) || areaScale <= 0) areaScale = 1;
+	LightInterceptionResult result = LightInterceptionResult.zero();
+	result.absPAR = nonNegativeFinite(fPAR * 3 * raw.channel0 * areaScale);
+	result.absFarRed = nonNegativeFinite((1 - fPAR) * 3 * raw.channel2 * areaScale);
+	result.abs = isGpuLightMode()
+		? nonNegativeFinite(raw.integrated * areaScale)
+		: result.absPAR + result.absFarRed;
+	result.absPARm2 = result.absPAR / usedArea;
+	result.absm2 = result.abs / usedArea;
+	// Preserve the existing fruit output meaning: absorbed PAR per effective fruit area.
+	result.incPARm2 = Math.min(2 * globalRadiation, result.absPARm2);
+	return result;
+}
+
+
+/** Final soil-tile result. */
+public static LightInterceptionResult getTileLightResult(Object target, double area) {
+	if (!lightInterceptionStepPrepared || area <= 0) return LightInterceptionResult.zero();
+	if (!isRayTracingLightMode()) {
+		throw new IllegalArgumentException("lightInterceptionMode=" + lightInterceptionModeResolved
+			+ " does not declare soil-tile support.");
+	}
+	RawLightMeasurement raw = getRawAbsorbedMeasurement(target);
+	if (!raw.valid) return LightInterceptionResult.zero();
+	double fabsSoilRatio = getFabsSoilRatioOrOne(year, dayOfYear, hourOfDay);
+	double fparSoilRatio = getFparSoilRatioOrOne(year, dayOfYear, hourOfDay);
+	if (Double.isNaN(fabsSoilRatio) || Double.isInfinite(fabsSoilRatio) || fabsSoilRatio < 0) fabsSoilRatio = 1;
+	if (Double.isNaN(fparSoilRatio) || Double.isInfinite(fparSoilRatio) || fparSoilRatio < 0) fparSoilRatio = 1;
+	LightInterceptionResult result = LightInterceptionResult.zero();
+	result.absPAR = nonNegativeFinite(fPAR * 3 * raw.channel0) * fparSoilRatio;
+	result.absFarRed = nonNegativeFinite((1 - fPAR) * 3 * raw.channel2) * fabsSoilRatio;
+	result.abs = result.absPAR + result.absFarRed;
+	result.absPARm2 = result.absPAR / area;
+	result.absm2 = result.abs / area;
+	if (globalRadiation > LIGHT_THRESHOLD) {
+		result.fpar = result.absPARm2 / globalRadiation;
+		result.fabs = result.absm2 / globalRadiation;
+	}
+	return result;
+}
+
+
+/**
+ * Returns sensed irradiance in W m-2.
+ */
+public static double getSensorIrradiance(Object target) {
+	if (!lightInterceptionStepPrepared) return 0;
+
+	if (!isRayTracingLightMode()) {
+		throw new IllegalArgumentException(
+			"lightInterceptionMode=" + lightInterceptionModeResolved
+			+ " does not declare light-sensor support."
+		);
+	}
+
+	if (!(target instanceof Node)) {
+		throw new IllegalArgumentException(
+			"LightSensor target is not a GroIMP Node."
+		);
+	}
+
+	Node node = (Node) target;
+
+	if (isCpuLightMode()) {
+		Spectrum3d spectrum = lm.getSensedIrradiance3d(node);
+		return spectrum == null
+			? 0
+			: nonNegativeFinite(spectrum.integrate());
+	}
+
+	Measurement measurement =
+		FluxLM.getSensedIrradianceMeasurement(node);
+
+	return measurement == null
+		? 0
+		: nonNegativeFinite(measurement.integrate());
+}

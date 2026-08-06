@@ -1,0 +1,230 @@
+import static absOrgan.*;
+import static leaf.*;
+import static shoot.*;
+import static globalParameters.*;
+import static modelOptions.*;
+import static initialConditions.*;
+
+private static int countBend = 0; 									// Number of times bend to wires has been applied
+private static float[] WireHeights = {0.35, 0.9, 1.1, 1.4, 1.7}; 	// Heights of wires for positioning shoots
+private static float widthPost = 0.1;
+private static float heightPost = 1.8;
+private static float widthWire = 0.01;
+private static float lengthWire;
+
+module Post extends F(heightPost, widthPost)
+{{ setShader(new RGBAShader(0.5, 0.3, 0)); }}
+
+module Wire extends F(lengthWire, widthWire)
+{{setShader(GRAY);}}
+
+// Apply bend if required proportion of shoots are above final wire height
+public static void ApplyBend()
+{
+	float bendProportion = 0.2;
+	if (step == 1) {
+		initShootPos();
+	}
+	if(countBend < 4){
+		float proportion = 0;
+		long countBendable = count((* i:Internode, 
+		(i.rank == 1 && getShootLength(i) > WireHeights[countBend]) *));
+		long numbAllShoots = 
+		count((* i:Internode, (i.rank == 1) *));
+		if(numbAllShoots > 0){	
+			proportion = (float) countBendable/numbAllShoots;
+			
+		}
+			if(proportion > bendProportion){
+				bend(countBend);
+				countBend++;
+			}
+			if (printFlag) { println("bending countBendable " + countBendable + " numbAllShoots " + numbAllShoots); }
+			
+			
+	}
+ 	if (countBend > 0) {
+		for (int wireNum = 1; wireNum <= countBend; wireNum++) {
+			
+			float height = WireHeights[wireNum];
+			// Find all shoots which are taller than the wire but have not yet been bent
+			[(* i:Internode (>)+ j:Joint *), (i[rank] == 1
+			&& i[highestBend] < height
+			&& location(j).z > height) ::>
+				{bendSingle(wireNum, i);}
+			]
+		}
+	} 
+	
+}
+
+// Initalize static values
+public static void initShootPos() 
+{
+	lengthWire = plantDistance + (nrPlants - 1) * plantDistance; // Intialized here to ensure nrPlants and plantDistance have previously been inititilized
+	WireHeights[0] = WOOD_LENGTH; // Intializaed here to ensure WOOD_LENGTH has previously been initialized
+	countBend = 0;	
+}
+
+//if the coordination system changes then it requires a coordination transform before apply the method
+// Bending of primary shoots
+private static void bend(int countBend)
+{
+	float height = WireHeights[countBend + 1];
+	raiseShoots(height);
+	bendShoots(height);
+	placeWires(height);
+}
+
+// Raise any long but low growing shoots so they can be bent into position by the wires
+private static void raiseShoots(float height)
+[
+	(* i:Internode j:Joint (>)+ : (jw:Joint) *), (shouldRaiseJoint(j, i, jw, height)
+	)::>
+	{
+		float numbJoints = getNumJointsBelowHeight(i, height); 
+		
+		float yTarget; //Y coord of wire nearest to shoot
+		if (location(jw).y > location(i).y + (widthPost / 2)) {
+			yTarget = location(i).y + (widthPost / 2);
+		} else if (location(jw).y < location(i).y - (widthPost / 2)) {
+			yTarget = location(i).y - (widthPost / 2);
+		} else {
+			yTarget = location(jw).y;
+		}
+		
+		float xTarget;
+		if (location(jw).x > location(i).x + (widthPost / 2)) {
+			xTarget = location(i).x + (widthPost / 2);
+		} else if (location(jw).x < location(i).x - (widthPost / 2)){
+			xTarget = location(i).x - (widthPost / 2);
+		} else {
+			xTarget = location(jw).x;
+		}
+	
+		j.initiate(new Point3d(xTarget, yTarget, height),getNewStrength(j, numbJoints), j[rank]);
+	}
+	//jt:Joint // Replace j with Joint in same position but with different strength and target of tropism
+	
+]
+
+// Bend shoots around two wires placed at the given height
+private static void bendShoots(float height)
+[
+	(* i:Internode j:Joint (>)+ :(jw:Joint) *), (shouldBendJoint(j, i, jw, height)
+	)::> 
+	{
+		i.highestBend = height;
+		float numbJoints =  getNumJointsBelowHeight(i, height); 
+		float posWire; //Y coord of wire nearest to shoot
+		if(location(jw).y > location(i).y){
+			posWire = location(i).y + (widthPost / 2);
+		}
+		else{
+			posWire = location(i).y - (widthPost / 2);
+		}
+		
+		j.initiate(new Point3d(location(jw).x, posWire, height),getNewStrength(j, numbJoints), j[rank]); 
+	}
+	//jt:Joint // Replace j with Joint in same position but with different strength and target of tropism
+	//;
+]
+
+// Place two wires on either side of post at given height
+private static void placeWires(float height)
+[
+		// place the pair of wires
+	==> ^
+	
+	// two middle wires
+	for (int row=0; row<nrRows; row++) (
+		[Translate(lengthWire - plantDistance/2, row*rowDistance + (widthPost / 2), height) RL(90) RU(-90) 
+		Wire]
+		[Translate(lengthWire - plantDistance/2, row*rowDistance - (widthPost / 2), height) RL(90) RU(-90)
+		Wire]
+	)
+	;
+]
+
+// Bend shoot connected to Internode I inside wires
+private static void bendSingle(int countBend, Internode i)
+[
+	{
+		float height = WireHeights[countBend];
+	}
+	
+	(* i (>)* j:Joint (>)+ : (jw:Joint) *), (shouldBendJoint(j, i, jw, height)
+	)::> 
+	{
+		i.highestBend = height;
+		float numbJoints =  getNumJointsBelowHeight(i, height); 
+		float posWire; //Y coord of wire nearest to shoot
+		if(location(jw).y > location(i).y){
+			posWire = location(i).y + (widthPost / 2);
+		}
+		else{
+			posWire = location(i).y - (widthPost / 2);
+		}
+		j.initiate(new Point3d(location(jw).x, posWire, height),
+		getNewStrength(j, numbJoints), j[rank]);
+	}
+	
+	//jt:Joint // Replace j with Joint in same position but with different strength and target of tropism
+	
+]
+
+// Return true if joint on shoot starting at base and ending at peak should be bent to given height
+private static boolean shouldBendJoint(Joint joint, Internode base, Joint peak, float height)
+{
+	return (base.rank == 1
+	&& location(peak).z > height
+	// 5cm buffer because apex could finally be below the final wire height
+	&& getShootLength(base) - 0.05 >= height - WireHeights[0]  
+	&&	location(joint).z < height - 0.05 // to avoid falting to point below
+	&& 	location(joint).z > height - 0.5 // to restrict bend due to stiffness
+	&& location(peak).y > location(base).y + (widthPost / 2) // wire position
+	| location(peak).y < location(base).y - (widthPost / 2)); // wire position
+}
+
+// Return true if joint on shoot starting at base and ending at peak should be bent to given height
+private static boolean shouldRaiseJoint(Joint joint, Internode base, Joint peak, float height)
+{
+	return (base[rank] == 1 
+	&& location(peak).z < height
+	&& location(joint).z < height
+	// 5cm buffer because apex could finally be below the final wire height
+	&& getShootLength(base) - 0.1 > height - WireHeights[0]
+	&& location(peak).y > location(base).y + (widthPost / 2) // wire position
+	| location(peak).y < location(base).y - (widthPost / 2) // wire position
+	| location(peak).x > location(base).x + (widthPost / 2) // wire position
+	| location(peak).x < location(base).x - (widthPost / 2));
+}
+
+// Return number of joints below the given height on this shoot
+private static long getNumJointsBelowHeight(Internode i, float height)
+{
+	long res = Math.max(1,count((* i > joi:Joint, (location(joi).z < height - 0.1) *)));  
+	return res; 
+}
+
+// Return the length of the shoot starting at the given internode
+private static float getShootLength(Internode i)
+{
+	return sum((* i (>)* inter:Internode *).length);
+}
+
+// Return the strength of the new joint which will replace the old joint j
+private static float getNewStrength(Joint j, float numbJoints)
+{
+	 double value = j[strength] + Math.pow((1.0 / numbJoints) * j[rank], 2);
+
+    // Check for Infinity
+    if (Double.isInfinite(value)) {
+        return 1;  // or handle this case appropriately
+    }
+
+    // Limit the value to [0, 1]
+    value = Math.max(0, Math.min(1, value));
+
+    return value;
+}

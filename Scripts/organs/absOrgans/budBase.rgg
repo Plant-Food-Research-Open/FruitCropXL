@@ -1,0 +1,515 @@
+import static absOrgan.*;
+import static plantBase.*;
+import static budApple.*;
+import static budGrapevine.*;
+import static interfaces.*;
+import static rootSystem.*;
+import static shoot.*;
+import static plantParameters.*;
+import static globalParameters.*;
+import static shootBase.*;
+
+import org.apache.commons.math3.distribution.*;
+
+public class BudsServiceFactory {
+	public static BudService getService(String species) {
+		if (species.equals("grapevine")) {
+			return new BudGrapevineService();
+		} else {
+			return new BudAppleService();
+		}
+	}
+}
+
+public abstract class BudService extends absBud implements IBud {
+	/**
+	 * The required methods are already inherited from absBud. This class serves to keep the naming convention of
+	 * having each alternative module extend a service abstract class so that it can be used in the factory.
+	 * 
+	 * Add methods that are specific to the service class specifically here.
+	 */ 
+
+
+	/**
+	 * @return a new instance of the Apex associated with this type of Bud
+	 */
+	public ApexService createApex();
+}
+
+public abstract class ApexService extends absApex {
+
+}
+
+public module BudCreator {
+    private String species;
+
+    public BudCreator(String species) {
+        this.species = species;
+    }
+
+    public BudService createBud() {
+        return BudsServiceFactory.getService(this.species);
+    }
+}
+
+
+
+/**
+ * abstract class for bud, uses abstract class as it is easier to extend methods.
+ */
+public abstract class absBud extends Organ implements IBud {
+	/** number of flowers in the complex fruitting bud */
+    int flowerNumber;
+
+    //for controling the lateral branching
+    // Physiology multipliers (0..1); you can wire these to real signals later
+    double F_apex  = 1.00; //0.85;   // apical dominance factor (lower = stronger dominance)
+    double F_water = 1.00;   // relative water status factor
+    double F_carb  = 1.00;   // local NSC/crop-load proxy
+    
+    // ------------- Lateral gating runtime state (per bud) --------------------
+    /** true once the lateral gate has succeeded (the bud may break as soon as age rule allows) */
+    boolean latGatePassed = false;
+    /** next milestone index (in whole phyllochrons) to evaluate; 0 means "inactive/not lateral" */
+    int nextGateK = 0;
+    
+    
+    /** Time difference between seeing the bud burst tip broken and the model definition of leaf size of 2 cm.*/
+    float budBurstDelay = 0;
+    float shootGrowthDelay = 0;    
+    double lateralBaseDelay = 0.0;                       // sampled value per apex
+    boolean isSpur;
+    int totalNodes;
+    
+    float declinationAngleDeg = 45;      // planned shoot declination (deg)
+
+    int[] nodeAllocation;
+    double potentialLength;
+    //branching control
+    int nBranches;
+
+	// choose a sensible minimum spacing in nodes (e.g., 2–3)
+	int[][] branchPlan;
+	// branchPlan[k][0] tells you WHICH main node carries branch k
+	// branchPlan[k][1] is HOW MANY nodes that branch will have
+	int nextBranchIdx;
+	/** Indicates if the bud is dormant. true: bud is dormant, false: bud can break. */
+    boolean dormant;
+    /** True if bud should be replaced with apex. */
+    boolean shouldBreak = false;
+    /** Indicates the type of plant. true: border plant, false: focal plant. */
+    boolean border;
+            
+    /** Integer indicating the type of bud. 1: vegetative bud, 2: fruit bud. */
+    int budType;
+    /** Tracks the number of branchings in one growing season to control bud behavior. */
+    int syllepticOrder;
+    /** Type of shoot (e.g., spurs, vegetative shoots), mainly for apple. 
+    can be potentially combined with budType*/
+    String shootType="";
+   
+    
+    /** For linking with the phenology module, 
+    Stage of dormancy. 
+    1: pre-endodormancy, 2: endodormancy, 3: ecodormancy, 4: post-ecodormancy. 
+    */
+    int dormancyStage;
+    /** Amount of chill accumulated during endodormancy. */
+    double accumulatedChill;
+    /** Amount of heat accumulated during ecodormancy. */
+    double accumulatedHeat;
+    /** Amount of accumulated heat required to trigger budburst. */
+    double heatTarget;
+    
+	/**because phenology and yield module were made in separated files, those variables needs to be here */
+	/**linking with the yield module, Indicates if bunches are defined. Specific for grapevine. */
+    boolean bunchesDefined = false;
+    /** Positions on this shoot which will produce bunches. Specific for grapevine. */
+    int[] bunchPositions;
+    /** Counter to keep track of the number of growth cycles for organogenesis calculation. Specific for grapevine. */
+    int gcCounter;
+    /** Duration of the current growth cycle in degree days based on soil water potential. Specific for grapevine. */
+    float gcDuration;
+    /** Number of degree days in the current growth cycle. Specific for grapevine. */
+    float gcDegreeDays;
+    /** Probability of bud break based on rank and order. Specific for grapevine. */
+    int probBudBreak;
+    /** Sum of daily max temperature for calculating the number of bunches per shoot. Specific for grapevine. */
+    float accumulatedTmaxBUN = 0;
+    /** Number of days for which max temperature has been summed for calculating the number of bunches per shoot. Specific for grapevine. */
+    int tmaxDaysBUN = 0;
+    /** Sum of hourly radiation for calculating the number of bunches per shoot. Specific for grapevine. */
+    float accumulatedRadBUN = 0;
+    /** Number of hours for which radiation has been summed for calculating the number of bunches per shoot. Specific for grapevine. */
+    int radHoursBUN = 0;
+    /** Sum of hourly carbon concentration for calculating the number of bunches per shoot. Specific for grapevine. */
+    float accumulatedCarbonBUN = 0;
+    /** Number of hours for which carbon concentration has been summed for calculating the number of bunches per shoot. Specific for grapevine. */
+    int carbonHoursBUN = 0;
+    /** Sum of daily max temperature for calculating the number of berries per bunch. Specific for grapevine. */
+    float accumulatedTmaxBEN = 0;
+    /** Number of days for which max temperature has been summed for calculating the number of berries per bunch. Specific for grapevine. */
+    int tmaxDaysBEN = 0;
+    /** Sum of hourly carbon concentration for calculating the number of berries per bunch. Specific for grapevine. */
+    float accumulatedCarbonBEN = 0;
+    /** Number of hours for which carbon concentration has been summed for calculating the number of berries per bunch. Specific for grapevine. */
+    int carbonHoursBEN = 0;
+
+    /**********************************************/
+	/** Parameters for loading into bud*/
+	/**********************************************/
+
+    //make changes in input later
+    int stDormancyStage = 4;  // 1 = pre endodormancy, 2 = endodormancy, 3 = ecodormancy, 4 = post ecodormancy
+   
+
+    /**
+	 * Decide bud type based on floral probability.
+	 * budType = 2 (floral) with probability FBUD_FLORAL,
+	 * budType = 1 (vegetative) otherwise.
+	 */
+	int budTypeDraw(double FBUD_FLORAL) {
+		double u = rng.nextDouble();  // uniform [0,1)
+		if (u < FBUD_FLORAL) {
+			return 2; // floral bud
+		} else {
+			return 1; // vegetative bud
+		}
+	}
+
+	/**
+     * Initializes a bud for shoot growing. 
+     * used in the XEG reader
+     * @param pb PlantIdentifier object containing plant identification information.
+     * @param shootType bud type
+     * @return initialized BudService object.
+     */
+	public BudService initiate_pi(PlantIdentifier pi, String budShootType);
+	  /**
+     * Initializes a bud for shoot growing based on an Internode object.
+     * 
+     * @param itn Internode object containing node information.
+     * @param budType Type of the bud to be initiated.
+     */
+	public void initiate(Internode itn, float FBUD_FLORAL);
+	
+	/**
+     * Determines if the bud should break.
+     * 
+     * @return true if the bud should break, false otherwise.
+     */
+	public boolean shouldBreak();
+	
+	/**
+	* Methods used for grapevine secondary shoot
+    * Updates the parameters related to organogenesis (bud development) based on thermal time and soil water potential.
+    * This method is specifically used for determining when the bud should produce a secondary shoot.
+    */
+	public void updateOrganogenesisParams();
+	 
+	
+	/**
+     * Determines if the bud should produce a rosette.
+     * 
+     * @return true if the bud should produce a rosette, false otherwise.
+     */
+	public boolean shouldProduceRosette();
+	
+	
+	   // ----- helper: how many full phyllochrons have elapsed for this bud? -----
+    public int fullPhylloElapsed() {
+        return (int) Math.floor(this.age / plastochron);
+    }
+
+    // ----- helper: physiology-gated probability for this milestone (0..1) ----
+    public double physiologyPushProbability() {
+        double p = LATERAL_BASE_P * F_apex * Math.min(F_water, F_carb);
+        if (p < 0.0) p = 0.0;
+        if (p > 1.0) p = 1.0;
+        return p;
+    }
+
+	// ----- lateral gate evaluator: runs at most once per phyllochron milestone -----
+	public void updateLateralGateIfDue_Int() {
+		if (latGatePassed) return;                 // already passed
+		if (nextGateK <= 0)   return;              // not a lateral (or not initialized)
+		if (nextGateK > LATERAL_GATE_STOP_PHYLLO) return; // window closed
+
+		int k = fullPhylloElapsed();
+
+		// Only evaluate when we have crossed the next milestone
+		if (k >= nextGateK) {
+			double p = physiologyPushProbability();
+			if (rng.nextDouble() < p) {
+				latGatePassed = true;              // success sticks
+			} else {
+				nextGateK++;                       // try again next phyllochron (if within window)
+			}
+		}
+	}
+	
+		// --------- lateral init: call in initiatePreplanned(...) ----------
+	public void initLateralGate() {
+			// Lateral buds are those with syllepticOrder > 0
+			if (this.syllepticOrder > 0) {
+				this.latGatePassed = false;
+				// start first check at configured milestone
+				this.nextGateK = Math.max(1, LATERAL_GATE_START_PHYLLO);
+			} else {
+				this.latGatePassed = false;
+				this.nextGateK = 0; // primary buds don't use this gate
+			}
+		}
+
+}
+
+
+/**
+ * <h1>IApex Abstract Module</h1>
+ * <p><b>Overview:</b> Serves as an interface for the apex of a plant in a simulation model. 
+ * Particularly tailored for grapevine but adaptable for other plants.</p>
+ * 
+ * <p><b>Design Concepts:</b></p>
+ * <ul>
+ *   <li><b>State Variables:</b> Includes `phenologyStage`, `waterPotential`, `axisType` etc.</li>
+ *   <li><b>Parameters:</b> Includes `gcDuration`, `potentialBiomassDemandSum`, `supplyDemandRatio` etc.</li>
+ *   <li><b>Methods:</b> Functions for various aspects like initiation, water potential update, and termination conditions.</li>
+ * </ul>
+ * 
+ * <p><b>Details:</b></p>
+ * <ul>
+ *   <li><b>Initialization:</b> Can be initiated from plant base or a bud.</li>
+ *   <li><b>Input:</b> Takes environmental variables like temperature and soil water potential.</li>
+ *   <li><b>Output:</b> Determines phytomer production or termination.</li>
+ * </ul>
+ */
+public abstract class absApex extends Organ implements IApex {
+	/**
+	 * Pointers to base classes.
+	 */
+	ShootBase sb; /**< Pointing to the shoot base */
+	PlantBase pb; /**< Pointing to the plant base */
+	GrowingOrgan[] parent = new GrowingOrgan[1];
+	long parentID;
+	
+	//bud planner based on bud gamma distribution
+	int totalNodes;
+	int[] nodeAllocation;
+	int plannedBranches;
+	
+    // planning state
+     // --- ID handle instead of a strong ref ---
+    long sourceBudID;   // 0 => unset
+    
+    int mainNodesPlanned;   // alloc[0]
+    int formedNodes;        // how many main nodes already formed (1-based for attach test)
+    int[][] branchPlan;     // rows: {attachNodeIndex, branchLen}
+    int nextBranchIdx;      // pointer into branchPlan
+    int nBranches;
+    int minBranchGap;
+	
+	
+	
+	boolean shouldProduceFlower;
+	int flowerNumber;
+	int phytomerNumber;
+	float potentialLength;
+	double lateralBaseDelay = 0.0;                       // sampled value per apex
+	float shootGrowthDelay;
+	/**
+	 * Shared variables for the apex.
+	 */
+	int phenologyStage = 1; /** linking with phenology, possible to use to change the development rules based on phenology stage */
+	int syllepticOrder; /** Tracks the number of branchings in one growing season to control bud behavior. */
+	
+	
+	/**
+	 * Parameters for axis organogenesis.
+	 */
+	int insertionRank;  /**< Rank on primary axis at which secondary shoot is inserted */
+	int gcCounter;      /**< Number of growth cycles for which organogenesis params have been computed */
+	float gcDuration;   /**< Duration of current growth cycle in degree days based on soil water potential */
+	float gcDegreeDays; /**< Number of degree days that have passed during this growth cycle */
+	/** 
+	This differs for grapevine and apple:
+	for grapevine, this refers to the phytomer type, while at the mean time, the variation in 
+	shoot vigour is captured in the structural covariance matrix
+	P0 for second axis from the P0 phytomer, P1 if the shoot is inserted at P1-P2 phytomer 
+	For apple, shoot type refers to spur, bource, vegetative, long, short etc..
+	*/
+	String shootType; 
+	int budType;
+	float potentialBiomassDemandSum; /**< Sum of potential demand for biomass from all organs for this growth cycle */
+	float potentialBiomassSupplySum; /**< Sum of potential supply of biomass from all organs for this growth cycle */
+	float supplyDemandRatio;         /**< Ratio of supply / demand from previous growth cycle */
+	
+	/**
+	 * Parameters for secondary axis phytomer production.
+	 */
+	int phytomerProductionLag;    /**< Lag in growth cycles between bud break and apex becoming active */
+	float probPhytomerProduction; /**< Probability that a phytomer will be produced at each growth cycle when the apex is active */
+	boolean shouldProducePhytomer;/**< True if phytomer should be produced at this time step */
+	
+	/**
+	 * Parameters for secondary axis termination.
+	 */
+	float proportionTerminated; /**< Proportion of shoots which will be terminated at each growth cycle */
+	boolean shouldTerminate;    /**< True if apex should be terminated this time step */
+	
+
+	/**
+	 * Specific attributes for grapevine.
+	 */
+	int[] bunchPositions;       /**< Positions on this shoot which will produce bunches */
+	float bunchesPerShoot = 1.7; /**< Predicted number of bunches for this shoot */
+	
+	/**
+	 * Attributes for calculating number of berries per bunch.
+	 */
+	float accumulatedTmaxBEN = 0; /**< Sum of daily max temperature */
+	int tmaxDaysBEN = 0;          /**< Number of days for which max temperature has been summed */
+	float accumulatedTminBEN = 0; /**< Sum of daily min temperature */
+	int tminDaysBEN = 0;          /**< Number of days for which min temperature has been summed */
+	float accumulatedCarbonBEN = 0; /**< Sum of hourly carbon concentration */
+	int carbonHoursBEN = 0;         /**< Number of hours for which carbon concentration has been summed */
+	
+	/**
+	 * Bud attributes for calculating number of berries per bunch.
+	 */
+	float tmaxBEN_bud = 0; /**< Average daily maximum temperature */
+	float carbonBEN_bud = 0; /**< Average carbon concentration */
+	
+	/**
+	 * Attributes for calculating mass of fruit.
+	 */
+	float accumulatedTmaxBM = 0; /**< Sum of daily max temperature */
+	int tmaxDaysBM = 0;          /**< Number of days for which max temperature has been summed */
+	float accumulatedRainfallBM = 0; /**< Sum of hourly rainfall */
+	float accumulatedRadBM = 0;      /**< Sum of hourly radiation */
+	int radHoursBM = 0;              /**< Number of hours for which radiation has been summed */
+	float accumulatedCarbonBM = 0;   /**< Sum of hourly carbon concentration */
+	int carbonHoursBM = 0;           /**< Number of hours for which carbon concentration has been summed */
+	
+	
+	 /**********************************************/
+	/** Parameters for loading into apex*/
+	/**********************************************/
+	
+	/**
+	 * Initiates from PlantBase at initiation.
+	 * @param pb PlantBase object
+	 * @param i Parameter i
+	 * @param k Parameter k
+	 * @param l Parameter l
+	 */
+	public void initiate_pb(PlantBase pb, int i, int k, int l);
+	
+	/**
+	 * Initiates from Bud.
+	 * @param b Bud object
+	 */
+	public void initiate(BudService b);
+	
+	public void initiate(ApexService a);
+	
+	/**
+	 * Updates water potential.
+	 */
+	public void updateWaterPotential();
+	
+	/**
+	 * Increases in IDENTIFIERS after phytomer creation.
+	 */
+	public void increment();
+	
+		/**
+	 * Gets branching angle.
+	 * @return Branching angle.
+	 */
+	public double getAngle();
+	
+	/**
+	 * Methods specific for grapevines.
+	 */
+	
+	/**
+	 * Initiates parameters for calculating organogenesis probabilities for primary axis.
+	 */
+	void initOrganogenesisParamsPrimary();
+	
+	/**
+	 * Initiates parameters for calculating organogenesis probabilities for secondary axis.
+	 */
+	void initOrganogenesisParamsSecondary();
+	
+	/**
+	 * Updates organogenesis parameters.
+	 * Adds the potential biomass demand, potential biomass supply and degree days from the current step to the total.
+	 * Checks if a new growth cycle should start, and sets shouldTerminate and shouldProducePhytomer accordingly.
+	 */
+	void updateOrganogenesisParams();
+	
+	/**
+	 * Starts a new growth cycle.
+	 * Calculates the duration and supply-demand ratio for the new organogenesis growth cycle.
+	 * Resets the growth cycle duration and biomass supply and demand sums to zero.
+	 */
+	void newGrowthCycle();
+	
+	/**
+	 * Calculates the probability that this apex will be terminated in the current growth cycle.
+	 */
+	void calcTerminationProportion();
+	
+	/**
+	 * Determines whether the apex should die in this cycle based on proportion of apexes terminated.
+	 */
+	void setShouldTerminateSecondary();
+	
+	/**
+	 * Calculates the probability that this apex will produce a phytomer at each growth cycle.
+	 */
+	void calcProbPhytomer();
+	
+	/**
+	 * Determines whether a phytomer should be produced based on phytomer production probability.
+	 */
+	void setShouldProducePhytomerSecondary();
+	
+	/**
+	 * Checks conditions for reproductive terminal phytomer production.
+	 * @return True if phytomer should be produced.
+	 */
+	boolean shouldProducePhytomer();
+	
+	/**
+	 * Checks conditions for producing a fruit at a certain rank.
+	 * @return True if a fruit should be produced.
+	 */
+	boolean shouldProduceBunch();
+	
+	/**
+	 * Checks if apex should be terminated.
+	 * @return True if apex should be terminated.
+	 */
+	boolean shouldTerminate();
+	
+
+	
+	/**
+	 * Checks conditions for reproductive terminal phytomer production.
+	 * @return True if apex should terminate generatively.
+	 */
+	boolean shouldTerminateGeneratively();
+
+	
+	/**
+	 * Calculates the duration in degree days of one growth cycle.
+	 * The growth cycle is equivalent to the time between phytomer production on the main shoot.
+	 * 
+	 * @param waterPotential The soil water potential.
+	 * @return The duration of one growth cycle in degree days.
+	 */
+	float calcGrowthCycle(float waterPotential);
+	
+}

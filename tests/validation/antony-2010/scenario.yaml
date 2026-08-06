@@ -1,0 +1,4 @@
+file-name-model-options: model.options.ANTONY.2010.json
+max-steps: 120
+light-interception-mode: cpu
+use-shading-factor: true

@@ -1,0 +1,716 @@
+//import static absOrgan.*;
+import static leaf.*;
+import static shoot.*;
+import static environment.*;
+import static globalParameters.*;
+import static plantParameters.*;
+import static modelOptions.*;
+import static initialConditions.*;
+import static extraTools.*;
+
+import io.github.fruitcropxl.config.params.groups.*;
+import io.github.fruitcropxl.config.params.structures.*;
+
+/** Slope for the relationship between Jmax and nitrogen (μmol e- g-1 N s-1). Reference: PRIETO et al., 2012 PCE. */
+global float slope_Jmax;
+/** Slope for the relationship between Vcmax and nitrogen (μmol e- g-1 N s-1). Reference: PRIETO et al., 2012 PCE. */
+global float slope_Vcmax;
+/** Slope for the relationship between Rd and nitrogen (μmol CO2 m-2 s-1). Reference: PRIETO et al., 2012 PCE. */
+global float slope_Rd;
+/** Slope for the relationship between Kappa2ll and nitrogen (mol e- mol-1 photons g-1 N m2). Reference: Evers 2010. */
+global float slope_kappa2LL;
+/** Intercept for the relationship between Kappa2ll and nitrogen (mol e- mol-1 photons). Reference: Evers 2010. */
+global float intc_kappa2LL;
+/** Convexity factor, value derived through data fitting. Reference: Evers 2010, eq S16. */
+global float convex_theta;
+/** Minimum leaf nitrogen content, optimized based on Querex's data. */
+global float leafN_min;
+/** Activation energy for Vcmax (J mol-1). Higher value compared to Evers 2010. Reference: Greer et al., 2012. */
+global float EA_Vcmax;
+/** Deactivation energy for Vcmax (J mol-1). Reference: Greer et al., 2012. */
+global float DEA_Vcmax;
+/** Activation energy for Jmax (J mol-1). Reference: Greer et al., 2012. */
+global float EA_Jmax;
+/** Deactivation energy for Jmax (J mol-1). Reference: Greer et al., 2012. */
+global float DEA_Jmax;
+/** Entropy term for Jmax (J K-1 mol -1). */
+global float sj;
+/** Michaelis–Menten constant of Rubisco for CO2 at 25°C (ubar). References: Yin 2009; Bernacci 2002; Sharkey 2007. */
+global float KmC25;
+/** Activation energy for KmC (J mol-1). References: Yin 2009; Bernacci 2002. */
+global float EA_KmC;
+/** Michaelis–Menten constant of Rubisco for O2 at 25°C (ubar). References: Yin 2009; Bernacci 2002; Sharkey 2007. */
+global float KmO25;
+/** Activation energy for KmO (J mol-1). */
+global float EA_KmO;
+/** Activation energy for Rd (J mol-1). References: Yin 2009; Bernacci 2002. */
+global float EA_Rd;
+/** Relative CO2/O2 specificity factor for Rubisco at 25°C (mbar ubar-1). */
+global float Sco25;
+/** Activation energy for Sco (J mol-1). Reference: Bernacci 2002. */
+global float Esco;
+/** Mesophyll conductance for CO2 diffusion at 25°C (mol m-2 leaf s-1 bar-1). Reference: Bernacci 2002. */
+global float gm25;
+/** Activation energy for gm (J mol-1). References: Yin 2009; Bernacci 2002. */
+global float EA_gm;
+/** Deactivation energy for gm (J mol-1). */
+global float DEA_gm;
+/** Entropy term for gm (J K-1 mol -1). */
+global float Sgm;
+/** Dimensionless empirical constant for fvpd. */
+global float Avpd;
+/** Updated empirical constant for fvpd based on Antony's light response curve. */
+global float kvpd;
+//resistance, other resistance (rbh (boudary layer resistance to heat (s m-1)), rt (the turbulence resistance to heat (s m-1) )) are calculated through plant height, leaf width, wind speed 
+// gs is calculated through g0 and A in eq s3a, evers 2010.
+global float rbt; // = 2/3;       // m2 s ubar umol-1  Combined turbulence and boundary layer resistance for CO2, evers et al., 2010
+global float ra; //= 33;		//Aerodynamic resistance (ra) for water and heat transfer sm-1
+global float NIGHT_TRANSPIRATION; // = 1.5e-6;    //mm/s 
+global float g0; // = 0.018;     // umol m-2 leaf s-1 ubar-1, PRIETO et al., 2012 PCE, Residual stomatal conductance for CO2 at the light compensation point
+/** Leaf nonstructural carbon feedback coefficient on Vcmax, multiplied by fNSC. */
+global float p_vcmax_to_fnsc = 2.465483235;
+/** critical NSC threshold beyond which photosynthesis begins to experience
+significant inhibition, and below which it decrease with half of the rate*/
+global float fnsc_vcmax_star = 0.15;
+global float leafTypeEffect;
+
+
+boolean shouldPrintInfo = false;
+	
+	/**
+	 * The PhotosynthesisAndTranspiration class is designed for modeling plant physiology, 
+	 * focusing on photosynthesis and transpiration processes. It integrates complex calculations 
+	 * with environmental factors like solar radiation, temperatures, humidity, and wind speed.
+	 * 
+	 * Key functionalities:
+	 * - `calcAnet`: Calculates net photosynthesis rate, considering factors like photosynthesis 
+	 *   limitations, temperature, and leaf nitrogen content.
+	 * - `calcEP1` and `calcEP2`: Estimate transpiration rates using the Penman-Monteith equation, 
+	 *   accounting for radiation, vapor pressure deficit, and stomatal conductance.
+	 * - `calcTleaf`: Determines leaf temperature based on environmental conditions and physiological inputs.
+	 * 
+	 * This class is crucial for understanding the interplay between environmental conditions and 
+	 * plant responses, vital for studies in plant growth and response to climatic changes.
+	 */
+	public class PhotosynthesisAndTranspiration {
+		private static float migrateOldVcmaxToFnscParameter(double oldP1, double oldP2) {
+			// The active pre-refactor formula used the hard-coded coefficient 2.465483235
+			// directly. For default legacy files (p1=21, p2=50), preserve that behavior;
+			// for non-default legacy files, interpret the old pair as the documented p2/p1 ratio.
+			if (Math.abs(oldP1 - 21.0) < 1e-9 && Math.abs(oldP2 - 50.0) < 1e-9) {
+				return 2.465483235f;
+			}
+			if (Math.abs(oldP1) < 1e-9) {
+				return 2.465483235f;
+			}
+			return (float) (oldP2 / oldP1);
+		}
+
+		public static void loadParameters() {
+			CategoryStore config = ((DocumentCategoryNameGroup) CONFIG.getGroup(FILE_NAME_PLANT_PARAMETERS, 
+			DocumentCategoryNameGroup.class)).getCategoryStore();
+
+			config.setCategoryContext("gasExchange");
+
+			slope_Jmax       = config.getDouble("slope_Jmax", 136);
+			slope_Vcmax      = config.getDouble("slope_Vcmax", 137);
+			try {
+				p_vcmax_to_fnsc = config.getDouble("p_vcmax_to_fnsc");
+			} catch (RuntimeException e) {
+				double oldP1 = config.getDouble("p1_Vcmax", 21);
+				double oldP2 = config.getDouble("p2_Vcmax", 50);
+				p_vcmax_to_fnsc = migrateOldVcmaxToFnscParameter(oldP1, oldP2);
+			}
+			try {
+				fnsc_vcmax_star = config.getDouble("fnsc_vcmax_star");
+			} catch (RuntimeException e) {
+				fnsc_vcmax_star = config.getDouble("fNSC_Vcmax", 0.15);
+			}
+			slope_Rd        = config.getDouble("slope_Rd", 0.23);
+			slope_kappa2LL  = config.getDouble("slope_kappa2LL", 0.072185);
+			intc_kappa2LL   = config.getDouble("intc_kappa2LL", 0.15);
+			convex_theta    = config.getDouble("convex_theta", 0.870137);
+			leafN_min       = config.getDouble("leafN_min", 0.17);
+			
+			// Vcmax, maximum carboxylation rate, Vcmax 25 can be calculated from the nitrogen relationship		 
+			EA_Vcmax      = config.getDouble("EA_Vcmax", 87700);
+			DEA_Vcmax     = config.getDouble("DEA_Vcmax", 203500);
+			
+			// Jmax - Maximum electron transport rate
+			EA_Jmax       = config.getDouble("EA_Jmax", 63500);
+			DEA_Jmax      = config.getDouble("DEA_Jmax", 202900);
+			sj            = config.getDouble("sj", 650);
+			
+			// Kmc - Michaelis-Menten constant of Rubisco for CO2 (ubar)		 
+			KmC25         = config.getDouble("KmC25", 272.38);
+			EA_KmC        = config.getDouble("EA_KmC", 80990);
+			
+			// Kmo - Michaelis-Menten constant of Rubisco for O2 (ubar)		 
+			KmO25         = config.getDouble("KmO25", 165.82);
+			EA_KmO        = config.getDouble("EA_KmO", 23720);
+			
+			// Rd - Day respiration (respiratory CO2 release other than by photorespiration) (umol CO2 m-2 s-1)		 
+			EA_Rd         = config.getDouble("EA_Rd", 46390);
+			
+			// Sco - Relative CO2/O2 pressure specificity factor for Rubisco (mbar ubar-1)		 
+			Sco25         = config.getDouble("Sco25", 2.8);
+			Esco          = config.getDouble("Esco", -24460);
+			
+			// gm - Mesophyll diffusion conductance (umol m-2 leaf s-1 ubar-1)		 
+			gm25          = config.getDouble("gm25", 0.224927);
+			EA_gm         = config.getDouble("EA_gm", 49600);
+			DEA_gm        = config.getDouble("DEA_gm", 437400);
+			Sgm           = config.getDouble("Sgm", 1400);
+			
+			// Stomatal conductance parameters (gs is calculated through g0 and A in eq s3a, Evers 2010)		 
+			Avpd          = config.getDouble("Avpd", 5.2);
+			kvpd          = config.getDouble("kvpd", -0.6);
+			g0            = config.getDouble("g0", 0.015);
+			
+			// Resistance parameters - boundary layer & turbulence resistance		 
+			rbt           = config.getDouble("rbt", 0.666666666666667);
+			ra            = config.getDouble("ra", 30);  // Updated by wind
+			
+			NIGHT_TRANSPIRATION = config.getDouble("NIGHT_TRANSPIRATION", 1.5e-06);
+			leafTypeEffect  = config.getDouble("leafTypeEffect", 0.8);
+			
+		}
+	}
+	
+	
+	
+	
+	/****** calculations for  net photosynthesis rate *****/
+	
+	
+	/**
+	 * Calculates net photosynthesis rate (Anet) considering electron-limited and carboxylation-limited photosynthesis, 
+	 * temperature, relative humidity, leaf nitrogen, and basal leaf conductance. This method solves a cubic equation 
+	 * to determine Anet, integrating concepts from Yin's photosynthesis model.
+	 * solution to cubic equation net photosynthesis (Anet) umol CO2 m-2 s-1- stomatal conductance
+	 * @param x1       Electron-limited photosynthesis rate.
+	 * @param x2       Carboxylation-limited photosynthesis rate.
+	 * @param temp     Temperature in degrees Celsius.
+	 * @param RH       Relative humidity.
+	 * @param leafN    Leaf nitrogen content.
+	 * @param g0_leaf  Basal leaf conductance.
+	 * @return         Calculated net photosynthesis rate (Anet).
+	 * umol CO2 m-2 s-1
+	 */	 
+	static float calcAnet(float x1,  // electron limited photosynthesis
+						  float x2,  // carboxylation limited photosynthesis
+						  float temp,
+						  float RH,
+						  float leafN,
+						  float g0_leaf) { // 
+	  
+	  float cube_a=g0_leaf*(x2+gammax(temp))+(g0_leaf/gm(temp)+fvpd(temp, RH))*(x1-Rd(temp, leafN));
+	  float cube_b=cpa(temp)*(x1-Rd(temp, leafN))-gammax(temp)*x1-Rd(temp, leafN)*x2;
+	  float cube_c=(cpa(temp)+x2+(1/gm(temp)+rbt)*(x1-Rd(temp, leafN)));
+	  float cube_d=x2+gammax(temp)+(x1-Rd(temp, leafN))/gm(temp);
+	  float cube_e=1/gm(temp)+(g0_leaf/gm(temp)+fvpd(temp, RH))*(1/gm(temp)+rbt);
+	  float cube_p=-(cube_d+(x1-Rd(temp, leafN))/gm(temp)+cube_a*(1/gm(temp)+rbt)+(g0_leaf/gm(temp)+fvpd(temp, RH))*cube_c)/cube_e;
+	  float cube_q=(cube_d*(x1-Rd(temp, leafN))+cube_a*cube_c+(g0_leaf/gm(temp)+fvpd(temp, RH))*cube_b)/cube_e;
+	  float cube_r=-cube_a*cube_b/cube_e;
+	  float cube_Q=(Math.pow(cube_p,2)-3*cube_q)/9;
+	  float cube_R=(2*Math.pow(cube_p,3)-9*cube_p*cube_q+27*cube_r)/54;
+	  float cube_xi=Math.acos(Math.max(-1,Math.min(1, cube_R/Math.sqrt(Math.pow(cube_Q,3)))))*(Math.PI/180);
+	   
+	  float res = -2*Math.sqrt(cube_Q)*Math.cos(cube_xi/3*(180/Math.PI))-cube_p/3;
+	   
+	  if (Double.isNaN(res)) {
+            if (printFlag) { println(" cube_Q " + cube_Q + " cube_xi " + cube_xi + " cube_p " + cube_p); }
+      	 }
+        
+	  return(res);
+	}
+	
+	global double Alim_pre = 1e-5;
+	global double GSWpm_pre = 1e-5;
+	global double Rd_pre=1e-5;
+	
+	 
+	/**
+	 * Calculates parameters related to net photosynthesis rate including CO2 assimilation rate (Alim), 
+	 * potential stomatal conductance for water (GSWpm), and daytime mitochondrial respiration rate (Rd). 
+	 * This function uses incident PAR, leaf nitrogen, temperature, and humidity as inputs.
+	 *
+	 * @param Iinc     Incident PAR on the leaf.
+	 * @param leafN    Total organic leaf nitrogen.
+	 * @param temp     Temperature, used for the first iteration.
+	 * @param RH       Relative humidity.
+	 * @param g0_leaf  Basal leaf conductance.
+	 * @return         Array containing Alim, GSWpm, and Rd.
+	 */
+	static double[] calcAlim(float Iinc,  //Iinc is the amount of incident PAR on the leaf (?mol photons m-2 s-1) 
+			 float leafN, // total organic leaf nitrogen (g m-2)
+			 float temp,  // for the first iteraturation use air temperature instead, for second iteraturation use Tleaf
+			 float  RH,     // relative humidity
+			 float g0_leaf,
+			 float fNSC,
+			 String organType
+			 ) {
+	double[] calcAlimResult = new double[3];
+	
+	if ((Double.isNaN(Iinc) || Double.isNaN(leafN) || Double.isNaN(temp) || Double.isNaN(RH) || Double.isNaN(g0_leaf) ||
+		Iinc < 0 || leafN <= 0.1 || temp < -10 || RH < 0 || RH >1.2)) {
+		
+/* 			checkForNaN(printFlag, 
+				"leafN", leafN, 
+				"temp", temp, 
+				"Iinc", Iinc, 
+				"RH", RH
+			);
+ */
+		temp = Ta;
+		RH = rh;
+		//if (printFlag) { println("warning in calcAlim: please check the input values"); }
+	}
+	float organTypeEffect = 1.0;
+	String organTypeLower = (organType == null) ? "" : organType.toLowerCase();
+	if(organTypeLower.contains("rosette")) {
+		organTypeEffect = leafTypeEffect;
+	} else {organTypeEffect = 1.0;}
+	
+	
+	float kappa2LL = slope_kappa2LL* leafN +intc_kappa2LL;
+	float Jmax25 = organTypeEffect * slope_Jmax * (leafN - leafN_min) ;
+	
+	float Jmax=(Jmax25*Math.exp((1/298.0-1/(temp+273.0))*EA_Jmax/R) * (1+Math.exp(sj/R-DEA_Jmax/298.0/R))/
+			(1+Math.exp(sj/R-1/(temp+273.0)*DEA_Jmax/R)));
+	//adding fNSC reduction factor to Vcmax, from the experimental data in qualiTree presentation, 
+	//it looks like there were no obvious reductions when fNSC is low
+	float reduc = fNSC > fnsc_vcmax_star  ? Math.min(0.99, p_vcmax_to_fnsc * fNSC) : 
+							   Math.min(0.99, 0.5*p_vcmax_to_fnsc * fNSC);
+	
+	float Vcmax25 = organTypeEffect * (1.0 - reduc) * slope_Vcmax * (leafN - leafN_min);
+	float Vcmax = (Vcmax25*Math.exp((1/298.0-1/(temp+273.0))*EA_Vcmax/R))* (1+Math.exp(sj/R-DEA_Vcmax/298.0/R))/
+			(1+Math.exp(sj/R-1/(temp+273.0)*DEA_Vcmax/R));
+	float J=(kappa2LL*Iinc+Jmax-Math.sqrt(Math.pow((kappa2LL*Iinc+Jmax),2)-4*convex_theta*Jmax*kappa2LL*Iinc))/(2*convex_theta);
+	
+	float x1j = J/4; float x2j = 2*gammax(temp); 
+	float Aj = calcAnet(x1j,x2j,temp,RH, leafN, g0_leaf); 
+	
+	float x1c = Vcmax; float x2c = KmC(temp)*(1+O/KmO(temp));
+	float Ac = calcAnet(x1c,x2c,temp, RH,leafN, g0_leaf);
+	double Alim = Math.min(Aj,Ac);
+	
+	 if (Double.isNaN(Aj) || Double.isNaN(Ac)) {
+            if (printFlag) { println("Aj " + Aj + " Ac " + Ac); }
+            println(" Iinc " + Iinc + " x1j " + x1j + " x2j " + x2j + " x1c " + x1c + " x2c " + x2c + 
+            		" temp " + temp + " RH " + RH + " leaf N " + leafN + " g0_leaf " + g0_leaf);
+        } 
+
+	float CC;
+	float CI;
+	if (Aj < Ac) {
+		CC = (gammax(temp) * x1j + (Aj + Rd(temp, leafN)) * x2j) / (x1j - Aj - Rd(temp, leafN));
+	} else {
+		CC = (gammax(temp) * x1c + (Ac + Rd(temp, leafN)) * x2c) / (x1c - Ac - Rd(temp, leafN));
+	}
+		
+	CI = CC + Alim / gm(temp);  // Intercellular CO2 concentration
+	
+	
+	float GS =(g0_leaf+(Alim + Rd(temp, leafN))*fvpd(temp, RH)/(CI-ci_asterisk(temp, leafN))); // stomatal conductance for CO2
+	//assign("GS", GS, envir = .GlobalEnv);
+	float GSW = (GS * 1.6); //stomatal conductance for water (GSW, in m2 s/mol),which is the stomatal
+	
+	//     conductance for CO2 (gs, eq. S3) � 1.6 to account for the faster diffusion of water vapour 
+	//     compared with CO2 in crossing stomata. Due to the fact that resistances are expressed in physical units (s m-1)
+	//     in eq. S30, and not molar units (m2 s mol-1), gsw had to be converted:
+	// assign("GSWpm", GSW/(0.53717/44/(273.0+temp)*1000000), envir = .GlobalEnv)  //make it easier to use in other equation
+	double GSWpm = GSW/(0.53717/44/(273.0+temp)*1000000);
+	
+	 /* if(1/GSWpm > 2000 ) {
+		 	 println("warning 1/GSWpm > 2000 " + "GSWpm " + GSWpm + " RSWpm " + 1/GSWpm + " Gs " + GS + 
+		 	 		"Rd " + Rd(temp, leafN) + " CI " + CI + " ci_asterisk " + ci_asterisk(temp, leafN) + 
+					"Alim " + Alim + " temp " + temp + " fvpd " + fvpd(temp, RH));
+					
+		 } */
+	if (!(Double.isNaN(Alim) || Double.isInfinite(Alim) || Double.isNaN(GSWpm))){
+			Alim_pre = Alim;
+			GSWpm_pre = GSWpm;
+			Rd_pre = Rd(temp, leafN);
+		} else {
+			Alim_pre = 5e-2;
+			GSWpm_pre = 1e-5;
+			Rd_pre = 1e-5;
+		}
+	
+	if(debug) {
+			checkForNaN(printFlag, 
+				"Alim", Alim, 
+				"GSWpm", GSWpm, 
+				"Alim_pre", Alim_pre, 
+				"Rd_pre", Rd_pre
+			);
+		}
+				
+/* 		
+	if ((Double.isNaN(Alim) || Double.isInfinite(Alim) || Double.isNaN(GSWpm) || Double.isInfinite(GSWpm))) {
+			
+            //println("warning: unknown error in calcAlim");                    
+			 // Print the values of all variables used in the calculation of CC
+			if (printFlag) { println("Aj: " + Aj); }
+			if (printFlag) { println("Ac: " + Ac); }
+			if (printFlag) { println("temp: " + temp); }
+			if (printFlag) { println("leafN: " + leafN); }
+			if (printFlag) { println("gammax(temp): " + gammax(temp)); }
+			if (printFlag) { println("x1j: " + x1j); }
+			if (printFlag) { println("x2j: " + x2j); }
+			if (printFlag) { println("x1c: " + x1c); }
+			if (printFlag) { println("x2c: " + x2c); }
+			if (printFlag) { println("Rd(temp, leafN): " + Rd(temp, leafN)); }
+			if (printFlag) { println("Alim: " + Alim); }
+			if (printFlag) { println("gm(temp): " + gm(temp)); }
+			
+			if (shouldContinue) {
+		   	   continueRunning = true;
+		   	} else {
+		   		continueRunning = false;
+		   	   throw new RuntimeException("NoBracketingException encountered and shouldContinue is false");
+		   }
+
+        } */
+        
+		calcAlimResult[0] = Alim_pre;
+		calcAlimResult[1] = GSWpm_pre;
+		calcAlimResult[2] = Rd_pre;
+		
+		return calcAlimResult;
+	}
+	
+	
+	  
+	/**
+	* calculate EP based on the radiation and air temperature, and potential stomata conductance
+	* see detail description in the calcEP2, which includes Tleaf and actual stomata conductance
+	*/  
+	static double calcEP1(float absm2,float temp,float rh,float wind,float height,float width,float GSWpm, float ra) { // (mm s-1)
+				double EP =(tangent_satvap(temp) * RN(absm2, temp, temp, emissivity) + RHOCP * VPD(temp, rh)/(ra))/
+					(LAMBDA *(tangent_satvap(temp) + PSYCHRO*( 1 +(1/GSWpm)/ra)));
+				if(Double.isNaN(EP)) EP = 1e-5;					
+				return EP;}
+	
+	/**
+	 * Calculates the potential evapotranspiration rate based on the Penman-Monteith equation.
+	 * <p>
+	 * This method considers various environmental and plant physiological factors to estimate the rate
+	 * at which evapotranspiration occurs. It's used in modeling plant growth and water usage.
+	 * it seems I switched to use simple aerodynamic resistance to vapor flow because the methods with leaf width and height
+	 * does not outporm the simple one. The complex code is in the bottom of the page
+	 * </p>
+	 *
+	 * @param absm2  The absorbed solar radiation by the leaf surface, in Joules per square meter per second (J m-2 s-1).
+	 * @param Tleaf  The leaf temperature, in degrees Celsius.
+	 * @param temp   The air temperature, in degrees Celsius.
+	 * @param rh     The relative humidity, expressed as a percentage (0-100).
+	 * @param wind   The wind speed, in meters per second (m s-1).
+	 * @param height The height of the leaf from the ground, in meters (m).
+	 * @param width  The width of the leaf, in meters (m).
+	 * @param GSWa   The stomatal conductance to water vapor, in moles per square meter per second (mol m-2 s-1).
+	 * @return       The potential evapotranspiration rate, in millimeters per second (mm s-1).
+	  * <p>Intermediate calculations:</p>
+	 * <ul>
+	 *     <li>{@code sValue} (Slope of saturation vapor pressure curve): 
+	 *         Calculated by the {@code S} function, representing the rate of change 
+	 *         of saturation vapor pressure with temperature.</li>
+	 *     <li>{@code rnValue} (Net radiation at the crop surface): 
+	 *         Calculated by the {@code RN} function, representing the balance between 
+	 *         incoming and outgoing radiation at the leaf surface.</li>
+	 *     <li>{@code vpdValue} (Vapor pressure deficit): 
+	 *         Calculated by the {@code VPD} function, representing the difference between 
+	 *         the actual and saturation vapor pressures at the given temperature and humidity.</li>
+	 *     <li>{@code tangentSatVap} (Tangent of saturation vapor pressure): 
+	 *         Calculated by the {@code tangent_satvap} function, relating to changes in 
+	 *         saturation vapor pressure with temperature.</li>
+	 *     <li>{@code raValue} (Aerodynamic resistance to vapor flow): 
+	 *         An assumed variable representing the resistance of the air layer near the surface 
+	 *         to the movement of water vapor.</li>
+	 * </ul>
+	 */
+	static double calcEP2(float absm2, float Tleaf, float temp, float rh, float wind, 
+						 float height, float width, float GSWa, float ra) { // (mm s-1)
+						 	 
+		double sValue = S(Tleaf, temp);
+		double rnValue = RN(absm2, Tleaf, temp, emissivity);
+		double vpdValue = VPD(temp, rh);
+		double tangentSatVap = tangent_satvap(temp);
+		double raValue = ra; // Assuming 'ra' is a variable defined in your scope
+	
+		// Check for NaN in intermediate variables
+		if(debug) {
+		checkForNaN(printFlag,
+			"sValue", sValue,
+			"rnValue", rnValue,
+			"vpdValue", vpdValue,
+			"tangentSatVap", tangentSatVap,
+			"raValue", raValue,
+			"GSWa", GSWa
+			// Add other intermediate variables if needed
+		);
+		}
+	
+		double EP = (sValue * rnValue + RHOCP * vpdValue / raValue) /
+					(LAMBDA * (tangentSatVap + PSYCHRO * (1 + (1 / GSWa) / raValue)));
+		if(Double.isNaN(EP)) EP = 1e-5;
+		return EP;
+	}
+
+	
+	/**
+	 * Calculates the leaf-air temperature difference (delta T) and leaf temperature.
+	 * This method uses absorbed solar radiation, air temperature, wind speed, plant height,
+	 * leaf width, and potential transpiration rate to estimate the temperature of the leaf.
+	 *
+	 * @param absm2 Absorbed solar radiation (μmol photons m-2 s-1).
+	 * @param temp  Air temperature (°C).
+	 * @param wind  Wind speed (m s-1).
+	 * @param height Plant height (m).
+	 * @param width Leaf width (m).
+	 * @param EP    Potential transpiration rate (mm s-1).
+	 * @return      Calculated leaf temperature (°C).
+	 */ 
+	static double calcTleaf(float absm2,float temp,float wind,float height,float width,float EP) { //leaf-air temperature difference (delta T) and leaf temperature 
+		float deltaT = ( ra *(RN(absm2, temp, temp, emissivity)-LAMBDA* EP))/RHOCP;
+		double Tleaf = temp + deltaT;
+		//if (printFlag) { println("deltaT  " + deltaT); }
+		if(Double.isNaN(Tleaf)) Tleaf = temp;
+		return(Tleaf);
+	}
+	
+	
+	/** Absorbed total radiation by the leaf (μmol photons m-2 s-1). */
+	static float Iabs;
+	
+	/** Calculates incident PAR on the leaf from absorbed radiation (Iabs) considering reflectance and transmittance of PAR. */
+	static float calcIinc(float Iabs) {
+		return (Iabs / (1 - reflectancePAR - transmittancePAR));
+	}
+	
+	/** Incident PAR on the leaf (μmol photons m-2 s-1), calculated from Iabs. */
+	static float Iinc = calcIinc(Iabs);
+	
+	/** Calculates CO2 partial pressure of the air (ubar) as a function of temperature. */
+	static float cpa(float temp) {
+		return (cca * 0.008314 * (273.15 + temp) * 10 / 22.4136);
+	}
+	
+	/** Calculates saturation vapor pressure as a function of temperature (kPa). */
+	static float satvap(float temp) {
+		return (0.611 * Math.exp(17.4 * temp / (239.0 + temp)));
+	}
+	
+	/** Calculates vapor pressure of the air (kPa) as a function of temperature and relative humidity. */
+	static float vap(float temp, float RH) {
+		return (RH * satvap(temp));
+	}
+	
+	/** Calculates vapor pressure deficit of the external air (kPa) as a function of temperature and relative humidity. */
+	static float VPD(float temp, float RH) {
+		return (satvap(temp) - vap(temp, RH));
+	}
+	
+	/** Mesophyll conductance for CO2 diffusion (ubar) as a function of temperature. */
+	static float gm(float temp) {
+		return gm25 * Math.exp((1 / 298.0 - 1 / (temp + 273.0)) * EA_gm / R) * 
+			   (1 + Math.exp(Sgm / R - DEA_gm / 298.0 / R)) / 
+			   (1 + Math.exp(Sgm / R - 1 / (temp + 273.0) * DEA_gm / R));
+	}
+	
+	/** Michaelis-Menten constant for CO2 (ubar) as a function of temperature. */
+	static float KmC(float temp) {
+		return (KmC25 * Math.exp((1 / 298.0 - 1 / (temp + 273.0)) * EA_KmC / R));
+	}
+	
+	/** Michaelis-Menten constant for O2 (mbar) as a function of temperature. */
+	static float KmO(float temp) {
+		return (KmO25 * Math.exp((1 / 298.0 - 1 / (temp + 273.0)) * EA_KmO / R));
+	}
+	
+	/** Daytime mitochondrial respiration rate (umol CO2 m-2 s-1) as a function of temperature and leaf nitrogen. */
+	static float Rd(float temp, float leafN) {
+		float Rd25 = slope_Rd * (leafN - leafN_min);
+		return (Rd25 * Math.exp((1 / 298.0 - 1 / (temp + 273.0)) * EA_Rd / R));
+	}
+
+	  
+	// VO/C is the ratio of   maximum oxygenation to carboxylation rate of Rubisco
+	// Vco <- function(temp) { //?mol CO2 m-2 s-1
+	// Vco25 = 0.231; // can not find the exact value in the literature
+	// return (Vco25*Math.exp((1/298.0-1/(temp+273.0))*(-5220)/R));} 
+	
+	/**
+	 * Calculates fvpd, representing the VPD effect on stomatal conductance.
+	 * VPDl is leaf-to-air vapour pressure difference.
+	 *
+	 * @param temp Temperature (degrees Celsius).
+	 * @param RH   Relative humidity (%).
+	 * @return     fvpd value.
+	 */
+	static float fvpd(float temp, float RH) { 
+		// Calculates fvpd, representing the VPD effect on stomatal conductance
+		return (0.001 + Avpd * Math.exp(kvpd * VPD(temp, RH)));
+	}
+	/**
+	 * Calculates the relative CO2/O2 specificity factor for Rubisco at a given temperature.
+	 *
+	 * @param temp Temperature (degrees Celsius).
+	 * @return     Sco, the specificity factor (mbar ubar-1).
+	 */
+	static float Sco(float temp) { 
+		// Calculates the relative CO2/O2 specificity factor for Rubisco at a given temperature
+		return (Sco25 * Math.exp((1 / 298.0 - 1 / (temp + 273.0)) * (Esco) / R));
+	}
+	
+	/**
+	 * Calculates the CO2 compensation point in ubar.
+	 *
+	 * @param temp Temperature (degrees Celsius).
+	 * @return     Gammax, the CO2 compensation point (ubar).
+	 */
+	static float gammax(float temp) { 
+		// Calculates the CO2 compensation point in ubar
+		return (0.5 * O / Sco(temp)); 
+	}
+	/**
+	 * Calculates ci*, the CO2 compensation point in the absence of Rd.
+	 *
+	 * @param temp   Temperature (degrees Celsius).
+	 * @param leafN  Leaf nitrogen content.
+	 * @return       ci_asterisk, the CO2 compensation point without Rd.
+	 */
+	static float ci_asterisk(float temp, float leafN) { 
+		// Calculates ci*, the CO2 compensation point in the absence of Rd
+		return (gammax(temp) - Rd(temp, leafN) / gm(temp)); 
+	}
+	
+
+	/**
+	 * Calculates the turbulence resistance to heat.
+	 * @param wind Wind speed.
+	 * @param height is already adjusted to the height where wind is measured or scaled.
+	 * this.windSpeed = wind * Math.log(this.z/windSpeed_refHeight)/Math.log(1.0/windSpeed_refHeight);
+	 * this is different where applying to a large crop canopy
+	 * @return Turbulence resistance (s m-1).
+	 */
+	static float rt(float wind, float height) {
+		wind += 1e-4;
+		height += 1e-4;
+		
+		float pow1 = Math.pow((height - 2.0/3.0 * height) / (0.1 * height), 2);
+		float ln1 = 0.74 * Math.log(pow1);
+		return ln1/ (0.16 * wind);
+	}
+	
+	/**
+	 * Calculates the boundary layer resistance to heat.
+	 * @param width Leaf width.
+	 * @param wind Wind speed.
+	 * @return Boundary layer resistance (s m-1).
+	 */
+	static float rbh(float wind, float width) {
+		wind += 1e-4;
+		width += 1e-4;
+		return (100 * Math.sqrt(width / wind));
+	}
+	
+	/**
+	 * Calculates the boundary layer resistance for water.
+	 * @param width Leaf width.
+	 * @param wind Wind speed.
+	 * @return Boundary layer resistance for water (s m-1).
+	 */
+	static float rbw(float wind, float width) {
+		wind += 1e-4;
+		width += 1e-4;
+		return (0.93 * rbh(wind,width));
+	}
+	
+	/**
+	 * Calculates thermal radiation.
+	 * @param temp Temperature.
+	 * @param emissivity Emissivity coefficient.
+	 * @return Thermal radiation value.
+	 */
+	static float thermal(float temp, float emissivity) {
+		return 2 * emissivity * BOLZ * Math.pow(temp + 273.0, 4);
+	}
+	
+	/**
+	 * Calculates net absorbed radiation (PAR and NIR).
+	 * @param absm2 Absorbed solar radiation.
+	 * @param Tleaf Leaf temperature.
+	 * @param Tair Air temperature.
+	 * @param emissivity Emissivity coefficient.
+	 * @return Net absorbed radiation (J m-2 s-1).
+	 */
+	static float RN(float absm2, float Tleaf, float Tair, float emissivity) {
+		double Rb = thermal(Tair, emissivity) - thermal(Tleaf, emissivity);
+		double Q = absm2 / WATT_TO_PPFD;
+		double RN = Q + Rb;
+		return RN;
+	}
+	
+	/**
+	 * Calculates the slope of the curve relating saturation vapor pressure to temperature.
+	 * @param Tleaf Leaf temperature.
+	 * @param temp Air temperature.
+	 * @return Slope of saturation vapor pressure curve (kPa K-1).
+	 */
+	static float S(float Tleaf, float temp) {
+		return ((satvap(Tleaf) - satvap(temp)) / (Tleaf - temp));
+	}
+	
+	/**
+	 * Calculates the tangent of the saturation vapor pressure curve.
+	 * @param temp Temperature.
+	 * @return Tangent of saturation vapor pressure curve (kPa K-1).
+	 */
+	static float tangent_satvap(float temp) {
+		return (17.4 * 239.0 / Math.pow(239.0 + temp, 2) * satvap(temp));
+	}
+
+	  
+	
+	
+    /*  static double calcEP1(float Iabs,float temp,float rh,float wind,float height,float width,float GSWpm) { // (mm s-1)
+				double EP =(tangent_satvap(temp) * RN(Iabs,temp) + RHOCP * VPD(temp, rh)/(rbh(wind,width)+rt(wind, height)))/
+					(LAMBDA *(tangent_satvap(temp) + PSYCHRO*((0.93*rbh(wind,width) +
+						rt(wind, height)+(1/GSWpm))/(rbh(wind,width)+rt(wind, height)))));
+				return EP;}
+	
+	static double calcEP2(float Iabs,float Tleaf, float temp,float rh,float wind,float height,float width, float GSWa) { // (mm s-1)
+	     double EP =(S(Tleaf, temp) * RN(Iabs,Tleaf) + RHOCP * VPD(temp, rh)/(rbh(wind,width)+rt(wind, height)))/
+		  			 (LAMBDA*(tangent_satvap(temp) + PSYCHRO*((0.93*rbh(wind,width) +
+					 	rt(wind, height)+(1/GSWa))/(rbh(wind,width)+rt(wind, height))))); 
+			 return EP;}
+	
+	//leaf-air temperature difference (delta T) and leaf temperature 
+	static double calcTleaf(float Iabs,float temp,float wind,float height,float width,float EP) { //leaf-air temperature difference (delta T) and leaf temperature 
+	float deltaT = ((rbh(wind,width)+rt(wind, height)) *(RN(Iabs,temp)-LAMBDA* EP))/RHOCP;
+	double Tleaf = temp + deltaT;
+	//if (printFlag) { println("deltaT  " + deltaT); }
+	return(Tleaf);} */
+
+	
+/* 	static float calcAlimFromGs(
+			 float GSWa,    //stomata conductance for H2O, m/s
+			 float temp,  // for the first iteraturation use air temperature instead, for second iteraturation use Tleaf
+			 float rh,     // relative humidity
+			 float Ap,    // pothential photosynthesis at this condition
+			 float leafN,
+			 float RSWpm  //stomata resistence to water, s/m
+			 ) 
+	 { */
+/* 	   float gs = Math.max(GSWa*UNIT_CONVERSION_STOMATA/1.6, g0);
+	   float int1 = (gs-g0)/fvpd(temp,rh);
+	   float int2 = int1*cpa(temp) - Rd(temp, leafN);
+	   float int3 = 1 + int1*rbt + int1/gs;
+	   float Ac = Math.max(0, int2/int3); 
+	   float Ax = Ap * (1.6 * RSWpm + 1.3*0.93*rbh(wind,width) + rt(wind, height))/
+		  (1.6 * 1/GSWa + 1.3*0.93*rbh(wind,width) + rt(wind, height));  
+	   float Aactual = Math.min(Ac, Ax);
+	  return Aactual; 
+	} */

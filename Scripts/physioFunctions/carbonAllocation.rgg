@@ -1,0 +1,885 @@
+import org.apache.commons.math3.analysis.UnivariateFunction;
+import org.apache.commons.math3.analysis.solvers.BisectionSolver;
+import org.apache.commons.math3.analysis.solvers.UnivariateSolver;
+
+import static globalParameters.*;
+import static plantBase.*;
+import static extraTools.*;
+import static absOrgan.*;
+import static fruitBase.*;
+import static leaf.*;
+import static shoot.*;
+import static fineRoot.*;
+import static structuralRoot.*;
+import static flowerBase.*;
+import static berryComplex.*;
+import static virtualFruit.*;
+
+/**
+ * Common-pool whole-plant carbon-allocation service.
+ *
+ * This service retains the existing uniform phloem sugar concentration model.
+ * Graph-resolved CTRAM transport remains implemented by carbonTransport.
+ * Persistent concentration history and diagnostics remain on {@link PlantBase}.
+ */
+
+private class PhloemConcentrationCandidateException extends RuntimeException {
+	private final double x;
+
+	PhloemConcentrationCandidateException(double x) {
+		this.x = x;
+	}
+
+	double getX() {
+		return x;
+	}
+}
+
+/**
+ * An inner class for solving phloem concentration using an iterative approach.
+ *
+ * This class implements the UnivariateFunction interface and is responsible for solving phloem concentration by
+ * optimizing several phloem-related processes. It iterates over growing organs and berries within the plant to
+ * calculate and update various phloem-related variables, such as loading, leakage, unloading, supply, and demand.
+ * It calculates the total loading, total leakage, and total unloading, as well as individual fruit unloading rates.
+ * The method handles exceptions and ensures the success of the calculation.
+ * @Unit("mgSugar/mgSolution") new convention
+ * @param sugarConcentration The initial guess for phloem concentration.
+ * @return The difference between total loading, total leakage, and total unloading.
+ * @throws PhloemConcentrationCandidateException If the concentration becomes negative during the calculation.
+ */
+	private class PhloemSugarConcentrationResidual implements UnivariateFunction {
+		private PlantBase pb;
+
+		PhloemSugarConcentrationResidual(PlantBase pb) {
+			this.pb = pb;
+		}
+		public double value(double sugarConcentration) {
+		[
+		 	//It is not safe to use cocurrent solve method for the catask here
+		 	//not multithread safe.
+			g:GrowingOrgan, (g.plantNumber == pb.plantNumber && !(g instanceof FruitService) )::> 
+			 {
+				 g.updateCarbonAllocation(sugarConcentration);
+			 }
+		
+			b:FruitService, (b.plantNumber == pb.plantNumber && b.age > 0)::>  //directly calling Growing organ did not update the fruit carbon PT variables?
+			 {
+				b.updateCarbonAllocation(sugarConcentration);
+			} 
+		 ]
+		
+		//double fruitnumber = count((* b:FruitService, (b.plantNumber == pb.plantNumber)*));
+		//double individualfruit = mean((* b:FruitService, (b.plantNumber == pb.plantNumber)*)[unloadingPerFruit]);
+		pb.fruitUnloading = sum((* b:FruitService, (b.plantNumber == pb.plantNumber)*).unloading);
+		pb.totalLeakage =  sum((* g:GrowingOrgan, (g.plantNumber == pb.plantNumber)*).leakage);
+		//double leafLoading = sum((* l:Leaf, (l.plantNumber == pb.plantNumber) *).loading);
+	 	//double leafUnloading = sum((* l:Leaf, (l.plantNumber == pb.plantNumber) *).unloading);
+ 			
+		pb.totalLoading = sum((* g:GrowingOrgan, (g.plantNumber == pb.plantNumber)*).loading);
+		
+		pb.totalUnloading = sum((* g:GrowingOrgan, (g.plantNumber == pb.plantNumber && 
+							  !(g instanceof FruitService))*).unloading) + pb.fruitUnloading;
+	
+		//the difference between loading and unloading
+		// target for the solvers
+		double y = pb.totalLoading - pb.totalLeakage - pb.totalUnloading;
+		
+		 if (sugarConcentration < 0) {
+		   throw new PhloemConcentrationCandidateException(sugarConcentration);
+		 }
+		 return y;
+	   }
+	 }
+
+/**
+ * Calculate the phloem sugar concentration using a stable numerical solver.
+ * <p>
+ * This method:
+ * - Uses {@link BisectionSolver} to ensure guaranteed convergence.
+ * - **Performs a global root scan only in the first step (step == 1).**
+ * - **Selects the closest root if multiple candidates exist.**
+ * - **Gradually increases the search range if initial attempts fail.**
+ * - **Applies smoothing only if a large jump occurs.**
+ * - **Updates phloem-related variables for growing organs and fruit.**
+ * 
+ * @param step The current step in the simulation.
+ * @return The calculated phloem sugar concentration (g sugar/g solution).
+ */
+
+/**
+ * Provides an overview of reported phloem sugar concentrations in various fruit species.
+ * Values are expressed as grams of sugar per gram of solution (g sugar/g solution), and
+ * also represented as molarity (M) of sucrose for clarity.
+ *
+ * <pre>
+ * Phloem sucrose concentration typically ranges from 100–300 mM (0.1–0.3 M) during fruit development.
+ * Grapevine phloem typically ranges between 50–200 mM.
+ * Apple phloem sugar concentration ranges realistically from 0.1–0.5 M,
+ * corresponding to approximately 0.034–0.171 g sugar/g solution.
+ * Apples have lower concentrations than peaches, citrus, and bananas but higher than grapevine.
+ * </pre>
+ *
+ * Conversion formula (approximate, assuming sucrose in water):
+ * g sugar/g solution ≈ Sucrose Molarity (M) × 0.342
+ *
+ * <pre>
+ * | Fruit Species                 | low (g sugar/g solution) | high(g sugar/g solution) | Sucrose Molarity (M) |
+ * |-------------------------------|--------------------------|--------------------------|----------------------|
+ * | Grapevine (Vitis vinifera)    | 0.017                    | 0.068                    | ~0.05–0.2 M          |
+ * | Apple (Malus domestica)       | 0.034                    | 0.171                    | ~0.1–0.5 M           |
+ * | Tomato (Solanum lycopersicum) | 0.068                    | 0.171                    | ~0.2–0.5 M           |
+ * | Peach (Prunus persica)        | 0.103                    | 0.239                    | ~0.3–0.7 M           |
+ * | Citrus (Citrus sinensis)      | 0.103                    | 0.239                    | ~0.3–0.7 M           |
+ * | Kiwifruit (Actinidia deliciosa)| 0.103                   | 0.274                    | ~0.3–0.8 M           |
+ * | Banana (Musa spp.)            | 0.137                    | 0.274                    | ~0.4–0.8 M           |
+ * </pre>
+ *
+ * <p>References:
+ * <ul>
+ *      <li>Jensen et al. (2016) "Sap flow and sugar transport in plants".</li>
+ *      <li>https://bruus-lab.dk/TMF/publications/Bruus/Bruus_132.pdf</li>
+ *      <li>Zhu et al., 2021. "Simulating organ biomass variability and carbohydrate distribution".</li>
+ *      <li>Minchin & Lacointe, 2017. "New understanding of phloem transport mechanisms".</li>
+ * </ul>
+ *</p>
+ */
+
+private static boolean isFiniteNumber(double value) {
+    return !Double.isNaN(value) && !Double.isInfinite(value);
+}
+
+private static double finalizePhloemSugarState(PlantBase pb, UnivariateFunction function, double sugarConcentration) {
+    double residual = function.value(sugarConcentration);
+    updateCarbonPartition(pb);
+    return residual;
+}
+
+private static boolean isNearBestResidual(double absResidual, double bestResidual, double residualTolerance) {
+    if (!isFiniteNumber(absResidual)) return false;
+    if (!isFiniteNumber(bestResidual)) return false;
+    return absResidual <= (bestResidual * 1.2) || absResidual <= (bestResidual + residualTolerance);
+}
+
+private static double clampPhloemValue(double value, double lowerBound, double upperBound) {
+    return Math.max(lowerBound, Math.min(upperBound, value));
+}
+
+private static double normalizePhloemHour(double hour) {
+    double normalizedHour = hour;
+    while (normalizedHour < 0.0) normalizedHour += 24.0;
+    while (normalizedHour >= 24.0) normalizedHour -= 24.0;
+    return normalizedHour;
+}
+
+private static double phloemDiurnalShape(double hour) {
+    double normalizedHour = normalizePhloemHour(hour);
+    double angle = ((normalizedHour - 13.0) / 24.0) * (2.0 * Math.PI);
+    return 0.5 * (1.0 + Math.cos(angle));
+}
+
+private static double estimatePhloemDiurnalDelta(double hourNow, double dtHours, double amplitude) {
+    double shapeNow = phloemDiurnalShape(hourNow);
+    double shapePrev = phloemDiurnalShape(hourNow - dtHours);
+    return amplitude * (shapeNow - shapePrev);
+}
+
+private static double estimatePhloemDiurnalAmplitude(PlantBase pb, double previousValue) {
+    double defaultAmplitude = 0.02; // fallback semi-range only, not a clamp
+    double minReliable = Double.POSITIVE_INFINITY;
+    double maxReliable = Double.NEGATIVE_INFINITY;
+    int reliableCount = Math.min(pb.phloemReliableHistoryCount, pb.phloemReliableHistory.length);
+
+    for (int i = 0; i < reliableCount; i++) {
+        double reliableValue = pb.phloemReliableHistory[i];
+        if (!isFiniteNumber(reliableValue)) continue;
+        minReliable = Math.min(minReliable, reliableValue);
+        maxReliable = Math.max(maxReliable, reliableValue);
+    }
+
+    if (reliableCount >= 6 && isFiniteNumber(minReliable) && isFiniteNumber(maxReliable) && maxReliable > minReliable) {
+        double historyAmplitude = 0.5 * (maxReliable - minReliable);
+        if (isFiniteNumber(historyAmplitude) && historyAmplitude > 0.0) {
+            return Math.max(0.005, historyAmplitude);
+        }
+    }
+
+    if (pb.idealRange > 0.0) {
+        defaultAmplitude = Math.max(defaultAmplitude, Math.min(pb.idealRange * 0.2, 0.04));
+    }
+    if (isFiniteNumber(previousValue) && previousValue > 0.0) {
+        return Math.max(0.005, Math.min(defaultAmplitude, previousValue * 0.5));
+    }
+    return defaultAmplitude;
+}
+
+private static double estimatePhloemDiurnalTarget(PlantBase pb, double hourOfDay, double previousValue, double amplitude) {
+    double center = previousValue;
+    if (pb.idealRange > 0.0) {
+        center = 0.5 * (previousValue + pb.idealRange);
+    }
+    double shapedOffset = phloemDiurnalShape(hourOfDay) - 0.5;
+    // Diurnal target is a fallback prior to break plateaus, not a hard physiological driver.
+    return center + amplitude * shapedOffset;
+}
+
+private static void recordReliablePhloemConcentration(PlantBase pb, double reliableValue) {
+    if (!isFiniteNumber(reliableValue)) return;
+    pb.phloemReliableHistory[pb.phloemReliableHistoryIndex] = reliableValue;
+    pb.phloemReliableHistoryIndex = (pb.phloemReliableHistoryIndex + 1) % pb.phloemReliableHistory.length;
+    if (pb.phloemReliableHistoryCount < pb.phloemReliableHistory.length) {
+        pb.phloemReliableHistoryCount++;
+    }
+}
+
+private class PhloemSolveResult {
+    double value = Double.NaN;
+    double residual = Double.NaN;
+    double absResidual = Double.NaN;
+    double lb = Double.NaN;
+    double ub = Double.NaN;
+    double distanceToPrevious = Double.NaN;
+    boolean converged = false;
+    boolean bracketed = false;
+    boolean acceptable = false;
+    boolean warningLowFraction = false;
+    boolean warningLargeDelta = false;
+    boolean selectedByNearEqualDistance = false;
+    String source = "";
+    String rejectionReason = "";
+}
+
+private static PhloemSolveResult buildPhloemResult(String sourceLabel) {
+    PhloemSolveResult result = new PhloemSolveResult();
+    result.source = sourceLabel;
+    return result;
+}
+
+private static boolean isAcceptableMassBalance(PhloemSolveResult result, double lowerBound, double upperBound, double residualTolerance) {
+    if (result == null) return false;
+    if (!isFiniteNumber(result.value)) return false;
+    if (!isFiniteNumber(result.residual)) return false;
+    if (result.value < lowerBound || result.value > upperBound) return false;
+    return Math.abs(result.residual) <= residualTolerance;
+}
+
+private static void updateResultWarnings(PhloemSolveResult result, double previousValue, double minFractionOfPreviousAllowed, double maxDeltaPerStep) {
+    if (result == null) return;
+    if (!isFiniteNumber(result.value) || !isFiniteNumber(previousValue) || previousValue <= 0.0) return;
+    if ((hourOfDay > 6 && hourOfDay < 18) && result.value < (previousValue * minFractionOfPreviousAllowed)) {
+        result.warningLowFraction = true;
+    }
+    if (Math.abs(result.value - previousValue) > maxDeltaPerStep) {
+        result.warningLargeDelta = true;
+    }
+}
+
+private static void populateResultMetrics(PhloemSolveResult result, double previousValue) {
+    if (result == null) return;
+    result.absResidual = isFiniteNumber(result.residual) ? Math.abs(result.residual) : Double.NaN;
+    result.distanceToPrevious = (isFiniteNumber(result.value) && isFiniteNumber(previousValue))
+        ? Math.abs(result.value - previousValue) : Double.NaN;
+}
+
+private static double nearEqualResidualWindow(double bestAbsResidual, double residualTolerance) {
+    if (!isFiniteNumber(bestAbsResidual)) return residualTolerance;
+    return Math.max(residualTolerance * 0.25, bestAbsResidual * 0.05);
+}
+
+private static boolean isNearEqualResidual(double absResidualA, double absResidualB, double residualTolerance) {
+    if (!isFiniteNumber(absResidualA) || !isFiniteNumber(absResidualB)) return false;
+    double best = Math.min(absResidualA, absResidualB);
+    double window = nearEqualResidualWindow(best, residualTolerance);
+    return Math.abs(absResidualA - absResidualB) <= window;
+}
+
+private static boolean isBetterSolveResult(PhloemSolveResult candidate, PhloemSolveResult currentBest,
+        double previousValue, double residualTolerance, double distancePenalty) {
+    if (candidate == null || !isFiniteNumber(candidate.residual)) return false;
+    if (currentBest == null || !isFiniteNumber(currentBest.residual)) return true;
+
+    double candidateAbsResidual = Math.abs(candidate.residual) + distancePenalty;
+    double bestAbsResidual = Math.abs(currentBest.residual);
+
+    if (candidateAbsResidual < bestAbsResidual) return true;
+    if (candidateAbsResidual > bestAbsResidual) return false;
+
+    if (isNearEqualResidual(candidateAbsResidual, bestAbsResidual, residualTolerance)) {
+        double candidateDistance = Math.abs(candidate.value - previousValue);
+        double bestDistance = Math.abs(currentBest.value - previousValue);
+        if (candidateDistance < bestDistance) {
+            candidate.selectedByNearEqualDistance = true;
+            return true;
+        }
+        if (candidateDistance > bestDistance) return false;
+    }
+
+    if (candidate.warningLowFraction != currentBest.warningLowFraction) {
+        return !candidate.warningLowFraction;
+    }
+    if (candidate.warningLargeDelta != currentBest.warningLargeDelta) {
+        return !candidate.warningLargeDelta;
+    }
+    return false;
+}
+
+private static PhloemSolveResult tryBracketedSolve(UnivariateFunction function, double lb, double ub, int maxEval,
+        double solverAbsoluteAccuracy, double broadLowerBound, double broadUpperBound,
+        double residualTolerance, double previousValue, double minFractionOfPreviousAllowed,
+        double maxDeltaPerStep, String sourceLabel) {
+    PhloemSolveResult result = buildPhloemResult(sourceLabel);
+    result.lb = lb;
+    result.ub = ub;
+
+    double boundedLb = clampPhloemValue(lb, broadLowerBound, broadUpperBound);
+    double boundedUb = clampPhloemValue(ub, broadLowerBound, broadUpperBound);
+    if (boundedUb <= boundedLb) {
+        boundedUb = boundedLb + solverAbsoluteAccuracy;
+    }
+    result.lb = boundedLb;
+    result.ub = boundedUb;
+
+    double fLb = function.value(boundedLb);
+    double fUb = function.value(boundedUb);
+    if (!isFiniteNumber(fLb) || !isFiniteNumber(fUb)) {
+        result.rejectionReason = "non-finite boundary residual";
+        return result;
+    }
+    if (fLb == 0.0) {
+        result.value = boundedLb;
+        result.residual = fLb;
+        result.converged = true;
+        result.bracketed = true;
+        result.acceptable = isAcceptableMassBalance(result, broadLowerBound, broadUpperBound, residualTolerance);
+        updateResultWarnings(result, previousValue, minFractionOfPreviousAllowed, maxDeltaPerStep);
+        populateResultMetrics(result, previousValue);
+        return result;
+    }
+    if (fUb == 0.0) {
+        result.value = boundedUb;
+        result.residual = fUb;
+        result.converged = true;
+        result.bracketed = true;
+        result.acceptable = isAcceptableMassBalance(result, broadLowerBound, broadUpperBound, residualTolerance);
+        updateResultWarnings(result, previousValue, minFractionOfPreviousAllowed, maxDeltaPerStep);
+        populateResultMetrics(result, previousValue);
+        return result;
+    }
+    if (fLb * fUb > 0.0) {
+        result.rejectionReason = "no sign change";
+        return result;
+    }
+
+    result.bracketed = true;
+    try {
+        UnivariateSolver solver = new BisectionSolver(solverAbsoluteAccuracy);
+        double candidate = solver.solve(maxEval, function, boundedLb, boundedUb);
+        double candidateResidual = function.value(candidate);
+        result.value = candidate;
+        result.residual = candidateResidual;
+        result.converged = isFiniteNumber(candidate) && isFiniteNumber(candidateResidual);
+        result.acceptable = isAcceptableMassBalance(result, broadLowerBound, broadUpperBound, residualTolerance);
+        updateResultWarnings(result, previousValue, minFractionOfPreviousAllowed, maxDeltaPerStep);
+        populateResultMetrics(result, previousValue);
+        if (!result.acceptable) {
+            result.rejectionReason = "residual or bounds acceptance failed";
+        }
+    } catch (Exception ex) {
+        result.rejectionReason = "solver exception: " + ex.getMessage();
+    }
+    return result;
+}
+
+public static double calcPhloemSugarConcentration(PlantBase pb) {
+    try {
+        UnivariateFunction function = new PhloemSugarConcentrationResidual(pb);
+
+        int maxEval = 1200;
+        double solverAbsoluteAccuracy = 1.0e-6;
+        double residualTolerance = 1.0e-4;
+        double fallbackResidualToleranceMultiplier = 10.0;
+        double minFractionOfPreviousAllowed = 0.1;
+        double maxDeltaPerStep = 0.1;
+        double flatEpsilon = 0.0015;
+        double plateauPenaltyMultiplier = 0.1;
+        double plateauBreakFrac = 0.35;
+        double plateauBreakMinStep = 0.003;
+        double plateauBreakMaxStep = 0.008;
+        int plateauBreakTriggerFlatSteps = 2;
+
+        double estimatedValue = pb.sugarConcentration_phloem_pre;
+        double previousValue = pb.sugarConcentration_phloem_pre;
+        double dtHours = 1.0;
+        double diurnalAmplitude = estimatePhloemDiurnalAmplitude(pb, previousValue);
+        double diurnalShapeNow = phloemDiurnalShape(hourOfDay);
+        double diurnalShapePrev = phloemDiurnalShape(hourOfDay - dtHours);
+        double diurnalShapeDelta = diurnalShapeNow - diurnalShapePrev;
+        double diurnalDelta = diurnalAmplitude * diurnalShapeDelta;
+        double diurnalDeltaCandidate = previousValue + diurnalDelta;
+        double diurnalTarget = estimatePhloemDiurnalTarget(pb, hourOfDay, previousValue, diurnalAmplitude);
+        double plateauBreakCandidate = Double.NaN;
+        boolean plateauBreakActive = false;
+
+        if (step == 1) {
+            if ("grapevine".equals(pb.species)) {
+                pb.broadUpper = 0.25;
+                pb.sugarConcentration_phloem_pre = pb.idealRange = 0.05;
+            } else {
+                pb.broadUpper = 0.3;
+                pb.sugarConcentration_phloem_pre = pb.idealRange = 0.1;
+            }
+            estimatedValue = pb.sugarConcentration_phloem_pre;
+            previousValue = pb.sugarConcentration_phloem_pre;
+            diurnalAmplitude = estimatePhloemDiurnalAmplitude(pb, previousValue);
+            diurnalShapeNow = phloemDiurnalShape(hourOfDay);
+            diurnalShapePrev = phloemDiurnalShape(hourOfDay - dtHours);
+            diurnalShapeDelta = diurnalShapeNow - diurnalShapePrev;
+            diurnalDelta = estimatePhloemDiurnalDelta(hourOfDay, dtHours, diurnalAmplitude);
+            diurnalDeltaCandidate = previousValue + diurnalDelta;
+            diurnalTarget = estimatePhloemDiurnalTarget(pb, hourOfDay, previousValue, diurnalAmplitude);
+        }
+
+        if (pb.idealRange <= 0) {
+            pb.idealRange = Math.max(previousValue, 0.1);
+        }
+        if (pb.broadUpper <= pb.broadLower) {
+            pb.broadUpper = Math.max(pb.idealRange * 3.0, 0.3);
+        }
+
+        PhloemSolveResult bestStageA = null;
+        PhloemSolveResult bestStageB = null;
+        PhloemSolveResult bestStageC = null;
+        PhloemSolveResult bestExactCandidate = null;
+        PhloemSolveResult bestAcceptableExactCandidate = null;
+        int signChangeIntervalsFound = 0;
+        int exactCandidatesSolved = 0;
+
+        double[][] stageARanges = {
+            {estimatedValue * 0.8, estimatedValue * 1.2},
+            {estimatedValue * 0.5, estimatedValue * 1.5},
+            {estimatedValue * 0.33, estimatedValue * 2.0},
+            {estimatedValue * 0.2, estimatedValue * 3.0},
+            {pb.idealRange * 0.1, pb.idealRange * 3.0},
+            {pb.broadLower, pb.broadUpper}
+        };
+
+        for (int i = 0; i < stageARanges.length; i++) {
+            double lb = clampPhloemValue(stageARanges[i][0], pb.broadLower, pb.broadUpper);
+            double ub = clampPhloemValue(stageARanges[i][1], pb.broadLower, pb.broadUpper);
+            int scanPoints = 21;
+            double scanStep = (ub - lb) / (scanPoints - 1);
+            double prevX = Double.NaN;
+            double prevF = Double.NaN;
+            for (int k = 0; k < scanPoints; k++) {
+                double x = lb + k * scanStep;
+                double fx = function.value(x);
+                if (!isFiniteNumber(fx)) {
+                    prevX = x; prevF = fx; continue;
+                }
+                if (isFiniteNumber(prevF) && prevF * fx <= 0.0) {
+                    signChangeIntervalsFound++;
+                    PhloemSolveResult candidate = tryBracketedSolve(function, prevX, x, maxEval, solverAbsoluteAccuracy,
+                        pb.broadLower, pb.broadUpper, residualTolerance, previousValue,
+                        minFractionOfPreviousAllowed, maxDeltaPerStep, "stageA[" + i + "]-interval[" + (k - 1) + "," + k + "]");
+                    if (candidate.converged) {
+                        exactCandidatesSolved++;
+                        if (isBetterSolveResult(candidate, bestExactCandidate, previousValue, residualTolerance, 0.0)) {
+                            bestExactCandidate = candidate;
+                        }
+                        if (candidate.acceptable && isBetterSolveResult(candidate, bestAcceptableExactCandidate, previousValue, residualTolerance, 0.0)) {
+                            bestAcceptableExactCandidate = candidate;
+                        }
+                        if (candidate.acceptable && isBetterSolveResult(candidate, bestStageA, previousValue, residualTolerance, 0.0)) {
+                            bestStageA = candidate;
+                        }
+                    }
+                }
+                prevX = x;
+                prevF = fx;
+            }
+        }
+
+        if (bestStageA == null) {
+            double rangeBase = Math.max(solverAbsoluteAccuracy, estimatedValue * 0.2);
+            double[][] stageBPasses = {
+                {estimatedValue - (rangeBase * 1.5), estimatedValue + (rangeBase * 1.5)},
+                {estimatedValue - (rangeBase * 2.5), estimatedValue + (rangeBase * 2.5)},
+                {previousValue - (rangeBase * 2.0), previousValue + (rangeBase * 2.0)},
+                {pb.broadLower, pb.broadLower + Math.max(rangeBase * 5.0, (pb.broadUpper - pb.broadLower) * 0.65)},
+                {pb.broadLower, pb.broadUpper}
+            };
+            for (int i = 0; i < stageBPasses.length; i++) {
+                double lb = clampPhloemValue(stageBPasses[i][0], pb.broadLower, pb.broadUpper);
+                double ub = clampPhloemValue(stageBPasses[i][1], pb.broadLower, pb.broadUpper);
+                int scanPoints = 31;
+                double scanStep = (ub - lb) / (scanPoints - 1);
+                double prevX = Double.NaN;
+                double prevF = Double.NaN;
+                for (int k = 0; k < scanPoints; k++) {
+                    double x = lb + k * scanStep;
+                    double fx = function.value(x);
+                    if (!isFiniteNumber(fx)) {
+                        prevX = x; prevF = fx; continue;
+                    }
+                    if (isFiniteNumber(prevF) && prevF * fx <= 0.0) {
+                        signChangeIntervalsFound++;
+                        PhloemSolveResult candidate = tryBracketedSolve(function, prevX, x, maxEval, solverAbsoluteAccuracy,
+                            pb.broadLower, pb.broadUpper, residualTolerance, previousValue,
+                            minFractionOfPreviousAllowed, maxDeltaPerStep, "stageB[" + i + "]-interval[" + (k - 1) + "," + k + "]");
+                        if (candidate.converged) {
+                            exactCandidatesSolved++;
+                            if (isBetterSolveResult(candidate, bestExactCandidate, previousValue, residualTolerance, 0.0)) bestExactCandidate = candidate;
+                            if (candidate.acceptable && isBetterSolveResult(candidate, bestAcceptableExactCandidate, previousValue, residualTolerance, 0.0)) bestAcceptableExactCandidate = candidate;
+                            if (candidate.acceptable && isBetterSolveResult(candidate, bestStageB, previousValue, residualTolerance, 0.0)) bestStageB = candidate;
+                        }
+                    }
+                    prevX = x;
+                    prevF = fx;
+                }
+            }
+        }
+
+        if (bestStageA == null && bestStageB == null) {
+            int gridPoints = 101;
+            double stepSize = (pb.broadUpper - pb.broadLower) / (gridPoints - 1);
+            double prevX = Double.NaN;
+            double prevF = Double.NaN;
+            for (int i = 0; i < gridPoints; i++) {
+                double x = pb.broadLower + stepSize * i;
+                double fx = function.value(x);
+                if (isFiniteNumber(fx)) {
+                    PhloemSolveResult gridPointResult = buildPhloemResult("stageC-grid[" + i + "]");
+                    gridPointResult.value = x;
+                    gridPointResult.residual = fx;
+                    gridPointResult.converged = true;
+                    gridPointResult.bracketed = false;
+                    gridPointResult.acceptable = isAcceptableMassBalance(gridPointResult, pb.broadLower, pb.broadUpper, residualTolerance);
+                    updateResultWarnings(gridPointResult, previousValue, minFractionOfPreviousAllowed, maxDeltaPerStep);
+                    populateResultMetrics(gridPointResult, previousValue);
+                    if (gridPointResult.acceptable && isBetterSolveResult(gridPointResult, bestStageC, previousValue, residualTolerance, 0.0)) {
+                        bestStageC = gridPointResult;
+                    }
+                }
+
+                if (isFiniteNumber(prevF) && isFiniteNumber(fx) && prevF * fx < 0.0) {
+                    signChangeIntervalsFound++;
+                    PhloemSolveResult localRoot = tryBracketedSolve(function, prevX, x, maxEval, solverAbsoluteAccuracy,
+                        pb.broadLower, pb.broadUpper, residualTolerance, previousValue,
+                        minFractionOfPreviousAllowed, maxDeltaPerStep, "stageC-local[" + (i - 1) + "," + i + "]");
+                    if (localRoot.converged) {
+                        exactCandidatesSolved++;
+                    }
+                    if (localRoot.converged && isBetterSolveResult(localRoot, bestExactCandidate, previousValue, residualTolerance, 0.0)) {
+                        bestExactCandidate = localRoot;
+                    }
+                    if (localRoot.acceptable && isBetterSolveResult(localRoot, bestAcceptableExactCandidate, previousValue, residualTolerance, 0.0)) bestAcceptableExactCandidate = localRoot;
+                    if (localRoot.acceptable && isBetterSolveResult(localRoot, bestStageC, previousValue, residualTolerance, 0.0)) {
+                        bestStageC = localRoot;
+                    }
+                }
+
+                prevX = x;
+                prevF = fx;
+            }
+        }
+
+        double[] fallbackCandidates = new double[1024];
+        String[] fallbackCandidateLabels = new String[1024];
+        int fallbackCandidateCount = 0;
+        int denseFallbackCount = 1001;
+        for (int j = 0; j < denseFallbackCount; j++) {
+            double frac = j / (double)(denseFallbackCount - 1);
+            fallbackCandidates[fallbackCandidateCount] = pb.broadLower + frac * (pb.broadUpper - pb.broadLower);
+            fallbackCandidateLabels[fallbackCandidateCount++] = "denseFallback[" + j + "]";
+        }
+        fallbackCandidates[fallbackCandidateCount] = previousValue; fallbackCandidateLabels[fallbackCandidateCount++] = "previousValue";
+        fallbackCandidates[fallbackCandidateCount] = estimatedValue; fallbackCandidateLabels[fallbackCandidateCount++] = "estimatedValue";
+        fallbackCandidates[fallbackCandidateCount] = diurnalDeltaCandidate; fallbackCandidateLabels[fallbackCandidateCount++] = "diurnalDeltaCandidate";
+        fallbackCandidates[fallbackCandidateCount] = diurnalTarget; fallbackCandidateLabels[fallbackCandidateCount++] = "diurnalTargetCandidate";
+
+        if (pb.phloemConsecutiveFlatFallbackCount >= plateauBreakTriggerFlatSteps && isFiniteNumber(diurnalTarget) && isFiniteNumber(previousValue)) {
+            double targetGap = diurnalTarget - previousValue;
+            double plateauStep = plateauBreakFrac * targetGap;
+            if (Math.abs(plateauStep) < plateauBreakMinStep && Math.abs(targetGap) > plateauBreakMinStep) {
+                plateauStep = targetGap > 0.0 ? plateauBreakMinStep : -plateauBreakMinStep;
+            }
+            plateauStep = clampPhloemValue(plateauStep, -plateauBreakMaxStep, plateauBreakMaxStep);
+            plateauBreakCandidate = previousValue + plateauStep;
+            plateauBreakActive = isFiniteNumber(plateauBreakCandidate) && Math.abs(plateauBreakCandidate - previousValue) > 0.0;
+            if (plateauBreakActive) {
+                fallbackCandidates[fallbackCandidateCount] = plateauBreakCandidate;
+                fallbackCandidateLabels[fallbackCandidateCount++] = "plateauBreakCandidate";
+            }
+        }
+
+        PhloemSolveResult bestFallback = null;
+        PhloemSolveResult bestFallbackNear = null;
+        double bestFallbackAbsResidual = Double.POSITIVE_INFINITY;
+        StringBuffer fallbackDiagnostics = new StringBuffer();
+
+        for (int j = 0; j < fallbackCandidateCount; j++) {
+            double boundedCandidate = clampPhloemValue(fallbackCandidates[j], pb.broadLower, pb.broadUpper);
+            if (!isFiniteNumber(boundedCandidate)) continue;
+            double residual = function.value(boundedCandidate);
+            if (!isFiniteNumber(residual)) continue;
+
+            PhloemSolveResult fallbackResult = buildPhloemResult(fallbackCandidateLabels[j]);
+            fallbackResult.value = boundedCandidate;
+            fallbackResult.residual = residual;
+            fallbackResult.converged = true;
+            fallbackResult.acceptable = true;
+            updateResultWarnings(fallbackResult, previousValue, minFractionOfPreviousAllowed, maxDeltaPerStep);
+            populateResultMetrics(fallbackResult, previousValue);
+
+            double absResidual = Math.abs(residual);
+            if (absResidual < bestFallbackAbsResidual) bestFallbackAbsResidual = absResidual;
+            double repeatPenalty = 0.0;
+            if (pb.phloemConsecutiveFlatFallbackCount >= plateauBreakTriggerFlatSteps && Math.abs(boundedCandidate - previousValue) < flatEpsilon) {
+                repeatPenalty = nearEqualResidualWindow(bestFallbackAbsResidual, residualTolerance) * plateauPenaltyMultiplier;
+            }
+            if (isBetterSolveResult(fallbackResult, bestFallback, previousValue, residualTolerance, repeatPenalty)) {
+                bestFallback = fallbackResult;
+            }
+            if (debug) {
+                fallbackDiagnostics.append("fallback=").append(fallbackResult.source)
+                    .append(",value=").append(fallbackResult.value)
+                    .append(",absResidual=").append(absResidual)
+                    .append(",distance=").append(Math.abs(fallbackResult.value - previousValue))
+                    .append("\n");
+            }
+        }
+
+        if (bestFallback != null && isFiniteNumber(bestFallbackAbsResidual)) {
+            for (int j = 0; j < fallbackCandidateCount; j++) {
+                double boundedCandidate = clampPhloemValue(fallbackCandidates[j], pb.broadLower, pb.broadUpper);
+                if (!isFiniteNumber(boundedCandidate)) continue;
+                double residual = function.value(boundedCandidate);
+                if (!isFiniteNumber(residual)) continue;
+                double absResidual = Math.abs(residual);
+                boolean nearBest = absResidual <= (bestFallbackAbsResidual + nearEqualResidualWindow(bestFallbackAbsResidual, residualTolerance));
+                if (!nearBest) continue;
+                PhloemSolveResult candidateNear = buildPhloemResult(fallbackCandidateLabels[j]);
+                candidateNear.value = boundedCandidate;
+                candidateNear.residual = residual;
+                candidateNear.converged = true;
+                candidateNear.acceptable = true;
+                updateResultWarnings(candidateNear, previousValue, minFractionOfPreviousAllowed, maxDeltaPerStep);
+                populateResultMetrics(candidateNear, previousValue);
+                if (isBetterSolveResult(candidateNear, bestFallbackNear, previousValue, residualTolerance, 0.0)) {
+                    bestFallbackNear = candidateNear;
+                }
+            }
+        }
+
+        PhloemSolveResult accepted = null;
+        String resolutionPath = "previous value emergency fallback";
+        boolean fallbackUsed = false;
+
+        if (bestAcceptableExactCandidate != null) {
+            accepted = bestAcceptableExactCandidate;
+            resolutionPath = (exactCandidatesSolved > 1) ? "multi-range exact solve accepted" :
+                (bestStageB != null ? "expanded-range exact solve accepted" : "exact solve accepted");
+        } else if (bestExactCandidate != null || bestFallbackNear != null || bestFallback != null) {
+            PhloemSolveResult bestFallbackCandidate = (bestFallbackNear != null) ? bestFallbackNear : bestFallback;
+            if (bestExactCandidate != null && bestFallbackCandidate != null) {
+                if (isBetterSolveResult(bestExactCandidate, bestFallbackCandidate, previousValue, residualTolerance, 0.0)) {
+                    accepted = bestExactCandidate;
+                    resolutionPath = "exact-over-fallback selected";
+                } else {
+                    accepted = bestFallbackCandidate;
+                    resolutionPath = "dense fallback selected";
+                    fallbackUsed = true;
+                }
+            } else if (bestExactCandidate != null) {
+                accepted = bestExactCandidate;
+                resolutionPath = "exact-over-fallback selected";
+            } else {
+                accepted = bestFallbackCandidate;
+                resolutionPath = "dense fallback selected";
+                fallbackUsed = true;
+            }
+        } else {
+            accepted = buildPhloemResult("previousValue");
+            accepted.value = previousValue;
+            accepted.residual = function.value(previousValue);
+            accepted.converged = true;
+            accepted.acceptable = isFiniteNumber(accepted.residual);
+            fallbackUsed = true;
+            pb.phloemSolverFailureCount++;
+        }
+
+        double acceptedValue = clampPhloemValue(accepted.value, pb.broadLower, pb.broadUpper);
+        double acceptedResidual = finalizePhloemSugarState(pb, function, acceptedValue);
+
+        if ("exact solve accepted".equals(resolutionPath) || "expanded-range exact solve accepted".equals(resolutionPath) || "grid-scan local solve accepted".equals(resolutionPath)) {
+            pb.phloemConsecutiveFallbackCount = 0;
+            pb.phloemConsecutiveFlatFallbackCount = 0;
+        } else {
+            pb.phloemConsecutiveFallbackCount++;
+            if (Math.abs(acceptedValue - previousValue) < flatEpsilon) {
+                pb.phloemConsecutiveFlatFallbackCount++;
+                pb.phloemPreviousValueHoldCount++;
+            } else {
+                pb.phloemConsecutiveFlatFallbackCount = 0;
+            }
+            if (fallbackUsed && accepted.source != null && accepted.source.startsWith("diurnal")) {
+                pb.phloemDiurnalFallbackWinCount++;
+            }
+            if (fallbackUsed && "plateauBreakCandidate".equals(accepted.source)) {
+                pb.phloemPlateauBreakWinCount++;
+            }
+        }
+
+        if (isFiniteNumber(acceptedResidual) && Math.abs(acceptedResidual) <= residualTolerance * fallbackResidualToleranceMultiplier) {
+            pb.phloemConsecutiveUnresolvedCount = 0;
+        } else {
+            pb.phloemConsecutiveUnresolvedCount++;
+        }
+
+        if (isFiniteNumber(acceptedResidual) && Math.abs(acceptedResidual) <= residualTolerance) {
+            recordReliablePhloemConcentration(pb, acceptedValue);
+        }
+
+        if(debug) {
+            String bestExactSummary = (bestExactCandidate == null) ? "none" : (bestExactCandidate.source + ":value=" + bestExactCandidate.value + ",residual=" + bestExactCandidate.residual + ",distanceToPrevious=" + bestExactCandidate.distanceToPrevious + ",warnLow=" + bestExactCandidate.warningLowFraction + ",warnDelta=" + bestExactCandidate.warningLargeDelta);
+            String bestFallbackSummary = (bestFallbackNear == null && bestFallback == null) ? "none" : ((bestFallbackNear != null ? bestFallbackNear : bestFallback).source + ":value=" + (bestFallbackNear != null ? bestFallbackNear.value : bestFallback.value) + ",residual=" + (bestFallbackNear != null ? bestFallbackNear.residual : bestFallback.residual));
+            println("Phloem solver path=" + resolutionPath + ", previousValue=" + previousValue + ", acceptedValue=" + acceptedValue + ", acceptedResidual=" + acceptedResidual + ", acceptedSource=" + accepted.source + ", acceptedDistanceToPrevious=" + Math.abs(acceptedValue - previousValue) + ", acceptedSelectedByNearEqualDistance=" + accepted.selectedByNearEqualDistance + ", acceptedWarningLowFraction=" + accepted.warningLowFraction + ", acceptedWarningDelta=" + accepted.warningLargeDelta + ", fallbackUsed=" + fallbackUsed + ", signChangeIntervalsFound=" + signChangeIntervalsFound + ", exactCandidatesSolved=" + exactCandidatesSolved + ", multipleExactCandidates=" + (exactCandidatesSolved > 1) + ", bestExactCandidate=" + bestExactSummary + ", bestFallbackCandidate=" + bestFallbackSummary + ", plateauBreakActive=" + plateauBreakActive + ", failureCount=" + pb.phloemSolverFailureCount + ", unresolvedCount=" + pb.phloemConsecutiveUnresolvedCount);
+            if (fallbackUsed || "previous value emergency fallback".equals(resolutionPath)) {
+                println("Phloem fallback diurnalAmplitude=" + diurnalAmplitude + ", shapeNow=" + diurnalShapeNow + ", shapePrev=" + diurnalShapePrev + ", shapeDelta=" + diurnalShapeDelta + ", diurnalDelta=" + diurnalDelta + ", diurnalDeltaCandidate=" + diurnalDeltaCandidate + ", diurnalTarget=" + diurnalTarget + ", plateauBreakCandidate=" + plateauBreakCandidate);
+                println("Phloem fallback diagnostics:\n" + fallbackDiagnostics.toString());
+            }
+            checkForNaN(printFlag,
+                "sugarConcentration", acceptedValue,
+                "totalLoading", pb.totalLoading,
+                "totalUnloading", pb.totalUnloading,
+                "leafLoading", pb.leafLoading,
+                "structuralRootLoading", pb.structuralRootLoading,
+                "internodeLoading", pb.internodeLoading,
+                "leafUnloading", pb.leafUnloading,
+                "internodeUnloading", pb.internodeUnloading,
+                "fineRootUnloading", pb.fineRootUnloading,
+                "flowerUnloading", pb.flowerUnloading,
+                "structuralRootUnloading", pb.structuralRootUnloading,
+                "fruitUnloading", pb.fruitUnloading
+            );
+        }
+
+        pb.sugarConcentration_phloem = acceptedValue;
+        pb.sugarConcentration_phloem_pre = acceptedValue;
+
+    } catch (Exception e) {
+        println("Error in calcphloemSugarConcentration: " + e.getMessage());
+        throw new RuntimeException("Exception encountered in calcphloemSugarConcentration", e);
+    }
+
+    return pb.sugarConcentration_phloem;
+}
+
+ /**
+ * Update the partitioning of carbon compounds in various plant organs and structures.
+ *
+ * This method calculates and updates the distribution of carbon compounds within the plant's different organs,
+ * including leaves, fine roots, structural roots, internodes, cordons, wood, and berries. It also computes the
+ * allocation and unloading fractions for each organ and tracks various loading and unloading variables.
+ */
+public static void updateCarbonPartition(PlantBase pb)
+	{
+		pb.totalLoading = sum((* g:GrowingOrgan, (g.plantNumber == pb.plantNumber)*).loading);
+		pb.totalUnloading = sum((* g:GrowingOrgan, (g.plantNumber == pb.plantNumber && !(g instanceof FruitService))*).unloading) + 
+						 sum((* f:FruitService, (f.plantNumber == pb.plantNumber) *).unloading);; 
+		pb.totalLeakage =  sum((* g:GrowingOrgan, (g.plantNumber == pb.plantNumber)*).leakage);
+		//if (printFlag) { println("totalLoading " + pb.totalLoading + " totalUnloading " + pb.totalUnloading + " totalLeakage " + pb.totalLeakage); }
+		
+		pb.leafLoading = sum((* l:Leaf, (l.plantNumber == pb.plantNumber) *).loading);
+		pb.internodeLoading = sum((* l:Internode, (l.plantNumber == pb.plantNumber) *).loading);
+		
+		pb.fineRootLoading = sum((* l:FineRoot, (l.plantNumber == pb.plantNumber) *).loading);
+		pb.structuralRootLoading = sum((* l:StructuralRoot, (l.plantNumber == pb.plantNumber) *).loading);
+		
+		pb.cordonLoading = sum((* l:Cordon, (l.plantNumber == pb.plantNumber) *).loading);
+		
+		pb.perennielWoodLoading = pb.cordonLoading + sum((* l:Trunk, (l.plantNumber == pb.plantNumber) *).loading);
+		
+		
+		/* println("internodeLoading " + pb.internodeLoading + " LeafLoading " + pb.leafLoading + 
+				" pb.structuralRootLoading " + pb.structuralRootLoading + " pb.fineRootLoading " + pb.fineRootLoading);
+		 */
+		
+		pb.leafUnloading = sum((* l:Leaf, (l.plantNumber == pb.plantNumber) *).unloading);
+		pb.petioleUnloading = sum((* l:Petiole, (l.plantNumber == pb.plantNumber) *).unloading);
+		
+		pb.internodeUnloading = sum((* l:Internode, (l.plantNumber == pb.plantNumber) *).unloading);
+		pb.cordonUnloading = sum((* l:Cordon, (l.plantNumber == pb.plantNumber) *).unloading);
+		
+		pb.perennielWoodUnloading = pb.cordonUnloading + sum((* l:Trunk, (l.plantNumber == pb.plantNumber) *).unloading);
+		
+		pb.fruitUnloading = sum((* l:FruitService, (l.plantNumber == pb.plantNumber) *).unloading);
+			
+		pb.flowerUnloading = sum((* l:Flower, (l.plantNumber == pb.plantNumber) *).unloading);
+		
+		pb.fineRootUnloading = sum((* l:FineRoot, (l.plantNumber == pb.plantNumber) *).unloading);
+		pb.structuralRootUnloading = sum((* l:StructuralRoot, (l.plantNumber == pb.plantNumber) *).unloading);
+
+		pb.cordonStructureDM_SEC = sum((* l:Cordon, (l.plantNumber == pb.plantNumber) *)[structureDM_SEC]);
+		pb.trunkStructureDM_SEC = sum((* l:Trunk, (l.plantNumber == pb.plantNumber) *)[structureDM_SEC]);
+		pb.perennielWoodStructureDM_SEC = pb.cordonStructureDM_SEC + pb.trunkStructureDM_SEC;
+		pb.structuralRootStructureDM_SEC = sum((* l:StructuralRoot, (l.plantNumber == pb.plantNumber) *)[structureDM_SEC]);
+
+		pb.cordonMaintenanceDM = sum((* l:Cordon, (l.plantNumber == pb.plantNumber) *)[maintenanceDM]);
+		pb.trunkMaintenanceDM = sum((* l:Trunk, (l.plantNumber == pb.plantNumber) *)[maintenanceDM]);
+		pb.perennielWoodMaintenanceDM = pb.cordonMaintenanceDM + pb.trunkMaintenanceDM;
+		pb.structuralRootMaintenanceDM = sum((* l:StructuralRoot, (l.plantNumber == pb.plantNumber) *)[maintenanceDM]);
+
+		pb.cordonReserveDM = sum((* l:Cordon, (l.plantNumber == pb.plantNumber) *)[reserveDM]);
+		pb.trunkReserveDM = sum((* l:Trunk, (l.plantNumber == pb.plantNumber) *)[reserveDM]);
+		pb.perennielWoodReserveDM = pb.cordonReserveDM + pb.trunkReserveDM;
+		pb.structuralRootReserveDM = sum((* l:StructuralRoot, (l.plantNumber == pb.plantNumber) *)[reserveDM]);
+		
+		
+		//double internodeMT = sum((* l:Internode, (l.plantNumber == pb.plantNumber) *).maintenanceDM);
+		//double internodeSEC = sum((* l:Internode, (l.plantNumber == pb.plantNumber) *)[structureDM_SEC]);
+		//double internodeRES = sum((* l:Internode, (l.plantNumber == pb.plantNumber) *)[reserveDM]);
+		//if (printFlag) { println( " internodeMT " + internodeMT + " internodeSEC " + internodeSEC + " internodeRES " + internodeRES); }
+		
+		/* double rootMT = sum((* l:StructuralRoot, (l.plantNumber == pb.plantNumber) *).maintenanceDM);
+		double rootSEC = sum((* l:StructuralRoot, (l.plantNumber == pb.plantNumber) *)[structureDM_SEC]);
+		double rootRES = sum((* l:StructuralRoot, (l.plantNumber == pb.plantNumber) *)[reserveDM]);
+		println( " rootMT " + rootMT + " rootSEC " + rootSEC + " rootRES " + rootRES); */
+		
+		if(debug) 
+		{	
+		checkForNaN(printFlag, // Assuming printFlag is already defined as true or false
+            "totalLoading", pb.totalLoading,
+            "totalUnloading", pb.totalUnloading,
+            "leafUnloading", pb.leafUnloading,
+            "fineRootUnloading", pb.fineRootUnloading,
+            "structuralRootUnloading", pb.structuralRootUnloading,
+            "internodeUnloading", pb.internodeUnloading,
+            "fruitUnloading", pb.fruitUnloading);
+           }
+            
+		pb.internodeLeakage = sum((* l:Internode, (l.plantNumber == pb.plantNumber) *).leakage);
+		
+		pb.structuralRootLeakage = sum((* l:StructuralRoot, (l.plantNumber == pb.plantNumber) *).leakage);
+		
+		
+		pb.fraction_leafLoading = pb.leafLoading/pb.totalLoading; //(pb.internodeLoading +woodLoading + pb.leafLoading);
+		pb.fraction_internodeLoading = pb.internodeLoading/pb.totalLoading;
+		pb.fraction_perennielWoodLoading = pb.perennielWoodLoading/pb.totalLoading;
+		pb.fraction_fineRootLoading = pb.fineRootLoading/pb.totalLoading;
+		pb.fraction_structuralRootLoading = pb.structuralRootLoading/pb.totalLoading;
+		
+		pb.fraction_leafUnloading = pb.leafUnloading/pb.totalUnloading;
+		pb.fraction_petioleUnloading = pb.petioleUnloading/pb.totalUnloading;
+		
+		pb.fraction_internodeUnloading = (pb.internodeUnloading)/(pb.totalUnloading); //(pb.leafLoading + pb.internodeLoading + woodLoading);
+		
+		pb.fraction_perennielWoodUnloading = pb.perennielWoodUnloading/pb.totalUnloading;
+		 
+		pb.fraction_flowerUnloading = pb.flowerUnloading/(pb.totalUnloading);
+		pb.fraction_fruitUnloading = pb.fruitUnloading/(pb.totalUnloading);
+				
+		pb.fraction_fineRootUnloading = (pb.fineRootUnloading)/(pb.totalUnloading); //(pb.leafLoading + pb.internodeLoading + woodLoading);
+		pb.fraction_structuralRootUnloading = (pb.structuralRootUnloading)/(pb.totalUnloading); //(pb.leafLoading + pb.internodeLoading + woodLoading);
+
+	}

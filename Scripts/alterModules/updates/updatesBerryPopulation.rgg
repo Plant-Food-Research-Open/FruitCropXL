@@ -1,0 +1,53 @@
+import static updatesBase.*;
+
+import static absOrgan.*;
+import static leaf.*;
+import static shoot.*;
+import static plantBase.*;
+import static charts.*;
+import static outputTables.*;
+import static environment.*;
+import static globalParameters.*;
+import static plantParameters.*;
+import static modelOptions.*;
+import static initialConditions.*;
+import static phenology.*;
+import static soil.*;
+import static structuralVariation.*;
+import static berryYield.*;
+import static carbonTransport.*;
+import static extraTools.*;
+import static fruitBase.*;
+import java.util.Arrays;
+
+public class UpdatesBerryPopulation extends UpdatesService {
+    public void updates() {[
+        /* pb:PlantBase ::>  				
+        {   
+            pb.updateBiomass();
+            pb.updateSurfaceArea();
+        } */
+        
+        
+        
+        {
+            /* updateEnvironment();
+            updateSolarPosition(year, month, dayOfMonth, hourOfDay, 
+                                        latitude, longitude, elevation,airPressure, Ta);
+            if(hourOfDay == 0) {
+                day++;
+                if(inputEnvironmentCondition == false) dayOfYear++; 
+                }
+            tt = tt + deltaAgeGdd(Ta, baseT, DT);;
+        println(day +" days, "+ hourOfDay + " hour,"  + Math.round(tt * 100.0)/100.0 +" degree days, " + step + " step " + "daytime " + daytime); */
+        }
+        
+        
+        // calculate all organ ages
+        o:FruitService ::> 
+        {
+            //o.calcAge();
+            o.update();
+        }
+    ]}
+}

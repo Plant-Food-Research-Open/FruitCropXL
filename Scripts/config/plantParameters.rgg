@@ -1,0 +1,737 @@
+import static globalParameters.*;
+import static modelOptions.*;
+import static initialConditions.*;
+import static extraTools.*;
+import de.grogra.pf.io.PropertyFileReader;
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileReader;
+import java.io.FileNotFoundException;
+import java.io.StringWriter;
+import java.io.PrintWriter;
+import java.util.StringTokenizer;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Vector;
+import java.util.Arrays;
+import static photosynthesisAndTranspiration.*;
+
+import io.github.fruitcropxl.config.params.groups.*;
+import io.github.fruitcropxl.config.params.structures.*;
+
+//BE CAREFUL WITH THE TIME STEP and RELATIVE GROWTH RATE, AS THERE NEED TO MATCH OR BE CONVERTED  
+//*********************************Parameter definitions ********************************************************/
+/* parameters will be read and values will be overwritted in the loadPlantParameters function */
+//******************************************************************************************/
+
+//********************************* plant-general *********************************/
+global String variety; 
+//temperature response
+/** Base temperature for calculating growing degree days. */
+global double baseT = 10;
+
+/** Reference temperature. */
+global float REFTMP = 25.0f;
+
+/** Maximum temperature for calculating thermal time. */
+global double MAX_TEMP = 37.6;
+
+/** Minimum temperature for calculating thermal time. */
+global double MIN_TEMP = 3.68;
+
+/** Optimal temperature for growth. */
+global double OPT_TEMP = 25.0;
+
+/** Time between the creation of two phytomers (optimal growing days). */
+global double plastochron = 0.62;
+
+/** Time between the appearance of two leaves(optimal growing days). */
+global double phyllochron = 0.62;
+
+/** Days between the appearance of two leaves (calendar day). */
+global double phyllochronDay = 1.0;
+
+/** Angle between consecutive leaves along a stem. */
+global double phyllotaxis = 137.5;
+
+
+//********************************* plant-carbon *********************************/
+
+/** Q10 coefficient, indicating the temperature dependence of maintenance respiration. */
+global float Q10MN = 1.07f;
+
+/** Cost for both carbon loadin0g and transport. For maintaining mass conservation in fluxes, this was set to zero in the current version. */
+global float Q_TRANS = 0.03;
+
+/** Sink priority for maintenance respiration, parameters from L-kiwi Cieslak et al., 2011. */
+global float KM_MTNCE = 1e-6;
+
+/* //parameter set with 100 leaves and 25 leaveas per vine  
+global float KM_BERRY = 1.55e-3; //multiply*0.0176; //2.5� 0.03 gC/gH2O = 0.075 gsucrose/gH2O; 
+global float KM_ROOTS = 1.7e-3; //8.877;//multiply*0.1;         // for root growth
+global float KM_SECONDARY = 2.97e-3; //14; //0.15;      // for secondary internode growth
+global float HYDROLYSIS_ROOTS = 2.595e-3; //half of internode
+ */
+ 
+/*  Aim for daily turnover fractions that don’t whipsaw the pool:
+
+Hydrolysis: target 5–10% per day ⇒ 0.002–0.004 h⁻¹
+(currently 0.006 h⁻¹ ≈ 14.4%/day; a bit aggressive late season)
+
+Synthesis: target 1–3% per day ⇒ 0.0004–0.0012 h⁻¹
+(currently 0.0008 h⁻¹ ≈ 1.9%/day)
+
+If you proceed with your direction
+
+Set HYDROLYSIS_RATE = 0.003–0.004 h⁻¹
+
+Set SYNTHESIS_RATE = 0.0010–0.0012 h⁻¹ */
+/** Active reserve synthesis for leaf; the assimilates left after loading are added to reserve. */
+/** Hydrolysis rate (10% sugar in total non-structural carbon divided by 24 hours). */
+//global float HYDROLYSIS_RATE = 5e-3;
+
+/** Hourly rate of starch synthesis based on structural carbon. */
+//global float SYNTHESIS_RATE = 3e-4;
+
+/** Reserve-storage KM is resolved per organ from absolute KM_RES_EARLY / KM_RES_LATE values. */
+/**
+Day after winter solstice when maximal rate of increase in KM reserve occurs (typically ~160 around flowering time or mid of the season when carbohydrate reserves start to refill)
+*/
+global float km_res_tm = 160;
+/**
+* Day after winter solstice when KM res reaches maximum, typically when fruit matures and close to the end of the growing season
+*/
+global float km_res_te = 300;
+/* /** For secondary internode growth. */
+//global float KM_SECONDARY = 0.12; */
+
+
+/**peak growth time for secondary growth, normally around April for northern, and October for southern hemersphere */
+global float SEC_gauss_center; 
+/**the width of the Gaussian (e.g., 35 days) controls the duration of active secondary growth,  usually spanning **March to June**. */
+global float SEC_gauss_width;
+
+/**
+ * Post-harvest bump amplitude for secondary growth (dimensionless).
+ *
+ * <p>Scales the late-season increase in cambial activity once fruit demand is
+ * removed and carbon becomes more available. Used as a multiplier:
+ * {@code if (phGate > 0.0) dawsEffect = Math.max(dawsEffect, SEC_BUMP);} </p>
+ *
+ * <p><b>Biology.</b> After harvest, if leaves remain active and temperatures
+ * are permissive, carbon allocation to perennial tissues (reserve refill and
+ * wood) often increases, producing a modest second hump in radial growth.</p>
+ *
+ * <p><b>Units:</b> – (adds to 1 as a fraction).<br>
+ * <b>Typical range:</b> 0.20–0.50 (0 disables the bump).<br>
+ * <b>Default:</b> 0.35 → peak*0.35 additional capacity when {@code phGate=1}.</p>
+ *
+ * <p><b>Use with gates.</b> Apply with a post-harvest gate and, ideally, a
+ * leaf/senescence and temperature gate; optionally scale by a carbon-surplus
+ * logistic to avoid boosting on carbon-limited days.</p>
+ *
+ * <p><b>References (post-veraison/late-season allocation & cambium control):</b>
+ * Keller, <i>The Science of Grapevines</i>; Netzer et&nbsp;al. (2019);
+ * García-Forner et&nbsp;al. (2019); Deslauriers et&nbsp;al. (2008).</p>
+ *
+ * @see #secondaryGrowthRate()
+ */
+
+
+// Seasonal effect from Gaussian growth curve (normalized + baseline)
+global double SEC_BASE = 0.08;  // floor: 0.05–0.20 typical
+//postharvest bump, as a percentag of the peak
+global double SEC_BUMP = 0.2;      //For grape/apple cambium, a realistic post-harvest window is usually 20–40% of peak while leaves are still active.  0.20–0.35 typical
+		
+
+/** Passive reserve synthesis. */
+/** Leakage rate; initially set to 0 but can be up to 2e-3 mgC/mgDM/h based on specific conditions. */
+global float Kleakage = 0;
+
+/** Minimum non-structural carbohydrate (NSC) as a percentage of total carbon, based on Greven 2016 and Hoch. */
+global float MINIMUM_NSC = 5e-2;
+
+/** Source loading function depends on the phloem carbon concentration. */
+/** Reflects the steepness of the curve that loading decreases with carbon potential. */
+global float sourceLoading_b = 35;
+
+/** Loading threshold, reflects the observed mean phloem carbon concentration; calculated as c^2/2 for c = 0.098 (Jensen et al., 2013), with sucrose concentration 0.235 Wt/Wt% and C is 0.42 in sucrose. */
+global float sourceLoading_cp = 2.0e-1;
+
+
+/**
+using Fraction of water flux reduction to adjust the carbon allocation under drought to achieve a balance in transpiration and water uptake.
+
+When the root and soil is not limiting the potential transpiration, check the transpiration and conductance balance, and see whether shoot allocation needs to be increased. 
+
+WATER_STRESS_THRESHOLD_RS_ADJUSTMENT = 0.85;
+*/
+global float FLUX_REDUCTION_THRESHOLD_RS_ADJUSTMENT; // 0.85
+//********************************* plant-water *********************************/
+
+//global float phiMaxError = 0.02; //maximum allowance of error in water potential
+//global float phiError = 0; //intermediate variable for storing the maximum error found in the calculation
+
+// paragr a list of parameters for the sensitivities of root hydraulic conductance Gr to transpiration 
+//(equation 8 in Tardieu, Simonneau and Parent, Journal of Experimental Botany, 2015), 
+// amplitude of water potential (equation 7) and ABA (equation 9).
+// global float ampliinit 		; // = 0.4; 			//initial amplitude of the xylem water potential
+// global float Gr0 			; // = 0.08*30; 		//Gr0 Gr0 in equation 8
+// global float Grmin			; // = 0.08*40; 		// minimum value of Gr
+// global float Grmax  		; // = 0.75*16; 		//Grmax maximum value of Gr, I increased the Grmax three times, as it is too small for big water fluxes
+// global float Tautranspigr 	; // = 1.2*1.5; 			//Taucircadgr ?circad for Gr (equation 7)
+// global float slope_Tautranspigr; // = 1.2*1.5;   //accounting the effect of root biomass on the increase of transpiration dependence conductance
+// global float Taucircadgr 	; // = 0.08*1.5;  		//Tauevapgr ?evap for Gr (equation 7)
+// global float TauABAgr 		; // = 0.01;  		//TauABAgr ?ABA for Gr (equation 7)
+
+
+/** NEMA model parameters from Jessica Bertheloot et al., 2011. */
+
+/** Nitrogen fraction of the carbon influx, dimensionless (0.1 is original NEMA value, 0.45 is the fraction of C in biomass). */
+global float NFractionInCflux;
+
+/** Nitrogen degradation rate, per hour. */
+global float DegradationRateN;
+
+/** Nitrogen synthesis rate for leaf, per day. */
+global float NSynthRate;
+
+/** Leaf nitrogen pool turnover rate, g g-1. */
+global float kNpool;
+
+/** Leaf export rate of nitrogen, mm/s. */
+global float kEP;
+
+/** Maximum nitrogen uptake rate by roots, g g-1 day-1. */
+global float Umax;
+
+/** Lateral root constant for nitrogen uptake, g m-3. */
+global float kRootLats;
+
+/** HATS root constant for nitrogen uptake, m3 g-1 day-1. */
+global float kRootHats;
+
+/** Effect of nitrogen on growth, dimensionless, using leaf biomass for calculation. */
+global float beta_Neffect;
+
+/** Effect of carbon on nitrogen uptake efficiency, dimensionless, adjusted for unit difference from NEMA. */
+global float beta_Ceffect;
+
+/** Minimum soil nitrogen concentration for uptake, g m-3. */
+global float Nsoilmin;
+
+/** Carbon cost for ammonium uptake, gc (g NH4-N)-1, value from GECROS. */
+global float CARBON_COST_NH4;
+
+/** Carbon cost for nitrate uptake and reduction, gc (g NO3-N)-1, value from GECROS. */
+global float CARBON_COST_NO3;
+
+/** Minimum structural nitrogen content of leaf, internode, wood, root, and fruit, based on Vivin 2003 and NEMA data. */
+/** Assumed mobile nitrogen fraction of total nitrogen, based on NEMA data. */
+global float N_CONTENT_MOBILE;
+
+
+/******************************************************************************
+ * Leaf Trait Parameterization (Fraction-based Nm convention)
+ *
+ * Nm is expressed as a fraction of dry mass:
+ *   - 0.03 = 3.0% N (g N g⁻¹ DM)
+ *   - 0.005 = 0.5% N (g N g⁻¹ DM)
+ *
+ * This ensures consistency across organs and avoids confusion with % notation.
+ * All slopes (aN_slope) are scaled accordingly.
+ *
+ * References:
+ *   Prieto et al. 2012 (Tree Physiol, grapevine)
+ *   Massonnet et al. 2008 (Tree Physiol, apple)
+ *   Zhu et al. 2018 (Ann Bot, GrapevineXL FSPM)
+ ******************************************************************************/
+
+ 
+ /** bud parameters */
+ // ============================================================
+// Gamma-driven nodes per shoot + allocation (Apple shoots)
+// general flow: Bud burst into apex -- apex keep growing and produce an apex for boose shoot as well
+// Apex produce lateral buds, and lateral buds grow into a shoot and produce a new apex
+// ============================================================
+// ---- CONFIG (default values; will replace with config later) ----
+global int    MAX_TOTAL   = 200;     // hard cap on total nodes
+global double MAIN_SLOPE  = 0.20;    // how main capacity increases with total nodes
+global int    NodeThreshold_branching = 30; // total nodes <= this stay on the main shoot
+
+// fraction of buds spur (0.10–0.15 typical)
+
+// Gamma distribution parameters (shape k, scale θ)
+// If your R fit reported shape=1.30, rate=0.035353 → scale = 1/rate = 28.33
+global double GAMMA_SHAPE = 1.30;
+global double GAMMA_SCALE = 28.33;   // 1 / 0.035353
+
+
+
+//apple floral buds, flower and fruit number settings
+global float FBUD_FLORAL = 0.88;   //fraction of floral bud    
+global int    SPUR_LIMIT  = 5;      // nodes < 5 => spur
+
+global int FLOWERS_PER_FLORAL = 6;  // flower number per bud model
+/** Flower/fruitlet self-photosynthesis fraction of potential growth demand (-). */
+global double flowerSelfAssimFrac = 0.15;
+/** Carbon satisfaction threshold below which flower stress accumulates (-). */
+global double dropThreshold = 0.4;
+/** Hours below threshold needed to trigger carbon-limited flower drop (h). */
+global int stressHoursToDrop = 48;
+/** Flower-drop window start after flowering (days). */
+global double dropWindowStartDaysAfterBloom = 0.0;
+/** Flower-drop window end after flowering (days). */
+global double dropWindowEndDaysAfterBloom = 30.0;
+/** Maximum daily fraction of flowers that can be dropped per plant (0-1). */
+global double maxDailyDropFrac = 0.10;
+global double FRUIT_SET_PROB  = 0.5;   //will replace later; set from your probability function
+global int MAX_FRUITS_PER_BUD = 5;
+global int MAX_FRUITS_PER_UPRIGHT = 50;
+
+global double expectedPushFrac = 1.0;   // 0..1; fraction of per-bud LA realized
+
+
+/**
+ * Annual-shoot diameter slope for the simplified topology-based taper rule.
+ *
+ * Unit:
+ *   m diameter increment per distal annual-shoot node.
+ *
+ * Current provisional species defaults:
+ *   apple     ~= 0.0003 m node-1
+ *   grapevine ~= 0.0005 m node-1
+ *
+ * Used as:
+ *   D_target = clamp(pipeDiaMin + pipe_alpha * nAbove,
+ *                    pipeDiaMin,
+ *                    pipeDiaMax)
+ *
+ * where nAbove is the number of distal annual-shoot nodes used by the
+ * caller's topology-counting convention.
+ *
+ * Historical note:
+ * The key name `pipe_alpha` is retained for compatibility, but in the
+ * annual-shoot diameter implementation it no longer means sapwood area
+ * per unit distal leaf area.
+ */
+global double pipe_alpha = 0.0003;          // default fallback; species JSON should override
+global double meanLeafArea_m2 = 0.002;        //20 cm2, m² per leaf (apple: ~0.002–0.005 m²)
+global double pipeDiaMin = 1.5e-3;          // m (e.g., 1.5 mm)
+global double pipeDiaMax = 1.2e-2;          // m (e.g., 12  mm)
+// Attachments won’t be placed before this main node index (1-based).
+global int ATTACH_START_NODE = 4;   // typical: 4 (skip nodes 1–3)
+// --- Apple bud timing (same unit as your existing budBurstDelay / model time) ---
+global float vegBudBurstLag = 5.0f;      // legacy key kept for compatibility; bud burst now uses one shared delay
+global float budBurst_sd = 0.1;
+/** Time difference between seeing the bud burst tip broken and the model definition of leaf size of 2 cm.*/ 
+global float budBurstDelay_mean = 2;
+global float shootGrowthDelay_mean = 11;
+
+/** Number of vegetative phytomers using fast early appearance cadence (-). */
+global int earlyVegetativeLeafCount = 6;
+
+// Apple mixed-bud (floral spur + bourse) profile/potential controls
+/** Mixed-bud rosette leaf count minimum (-). */
+global int mixedBudRosetteLeafMin = 5;
+/** Mixed-bud rosette leaf count maximum (-). */
+global int mixedBudRosetteLeafMax = 8;
+/** Probability of 0 bourse shoots from floral bud (-). */
+global double mixedBudBourseP0 = 0.25;
+/** Probability of 1 bourse shoot from floral bud (-). */
+global double mixedBudBourseP1 = 0.70;
+/** Probability of 2 bourse shoots from floral bud (-). */
+global double mixedBudBourseP2 = 0.05;
+/** Allowed insertion rank minimum for bourse shoots on rosette axis (-). */
+global int mixedBudBourseAttachRankMin = 3;
+/** Allowed insertion rank maximum for bourse shoots on rosette axis (-). */
+global int mixedBudBourseAttachRankMax = 6;
+/** Rosette/bourse leaf potential mode: actualOnly or potentialFromActual. */
+global String leafSizeMode = "potentialFromActual";
+/** Multiplier to convert profile actual length/width to potential geometry (-). */
+global double potentialLengthMultiplier = 2.0;
+/** Rosette (RO) organ-size profile CSV under Model_input/. */
+global String rosetteProfileFile = "Exp2017_Bairam_Angers_France_apple_RO_organ_size_profile.csv";
+/** Bourse shoot (BS) organ-size profile CSV under Model_input/. */
+global String bourseProfileFile = "Exp2017_Bairam_Angers_France_apple_BS_organ_size_profile.csv";
+/** Vegetative shoot (VS) organ-size profile CSV under Model_input/. */
+global String vegShootProfileFile = "Exp2017_Bairam_Angers_France_apple_VS_organ_size_profile.csv";
+/** Legacy rosette appearance cadence factor retained for backward-compatible parameter files. */
+global double rosettePhyllochronFactor = 0.5;
+/**
+ * Legacy mixed-bud apple bloom delay in phyllochrons, retained for saved graphs and old code paths.
+ * New mixed-bud bloom timing uses mixedBudFloweringTDFromBudBurst instead.
+ */
+global double mixedBudBloomDelayPhyllochrons = 5.0;
+/** Apple mixed-bud bloom threshold counted as thermal time since bud burst / apex creation. */
+global double mixedBudFloweringTDFromBudBurst = 20.0;
+
+// Lateral delay: SAME for all laterals of this apex, sampled once at apex creation
+   /**minimum number of gaps between two branches*/
+global int MIN_BRANCH_GAP = 2;
+global double LATERAL_BASE_DELAY_MEAN = 3.0;   // same unit as age/plastochron; tune
+global double LATERAL_BASE_DELAY_SD   = 0.10;  // Gaussian SD (absolute), tune
+// ---------------- Lateral gating parameters (configurable) ----------------
+// Expressed in phyllochrons (integer milestones)
+global int LATERAL_GATE_START_PHYLLO = 3;    // first check at 3 plastochrons after bud birth
+global int LATERAL_GATE_STOP_PHYLLO  = 7;    // last check at 7 plastochrons
+// Base probability per milestone; will be modulated by physiology factors below
+global double LATERAL_BASE_P = 1;         // 0..1
+    
+global boolean APEX_DECL_APICAL_FOLLOW = true;
+
+global double APEX_DECL_AXIL_MIN_DEG = 40;
+global double APEX_DECL_AXIL_MAX_DEG = 70;
+/** Unitless multiplier on Joint tropism strength; lower values slow upward correction, 1.0 preserves legacy behavior. */
+global double JOINT_TROPISM_SCALE = 0.6;
+
+//Petiole/leaf (Gaussian, degrees):
+
+global double PET_DECL_MEAN_DEG = 65; // 45 for grape and 65 for apple(≈ 90° − mean inclination; tune 55–75)
+
+global double PET_DECL_SD_DEG = 6;
+
+global double LEAF_BEND_MEAN_DEG = 0;
+global double LEAF_BEND_SD_DEG = 9; //(~0.157 rad)
+
+global double LEAF_ROLL_SD_DEG = 20; // (~0.349 rad)    
+
+/** Apple annual internode:leaf biomass ratio (mg mg-1) for leafAllometry mode. */
+global double annualInternodeLeafBiomassRatio = 0.4;
+
+
+
+
+
+
+
+
+/******************************************************************************
+ * Help functions to load all plant parametes
+ ******************************************************************************/
+public static boolean loadPlantParameters(String file_name) {
+	boolean error = false;
+	error = error || loadPropertyFile(file_name);
+	if (error == true) if (printFlag) { println("Error during reading of parameter file(s)!"); }
+	return error;
+}
+
+////////////////////////////////////////////////////////////////////////////////////
+// load the major Property file that contains model settings
+private static boolean loadPropertyFile(String file_name) {
+	ConfigLoader loader = new ConfigLoader(new LoadPlantParametersCommand());
+
+	// groupName: file_path, path: PATH_SCENARIOS + file_path
+	return loader.load(file_name, PATH_SCENARIOS + file_name);
+}
+
+private class LoadPlantParametersCommand implements LoadCommand {
+	public void execute(String file_name) {
+		loadProperties(file_name);
+	}
+}
+
+
+
+
+
+//replace = NANANA.*  to remove all na and the duplicate names after it
+private static void loadProperties(String file_name) {
+
+	CategoryStore config = ((DocumentCategoryNameGroup) CONFIG.getGroup(file_name, 
+			DocumentCategoryNameGroup.class)).getCategoryStore();
+	
+	/** general plant level parameters */
+	config.setCategoryContext("plant-general");		
+	variety = config.getString("variety", "Fuji");
+	phyllotaxis = config.getDouble("phyllotaxis", 137.5);
+	plastochron = config.getDouble("plastochron", 0.62);
+	phyllochron = config.getDouble("phyllochron", 0.62); //currently we only concern about the appeared leaves
+	phyllochronDay = (int) Math.floor(phyllochron/thermaltimeUnit);
+	baseT = config.getDouble("baseT", 10);
+	REFTMP = config.getDouble("REFTMP", 25);
+	MAX_TEMP = config.getDouble("MAX_TEMP", 37.6);
+	MIN_TEMP = config.getDouble("MIN_TEMP", 3.68);
+	OPT_TEMP = config.getDouble("OPT_TEMP", 25);
+	reflectancePAR = config.getDouble("reflectancePAR", 0.06);
+	transmittancePAR = config.getDouble("transmittancePAR", 0.07);
+	PET_DECL_MEAN_DEG       =          config.getDouble("PET_DECL_MEAN_DEG",       Double.valueOf(65.0).doubleValue());
+	PET_DECL_SD_DEG         =          config.getDouble("PET_DECL_SD_DEG",         Double.valueOf(6.0).doubleValue());
+	LEAF_BEND_MEAN_DEG      =          config.getDouble("LEAF_BEND_MEAN_DEG",      Double.valueOf(0.0).doubleValue());
+	LEAF_BEND_SD_DEG        =          config.getDouble("LEAF_BEND_SD_DEG",        Double.valueOf(9.0).doubleValue());
+	LEAF_ROLL_SD_DEG        =          config.getDouble("LEAF_ROLL_SD_DEG",        Double.valueOf(20.0).doubleValue());
+	
+	// Assumes a Config-like API: getDouble(String key, double def), getBoolean(String key, boolean def)
+// Java 1.5-safe: primitives; if you later need boxing, use Double.valueOf(...), Integer.valueOf(...)
+	
+	try {
+		config.setCategoryContext("plant-bud-property");
+		println("[Config] DEBUG: Entering plant-bud-property");
+	
+		MAX_TOTAL               = (int)    config.getDouble("MAX_TOTAL",               200.0);
+		MAIN_SLOPE              =          config.getDouble("MAIN_SLOPE",              0.20);
+	
+		GAMMA_SHAPE             =          config.getDouble("GAMMA_SHAPE",             1.30);
+		GAMMA_SCALE             =          config.getDouble("GAMMA_SCALE",             28.33);
+		try {
+			NodeThreshold_branching = (int) config.getDouble("NodeThreshold_branching", Double.valueOf(NodeThreshold_branching).doubleValue());
+		} catch (RuntimeException e) {
+			// Compatibility fallback for older or malformed plant-parameter files.
+			NodeThreshold_branching = 30;
+		}
+	
+		
+		FBUD_FLORAL             = (float)  config.getDouble("FBUD_FLORAL",             0.88);
+		SPUR_LIMIT              = (int)    config.getDouble("SPUR_LIMIT",              5.0);
+		FLOWERS_PER_FLORAL      = (int)    config.getDouble("FLOWERS_PER_FLORAL",      6.0);
+		FRUIT_SET_PROB          =          config.getDouble("FRUIT_SET_PROB",          0.30);
+		MAX_FRUITS_PER_BUD      = (int)    config.getDouble("MAX_FRUITS_PER_BUD",      5.0);
+		MAX_FRUITS_PER_UPRIGHT  = (int)    config.getDouble("MAX_FRUITS_PER_UPRIGHT",  50.0);
+		expectedPushFrac        =          config.getDouble("expectedPushFrac",        1.0);
+		meanLeafArea_m2         =          config.getDouble("meanLeafArea_m2",         0.002);	
+		ATTACH_START_NODE       = (int)    config.getDouble("ATTACH_START_NODE",       4.0);
+			vegBudBurstLag          = (float)  config.getDouble("vegBudBurstLag",          5.0);
+			budBurst_sd             = (float)  config.getDouble("budBurst_sd",             0.10);
+			budBurstDelay_mean      = (float)  config.getDouble("budBurstDelay_mean",      2.0);
+			shootGrowthDelay_mean   = (float)  config.getDouble("shootGrowthDelay_mean",   11.0);
+			
+			try {
+				earlyVegetativeLeafCount = (int) config.getDouble("earlyVegetativeLeafCount", Double.valueOf(earlyVegetativeLeafCount).doubleValue());
+			} catch (Throwable t) {
+				// Compatibility fallback for legacy plant parameter files that predate fast-leaf timing.
+				earlyVegetativeLeafCount = 6;
+			}
+		try {
+			mixedBudRosetteLeafMin = (int) config.getDouble("mixedBudRosetteLeafMin", Double.valueOf(mixedBudRosetteLeafMin).doubleValue());
+		} catch (Throwable t) {
+			// Compatibility fallback for parameter files that predate mixed-bud rosette sizing.
+			mixedBudRosetteLeafMin = 5;
+		}
+		try {
+			mixedBudRosetteLeafMax = (int) config.getDouble("mixedBudRosetteLeafMax", Double.valueOf(mixedBudRosetteLeafMax).doubleValue());
+		} catch (Throwable t) {
+			// Compatibility fallback for parameter files that predate mixed-bud rosette sizing.
+			mixedBudRosetteLeafMax = 8;
+		}
+		try {
+			mixedBudBourseP0 = config.getDouble("mixedBudBourseP0", Double.valueOf(mixedBudBourseP0).doubleValue());
+		} catch (Throwable t) {
+			mixedBudBourseP0 = 0.25;
+		}
+		try {
+			mixedBudBourseP1 = config.getDouble("mixedBudBourseP1", Double.valueOf(mixedBudBourseP1).doubleValue());
+		} catch (Throwable t) {
+			mixedBudBourseP1 = 0.70;
+		}
+		try {
+			mixedBudBourseP2 = config.getDouble("mixedBudBourseP2", Double.valueOf(mixedBudBourseP2).doubleValue());
+		} catch (Throwable t) {
+			mixedBudBourseP2 = 0.05;
+		}
+		try {
+			mixedBudBourseAttachRankMin = (int) config.getDouble("mixedBudBourseAttachRankMin", Double.valueOf(mixedBudBourseAttachRankMin).doubleValue());
+		} catch (Throwable t) {
+			mixedBudBourseAttachRankMin = 3;
+		}
+		try {
+			mixedBudBourseAttachRankMax = (int) config.getDouble("mixedBudBourseAttachRankMax", Double.valueOf(mixedBudBourseAttachRankMax).doubleValue());
+		} catch (Throwable t) {
+			mixedBudBourseAttachRankMax = 6;
+		}
+		try {
+			leafSizeMode = config.getString("leafSizeMode", leafSizeMode);
+		} catch (Throwable t) {
+			leafSizeMode = "potentialFromActual";
+		}
+		try {
+			potentialLengthMultiplier = config.getDouble("potentialLengthMultiplier", Double.valueOf(potentialLengthMultiplier).doubleValue());
+		} catch (Throwable t) {
+			potentialLengthMultiplier = 2.0;
+		}
+		try {
+			rosetteProfileFile = config.getString("rosetteProfileFile", rosetteProfileFile);
+		} catch (Throwable t) {
+			rosetteProfileFile = "Exp2017_Bairam_Angers_France_apple_RO_organ_size_profile.csv";
+		}
+		try {
+			bourseProfileFile = config.getString("bourseProfileFile", bourseProfileFile);
+		} catch (Throwable t) {
+			bourseProfileFile = "Exp2017_Bairam_Angers_France_apple_BS_organ_size_profile.csv";
+		}
+		try {
+			vegShootProfileFile = config.getString("vegShootProfileFile", vegShootProfileFile);
+		} catch (Throwable t) {
+			vegShootProfileFile = "Exp2017_Bairam_Angers_France_apple_VS_organ_size_profile.csv";
+		}
+		try {
+			rosettePhyllochronFactor = config.getDouble("rosettePhyllochronFactor", Double.valueOf(rosettePhyllochronFactor).doubleValue());
+		} catch (Throwable t) {
+			rosettePhyllochronFactor = 0.5;
+		}
+		try {
+			config.setCategoryContext("flower-general");
+			mixedBudFloweringTDFromBudBurst = config.getDouble("floweringTD", Double.valueOf(mixedBudFloweringTDFromBudBurst).doubleValue());
+			mixedBudBloomDelayPhyllochrons = mixedBudFloweringTDFromBudBurst;
+		} catch (Throwable t) {
+			// Compatibility fallback for legacy parameter files that omit flower-general.floweringTD.
+			mixedBudFloweringTDFromBudBurst = 20.0;
+			mixedBudBloomDelayPhyllochrons = 5.0;
+		}
+		config.setCategoryContext("plant-bud-property");
+		
+		MIN_BRANCH_GAP          = (int)    config.getDouble("MIN_BRANCH_GAP",          2.0);
+		LATERAL_BASE_DELAY_MEAN =          config.getDouble("LATERAL_BASE_DELAY_MEAN", 3.0);
+		LATERAL_BASE_DELAY_SD   =          config.getDouble("LATERAL_BASE_DELAY_SD",   0.10);
+		LATERAL_GATE_START_PHYLLO= (int)   config.getDouble("LATERAL_GATE_START_PHYLLO", 3.0);
+		LATERAL_GATE_STOP_PHYLLO = (int)   config.getDouble("LATERAL_GATE_STOP_PHYLLO", 7.0);
+		LATERAL_BASE_P          =          config.getDouble("LATERAL_BASE_P",          1.0);
+	
+		APEX_DECL_APICAL_FOLLOW =          config.getBoolean("APEX_DECL_APICAL_FOLLOW", true);
+		APEX_DECL_AXIL_MIN_DEG  =          config.getDouble("APEX_DECL_AXIL_MIN_DEG",  40.0);
+		APEX_DECL_AXIL_MAX_DEG  =          config.getDouble("APEX_DECL_AXIL_MAX_DEG",  70.0);
+		try {
+			// Compatibility fallback for legacy parameter files that omit Joint tropism scaling.
+			JOINT_TROPISM_SCALE = config.getDouble("JOINT_TROPISM_SCALE", Double.valueOf(JOINT_TROPISM_SCALE).doubleValue());
+		} catch (Throwable t) {
+			JOINT_TROPISM_SCALE = 0.6;
+		}
+		if (Double.isNaN(JOINT_TROPISM_SCALE) || Double.isInfinite(JOINT_TROPISM_SCALE) || JOINT_TROPISM_SCALE <= 0.0) {
+			JOINT_TROPISM_SCALE = 0.6;
+		}
+
+		if (mixedBudRosetteLeafMin < 1) mixedBudRosetteLeafMin = 1;
+		if (mixedBudRosetteLeafMax < mixedBudRosetteLeafMin) mixedBudRosetteLeafMax = mixedBudRosetteLeafMin;
+		if (mixedBudBourseP0 < 0.0) mixedBudBourseP0 = 0.0;
+		if (mixedBudBourseP1 < 0.0) mixedBudBourseP1 = 0.0;
+		if (mixedBudBourseP2 < 0.0) mixedBudBourseP2 = 0.0;
+		if (mixedBudBourseP0 > 1.0) mixedBudBourseP0 = 1.0;
+		if (mixedBudBourseP1 > 1.0) mixedBudBourseP1 = 1.0;
+		if (mixedBudBourseP2 > 1.0) mixedBudBourseP2 = 1.0;
+		double mixedBudBoursePSum = mixedBudBourseP0 + mixedBudBourseP1 + mixedBudBourseP2;
+		if (Double.isNaN(mixedBudBoursePSum) || Double.isInfinite(mixedBudBoursePSum) || mixedBudBoursePSum <= 0.0) {
+			mixedBudBourseP0 = 0.25;
+			mixedBudBourseP1 = 0.70;
+			mixedBudBourseP2 = 0.05;
+		} else {
+			mixedBudBourseP0 = mixedBudBourseP0 / mixedBudBoursePSum;
+			mixedBudBourseP1 = mixedBudBourseP1 / mixedBudBoursePSum;
+			mixedBudBourseP2 = mixedBudBourseP2 / mixedBudBoursePSum;
+		}
+		if (mixedBudBourseAttachRankMin < 1) mixedBudBourseAttachRankMin = 1;
+		if (mixedBudBourseAttachRankMax < mixedBudBourseAttachRankMin) mixedBudBourseAttachRankMax = mixedBudBourseAttachRankMin;
+		if (!"actualOnly".equalsIgnoreCase(leafSizeMode) && !"potentialFromActual".equalsIgnoreCase(leafSizeMode)) {
+			leafSizeMode = "potentialFromActual";
+		}
+		if (Double.isNaN(mixedBudFloweringTDFromBudBurst) || Double.isInfinite(mixedBudFloweringTDFromBudBurst) || mixedBudFloweringTDFromBudBurst <= 0.0) {
+			mixedBudFloweringTDFromBudBurst = 20.0;
+		}
+		if (Double.isNaN(mixedBudBloomDelayPhyllochrons) || Double.isInfinite(mixedBudBloomDelayPhyllochrons) || mixedBudBloomDelayPhyllochrons <= 0.0) {
+			mixedBudBloomDelayPhyllochrons = mixedBudFloweringTDFromBudBurst;
+		}
+		if (potentialLengthMultiplier < 1.0) potentialLengthMultiplier = 1.0;
+		if (rosetteProfileFile == null || rosetteProfileFile.length() == 0) {
+			rosetteProfileFile = "Exp2017_Bairam_Angers_France_apple_RO_organ_size_profile.csv";
+		}
+		if (bourseProfileFile == null || bourseProfileFile.length() == 0) {
+			bourseProfileFile = "Exp2017_Bairam_Angers_France_apple_BS_organ_size_profile.csv";
+		}
+		if (vegShootProfileFile == null || vegShootProfileFile.length() == 0) {
+			vegShootProfileFile = "Exp2017_Bairam_Angers_France_apple_VS_organ_size_profile.csv";
+		}
+		
+		if (earlyVegetativeLeafCount < 0) earlyVegetativeLeafCount = 0;
+		if (rosettePhyllochronFactor <= 0.0) rosettePhyllochronFactor = 0.5;
+		
+
+		println("[Config] DEBUG: plant-bud-property loaded OK.");
+	}
+	catch (Throwable t) {
+		println("[Config] ERROR in plant-bud-property: " + t);
+		t.printStackTrace();
+		println("[Config] WARN: Failed to load one or more parameters. Using current in-memory defaults where applicable.");
+	}
+
+
+	/** general plant carbon parameters */
+	config.setCategoryContext("internode-carbon");
+	try {
+		pipe_alpha = config.getDouble("pipe_alpha", Double.valueOf(pipe_alpha).doubleValue());
+		pipeDiaMin = config.getDouble("pipeDiaMin", Double.valueOf(pipeDiaMin).doubleValue());
+		pipeDiaMax = config.getDouble("pipeDiaMax", Double.valueOf(pipeDiaMax).doubleValue());
+	} catch (RuntimeException e) {
+		// Compatibility fallback for legacy parameter files that predate topology-based taper.
+		pipe_alpha = 0.0003;
+		pipeDiaMin = 1.5e-3;
+		pipeDiaMax = 1.2e-2;
+	}
+	if (Double.isNaN(pipe_alpha) || Double.isInfinite(pipe_alpha) || pipe_alpha < 0.0) pipe_alpha = 0.0003;
+	if (Double.isNaN(pipeDiaMin) || Double.isInfinite(pipeDiaMin) || pipeDiaMin <= 0.0) pipeDiaMin = 1.5e-3;
+	if (Double.isNaN(pipeDiaMax) || Double.isInfinite(pipeDiaMax) || pipeDiaMax < pipeDiaMin) pipeDiaMax = 1.2e-2;
+	if (printFlag) {
+		println("[Config] internode pipe_alpha=" + pipe_alpha
+			+ " m diameter/node, pipeDiaMin=" + pipeDiaMin
+			+ " m, pipeDiaMax=" + pipeDiaMax + " m");
+	}
+	try {
+		// Used only when model option annualInternodeBiomassMode == "leafAllometry".
+		annualInternodeLeafBiomassRatio = config.getDouble("annualInternodeLeafBiomassRatio");
+	} catch (Throwable t) {
+		annualInternodeLeafBiomassRatio = 0.4;
+	}
+	if (Double.isNaN(annualInternodeLeafBiomassRatio) || Double.isInfinite(annualInternodeLeafBiomassRatio) || annualInternodeLeafBiomassRatio < 0.0) {
+		annualInternodeLeafBiomassRatio = 0.4;
+	}
+
+	config.setCategoryContext("plant-carbon");
+	Q10MN		 = config.getDouble("Q10MN", 1.07);
+	Q_TRANS		 = config.getDouble("Q_TRANS", 0.03);
+	KM_MTNCE	 = config.getDouble("KM_MTNCE", 1e-06);
+	
+	km_res_tm	 = config.getDouble("km_res_tm", 160);
+	km_res_te	 = config.getDouble("km_res_te", 300);
+	
+	SEC_gauss_center = config.getDouble("SEC_gauss_center", 120);
+	SEC_gauss_width = config.getDouble("SEC_gauss_width", 35);
+	
+	
+	SEC_BASE = config.getDouble("SEC_BASE", 0.08);
+	SEC_BUMP = config.getDouble("SEC_BUMP", 0.2);
+
+	sourceLoading_b	 = config.getDouble("sourceLoading_b", 90);
+	sourceLoading_cp = config.getDouble("sourceLoading_cp", 0.004); 
+
+	
+	/** general plant water parameters */
+	config.setCategoryContext("plant-water");	
+	FLUX_REDUCTION_THRESHOLD_RS_ADJUSTMENT = config.getDouble("FLUX_REDUCTION_THRESHOLD_RS_ADJUSTMENT", 0.85); 
+	
+		
+	/** general plant nitrogen parameters as
+		we haven't sepecifically working on nitrogen dynamics*/
+	config.setCategoryContext("plant-nitrogen");
+	NFractionInCflux		 = config.getDouble("NFractionInCflux", 0.222);
+	DegradationRateN		 = config.getDouble("DegradationRateN", 0.0018);
+	
+	Umax		 = config.getDouble("Umax", 8e-05);
+	kRootLats		 = config.getDouble("kRootLats", 2.5);
+	kRootHats		 = config.getDouble("kRootHats", 5e-06);
+	beta_Neffect		 = config.getDouble("beta_Neffect", 130);
+	beta_Ceffect		 = config.getDouble("beta_Ceffect", 2.3);
+	Nsoilmin		 = config.getDouble("Nsoilmin", 0);
+	CARBON_COST_NH4		 = config.getDouble("CARBON_COST_NH4", 0.1);
+	CARBON_COST_NO3		 = config.getDouble("CARBON_COST_NO3", 1.05);
+	NSynthRate		 = config.getDouble("NSynthRate", 0.00015);
+	kNpool		 = config.getDouble("kNpool", 0.0004);
+	kEP		 = config.getDouble("kEP", 6e-05);
+	N_CONTENT_MOBILE = config.getDouble("N_CONTENT_MOBILE", 0.09);
+	
+	config.setCategoryContext("wood-carbon");
+	WOOD_DENSITY = config.getDouble("WOOD_DENSITY", WOOD_DENSITY); // Use value assigned at declaration if null in CONFIG
+	
+	
+	
+	PhotosynthesisAndTranspiration.loadParameters();
+	
+	
+}
+	

@@ -1,0 +1,27 @@
+name: Public Model Smoke Test
+
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+
+jobs:
+  default-scenario:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v3
+
+      - name: Install Apptainer
+        uses: eWaterCycle/setup-apptainer@v2
+        with:
+          apptainer-version: 1.1.6
+
+      - name: Pull GroIMP image
+        run: bash bash_scripts/apptainer_pull.sh
+
+      - name: Run public default scenario
+        run: >-
+          bash tests/validation/run_groimp_tests.sh
+          XrunTests default "" model.options.default.json

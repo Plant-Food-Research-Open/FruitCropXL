@@ -1,0 +1,42 @@
+import static main.*;
+import static outputTables.*;
+import static java.lang.Math.*;
+import static extraTools.*;
+import static modelOptions.*;
+import static initialConditions.*;
+import static globalParameters.*;
+import static simRunBase.*;
+
+import java.io.Serializable;
+import java.util.Arrays;
+import java.util.ArrayList;
+import java.util.List;
+import de.grogra.pf.ui.Context;
+import de.grogra.graph.impl.GraphManager;
+import de.grogra.util.Lock;
+import de.grogra.pf.ui.util.LockProtectedCommand;
+import de.grogra.pf.ui.JobManager;
+import de.grogra.graph.impl.Edge;
+import de.grogra.persistence.Transaction;
+import de.grogra.graph.Graph;
+import de.grogra.pf.ui.Command;
+import de.grogra.imp.IMPWorkbench;
+import de.grogra.pf.registry.Registry;
+import de.grogra.pf.ui.Workbench;
+import de.grogra.pf.ui.JobManager;
+import de.grogra.rgg.Library;
+
+public class SimRunStandard extends SimRunService implements Serializable {
+	public void simRun() 
+	{
+		if("true".equalsIgnoreCase(ModelArgs.reset)) {
+		  mainInstance.resetGraph();
+		  mainInstance.init();
+		  derive();
+		}
+			if (printFlag) { println(FILE_NAME_MODEL_OPTIONS); }
+
+		mainInstance.runEnd();
+		
+	}
+}

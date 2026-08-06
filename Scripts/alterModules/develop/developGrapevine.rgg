@@ -1,0 +1,158 @@
+import static absOrgan.*;
+import static archReader.*;
+import static leaf.*;
+import static shoot.*;
+import static plantBase.*;
+import static charts.*;
+import static outputTables.*;
+import static environment.*;
+import static globalParameters.*;
+import static plantParameters.*;
+import static modelOptions.*;
+import static initialConditions.*;
+import static carbonTransport.*;
+import static shootPositioning.*;
+import static structuralVariation.*;
+import static pruning.*;
+import static shootBase.*;
+import static developBase.*;
+import static fruitBase.*;
+import static budBase.*;
+import static budGrapevine.*;
+import static fieldBase.*;
+
+public class DevelopGrapevine extends DevelopService {
+	public void develop() {
+			boolean newShootAppeared = false;
+		[	
+	/**
+		 * Rule for bud burst.
+		 * <p>
+		 * When a should break, it initiates an apex.
+		 * </p>
+		 */
+		{//start a java block inside the Lsystem [] block
+			if ("ArchReader".equals(initiation_method)) 
+			{ //java if statement
+				[ //XL replacement rules
+				
+					ShootMeristem b:BudService, (b.shouldBreak()) ==>
+						{ApexService apex = b.createApex();} 
+						RV(-1) a:apex
+					{		
+						a.initiate(b);
+						if (printFlag) { println("bud type : " + b.budType + " age " + b.age); }
+					}
+					; //end of the replacement rule
+				]
+			} else {
+				[ //XL replacement rules
+				
+					b:BudService, (b.shouldBreak()) ==>
+						{ApexService apex = b.createApex();} 
+						RV(-1) a:apex
+					{		
+						a.initiate(b);
+						if (printFlag) { println("bud type : " + b.budType + " age " + b.age); }
+					}
+					; //end of the replacement rule
+				]
+			
+			} // end of the java if statement
+			
+		} //end of the java block
+		 
+		/**
+		 * Rule for updating water potential in an apex.
+		 */
+		a:ApexService ::> 
+		{
+			a.updateWaterPotential();
+		}
+		
+		// produce vegetative phtyomer
+		a:ApexService, (useStaticArc == false && a.shouldProducePhytomer() == true) ==>
+			{
+				ShootBase sb1 = first((* sb2:ShootBase, (sb2.isBaseOf(a)) *));
+				BudCreator budCreator = new BudCreator(species);
+				BudService bud = budCreator.createBud();
+			}
+			if (sb1 == null) (
+				sb2:ShootBase
+				{sb2.initiate(a);}
+			)
+			if(trainingSystem == 2 && (a.cordonNumber == 1 || a.cordonNumber == 2)) (RV(2)) //downwards
+			if(trainingSystem == 4 || trainingSystem == 5) (RV(0)) //go with a defined direction
+			else (RV(-1)) //upwards 	
+			RH(phyllotaxis) i:Internode jt:Joint
+			if(a.shouldProduceBunch() == true) ([RH(180) be:main.FRUIT_CREATOR.createFruit() {be.initiate_apex(a);}])
+			//[ b:bud l:Leaf]
+			[bd1:bud 				{
+					i.initiate_apex(a); jt.initiate(i); jt.setTropism(a);
+					bd1.initiate(i,0); 
+				}
+			]
+			
+		[ //start of leaf initiation
+			{ float petDecl = JMidrib.samplePetioleDeclDeg();
+			  float rollDeg = JMidrib.sampleLeafRollDeg();
+			}
+		RU(-petDecl) AdjustLU pt:Petiole
+		//AdjustLU make the rotated local x-axis (the turtle's left axis) is horizontal
+		{pt.initiate_apex(a);}
+		RH(180)
+		//can add petio to leaf blade angle here
+		RH(rollDeg)
+		jm:JMidrib(JMidrib.calcLeafDeclination(pt.rank, pt.order, 0.1))
+		
+		for (int m = 0; m < leafShape.polyleaf[0].length; m++) (
+			[lf:Leaf]
+			{
+				println("new leaf");
+				lf.initiate_apex(a);
+				lf.fid = m;
+				lf.area = leafShape.calcLeafPolygonArea(lf.length, lf.width, lf.fid);
+				jm.initiateWithAngles(lf, petDecl, rollDeg);
+				//if (printFlag) { println(" leaf legnth: " + lf.length + " leaf width: " + lf.width + " leaf area: " + lf.area); }
+			}
+		)
+		]  //end of leaf initiation
+ 		
+		a 
+		{
+			a.increment();
+			//if (printFlag) { println("New Phytomer"); }
+			derive();
+			newShootAppeared = true;
+			
+		}
+		;
+		
+		
+		// Terminate apex
+		a:ApexService, (useStaticArc == false && a.shouldTerminate() == true) ==> 
+			{println("Apex " + a.rank + "is terminated");};
+		
+		// shed flower/fruit
+		//b:FruitService, (b.shouldFall()) ==> cut;
+		
+		//shed a leaf
+		//l:Leaf, (l.shouldFall() == true) ==>> ; 
+		
+		/** call the update oder function when new shoot appeared */
+		pb:PlantBase, (newShootAppeared == true) ::>
+		{
+			pb.updateOrder();
+		}
+		
+
+		{
+			if (useStaticArc == false && useShootPositioning == true) {
+			ApplyBend();
+		}
+		}
+	
+		// ignore
+		temp ==> temp;
+	]}
+}

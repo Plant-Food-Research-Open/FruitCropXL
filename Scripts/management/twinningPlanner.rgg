@@ -1,0 +1,605 @@
+
+import static plantBase.*;
+import static budBase.*;
+import static budApple.*;
+import static shootBase.*;
+import static shoot.*;
+import static leaf.*;
+import static absOrgan.*;
+import static globalParameters.*;
+import static plantParameters.*;
+import static modelOptions.*;
+import static extraTools.*;
+import static main.*;
+import budPlanner.*;
+import budPlannerT0.*;
+import static budPlannerConfig.*;
+import leafPlanner.*;
+import fruitPlanner.*;
+
+// ============================================================================
+// management/TwinningPlanner.rgg
+// Orchestrates BudPlanner, LeafPlanner, FruitPlanner by DOY and stage
+//Twinning T1/T2 = “calibration” events → they can adjust both leaf and fruit.
+//Leaf pruning / fruit pruning = separate management operations → each has its own DOY and can happen independently.
+//If the target for a component is 0 or missing, we just skip that component at that stage.
+//If leafAreaTargetPerTree_T1 <= 0 → no leaf twinning at T1.
+//If leafAreaTargetPerTree_T2 <= 0 → no leaf twinning at T2.
+//leafPrunningDOY and fruitPrunningDOY controls the separate pruning pass, not TwinningPlanner.
+// ============================================================================
+
+
+/**
+ * High‑level management controller for bud, leaf, and fruit "twinning" in the
+ * dynamic apple model.
+ * <p>
+ * The {@code TwinningPlanner} coordinates three specialised planners:
+ * </p>
+ * <ul>
+ *   <li>{@link BudPlanner} / {@link BudPlannerT0} for pre‑season bud layout
+ *       and fruit potential (RAW fruits).</li>
+ *   <li>{@link LeafPlanner} for reconciling simulated leaf area with
+ *       whole‑tree or grid‑based leaf area targets.</li>
+ *   <li>{@link FruitPlanner} for reconciling actual flowers/fruits with
+ *       whole‑tree or grid‑based fruit targets and, separately, crop‑load
+ *       pruning.</li>
+ * </ul>
+ *
+ * <h2>Scope</h2>
+ * <p>
+ * The twinning system is intended as a management layer that manipulates bud,
+ * leaf, and fruit populations to match user‑defined targets while keeping
+ * physiological consistency:
+ * </p>
+ * <ul>
+ *   <li>Bud layout targets (buds per meter, total buds per tree, or grid‑based
+ *       bud targets).</li>
+ *   <li>Leaf area targets (whole‑tree and grid‑based, pre‑ and post‑prune).</li>
+ *   <li>Fruit number targets (whole‑tree and grid‑based, pre‑ and post‑prune),
+ *       with protection of a RAW fruit "floor".</li>
+ * </ul>
+ *
+ * <h2>Configuration overview</h2>
+ *
+ * <p>The twinning workflow is configured through the model options JSON:</p>
+ *
+ * <h3>Twinning planner block</h3>
+ * <ul>
+ *   <li>{@code twinningPlanner_options.useTwinningPlanner} –
+ *       global on/off switch for the entire twinning system.</li>
+ *   <li>{@code twinningPlanner_options.twinningStage} –
+ *       stage override: {@code "AUTO"} (default, DOY‑driven), or one of
+ *       {@code "T0"}, {@code "T1"}, {@code "T2"} for explicit forcing.</li>
+ *   <li>{@code twinningPlanner_options.twinningDOY_T0} –
+ *       pre‑season bud planning day of year (Stage T0).</li>
+ *   <li>{@code twinningPlanner_options.twinningDOY_T1} –
+ *       in‑season twinning day of year (Stage T1).</li>
+ *   <li>{@code twinningPlanner_options.twinningDOY_T2} –
+ *       late‑season twinning day of year (Stage T2).</li>
+ *   <li>{@code twinningPlanner_options.dry_run} –
+ *       global dry‑run flag for diagnostic runs (no structural edits).</li>
+ * </ul>
+ *
+ * <h3>Twinning grids</h3>
+ * <p>
+ * Leaf and fruit twinning can operate on a 2D management grid in the local
+ * row frame:
+ * </p>
+ * <ul>
+ *   <li>{@code twinningGrids.nx}, {@code twinningGrids.nz} – number of cells in
+ *       along‑row (X) and vertical (Z) directions.</li>
+ *   <li>{@code twinningGrids.xMin}, {@code twinningGrids.xMax} – management
+ *       domain in local row X (m).</li>
+ *   <li>{@code twinningGrids.zMin}, {@code twinningGrids.zMax} – management
+ *       domain in local Z height (m).</li>
+ * </ul>
+ *
+ * <h3>Bud planner options</h3>
+ * <p>
+ * The {@link BudPlannerT0} / {@link BudPlannerConfig} block defines how T0
+ * planning manipulates bud number, bud density and fruit potential. Relevant
+ * fields include:
+ * </p>
+ * <ul>
+ *   <li>{@code budPlanner.targetMode} (mapped to {@code budTargetMode}) –
+ *       high‑level strategy:
+ *       <ul>
+ *         <li>{@code 0} – density‑only, remove to buds/m target (no addition).</li>
+ *         <li>{@code 1} – density remove+add to meet buds/m along uprights.</li>
+ *         <li>{@code 2} – leaf‑area target (capped by RAW fruit; no density step).</li>
+ *         <li>{@code 3} – density remove‑only, then leaf area & fruit.</li>
+ *         <li>{@code 4} – whole‑tree total bud target per tree (remove‑only).</li>
+ *         <li>{@code 5} – grid‑based bud targets (remove+add per grid cell).</li>
+ *       </ul>
+ *   </li>
+ *   <li>{@code budPlanner.budNumberPerMeter} – target buds per meter of
+ *       upright length (used by modes 0, 1, 3 and in diagnostics).</li>
+ *   <li>{@code budPlanner.budNumberTargetPerTree} – total bud target per tree
+ *       for mode {@code 4}.</li>
+ *   <li>{@code budPlanner.budNumberTargetsGrid} – comma‑separated grid of bud
+ *       targets (cells in row‑major order) for mode {@code 5}.</li>
+ *   <li>{@code budPlanner.budNumberTargetsUprightRegion} – optional explicit
+ *       upright-region targets for mode {@code 8}, flattened as
+ *       {@code U0_low, U0_mid, U0_upper, U1_low, ...}.</li>
+ *   <li>{@code budPlanner.mainAxisOnly}, {@code placementOrder},
+ *       {@code uprightOrder}, {@code minBranchGap}, {@code startNodeMin} –
+ *       structural constraints for bud placement and density control.</li>
+ *   <li>{@code budPlanner.maxNewBudsAllow} – global cap on the number of new
+ *       buds that may be added during Stage A.</li>
+ *   <li>{@code budPlanner.apexPotentialEnable_T1}, {@code apexPotentialScale_T1},
+ *       {@code apexPotentialMaxDeviation_T1} – T1 apex potential adjustment
+ *       and LA consistency check parameters.</li>
+ * </ul>
+ *
+ * <h3>Leaf planner options</h3>
+ * <p>
+ * The {@link LeafPlanner} respects the following configuration:
+ * </p>
+ * <ul>
+ *   <li>{@code leafPlanner.targetMode} – {@code "none"}, {@code "wholeTree"},
+ *       {@code "gridBased"}, or {@code "uprightRegions"}.</li>
+ *   <li>{@code leafPlanner.expectedLeafArea_prePrune} –
+ *       expected whole‑tree leaf area before summer pruning (used at T0/T1).</li>
+ *   <li>{@code leafPlanner.leafAreaTargetPerTree_T1} –
+ *       T1 whole‑tree leaf area target (post‑twinning; optional if grid‑based).</li>
+ *   <li>{@code leafPlanner.leafAreaTargetPerTree_T2} –
+ *       T2 whole‑tree leaf area target before leaf pruning.</li>
+ *   <li>{@code leafPlanner.leafAreaTargetsGrid_T1},
+ *       {@code leafPlanner.leafAreaTargetsGrid_T2} – comma‑separated
+ *       leaf‑area targets per grid cell for T1/T2, length {@code nx * nz}.</li>
+ *   <li>{@code leafPlanner.leafAreaTargetsUprightRegion_T1},
+ *       {@code leafPlanner.leafAreaTargetsUprightRegion_T2} – optional explicit
+ *       upright-region leaf-area targets for T1/T2, flattened as
+ *       {@code U0_low, U0_mid, U0_upper, U1_low, ...}.</li>
+ *   <li>{@code leafPlanner.leafPruningDOY}, {@code leafPlanner.leafPruningMode},
+ *       {@code leafPlanner.leafPruningFraction},
+ *       {@code leafPlanner.desiredLeafArea_postPrune} – separate leaf pruning
+ *       event (not part of twinning; triggered from {@code main.run()}).</li>
+ * </ul>
+ *
+ * <h3>Fruit planner options</h3>
+ * <p>
+ * The {@link FruitPlanner} uses:
+ * </p>
+ * <ul>
+ *   <li>{@code fruitPlanner.targetMode} – {@code "none"}, {@code "wholeTree"},
+ *       {@code "gridBased"}, or {@code "uprightRegions"}.</li>
+ *   <li>{@code fruitPlanner.expectedFruitNumber_prePrune} –
+ *       expected RAW fruits per tree before thinning.</li>
+ *   <li>{@code fruitPlanner.fruitTargetPerTree_T1},
+ *       {@code fruitPlanner.fruitTargetPerTree_T2} – T1/T2 whole‑tree fruit
+ *       targets (used when {@code targetMode="wholeTree"}).</li>
+ *   <li>{@code fruitPlanner.fruitTargetsGrid_T1},
+ *       {@code fruitPlanner.fruitTargetsGrid_T2} – per‑cell fruit targets for
+ *       T1/T2, length {@code nx * nz}.</li>
+ *   <li>{@code fruitPlanner.fruitTargetsUprightRegion_T1},
+ *       {@code fruitPlanner.fruitTargetsUprightRegion_T2} – optional explicit
+ *       upright-region fruit targets for T1/T2, flattened as
+ *       {@code U0_low, U0_mid, U0_upper, U1_low, ...}.</li>
+ *   <li>{@code fruitPlanner.fruitPruningDOY}, {@code fruitPlanner.fruitPruningMode},
+ *       {@code fruitPlanner.fruitSeparationHeight},
+ *       {@code fruitPlanner.desiredFruitNumber_postPrune} – crop‑load pruning
+ *       event (cluster‑based thinning + optional numeric targets), triggered
+ *       separately from {@code main.run()}.</li>
+ * </ul>
+ *
+ * <h2>Stages</h2>
+ *
+ * <h3>T0 – Pre‑season bud planning (STAGE_T0)</h3>
+ * <p>
+ * Invoked on {@code twinningDOY_T0}. Delegates to
+ * {@link BudPlanner#runFromProjectParams(boolean)} / {@link BudPlannerT0} to:
+ * </p>
+ * <ul>
+ *   <li>Scan the existing bud population and estimate leaf area and RAW fruit
+ *       potential per upright.</li>
+ *   <li>Enforce the configured bud strategy
+ *       ({@code budTargetMode = 0..6 or 8}), combining:
+ *       <ul>
+ *         <li>upright‑based buds per meter,</li>
+ *         <li>whole-tree, grid-based, or upright-region bud targets,</li>
+ *         <li>leaf area and RAW fruit targets,</li>
+ *         <li>protection of a RAW fruit floor (do not remove buds if that
+ *             would drop RAW fruits below the configured minimum).</li>
+ *       </ul>
+ *   </li>
+ *   <li>Report final consistency vs. planned leaf area, RAW fruit and bud
+ *       density, including per‑upright and per‑zone deviations.</li>
+ * </ul>
+ *
+ * <h3>T1 – In‑season twinning (STAGE_T1)</h3>
+ * <p>
+ * Invoked on {@code twinningDOY_T1}. This stage is intended to reconcile the
+ * current simulation with pre‑season expectations just before in‑season canopy
+ * management. T1 performs:
+ * </p>
+ * <ol>
+ *   <li><b>LA consistency check.</b>
+ *     <ul>
+ *       <li>Builds a {@link BudPlannerConfig.Cfg} object from project
+ *           parameters for Stage 1.</li>
+ *       <li>Calls
+ *           {@link BudPlannerT0#estimateLeafAreaFast_OrderMin_T1(BudPlannerConfig.Cfg)}
+ *           to estimate the expected whole‑tree leaf area ({@code LA_sim0})
+ *           implied by the current bud configuration.</li>
+ *       <li>Compares {@code LA_sim0} with
+ *           {@code leafPlanner.expectedLeafArea_prePrune} and computes the
+ *           absolute deviation.</li>
+ *       <li>If the deviation exceeds
+ *           {@code budPlanner.apexPotentialMaxDeviation_T1}, a warning is
+ *           logged and the user is asked to revise the initial bud number /
+ *           expected leaf area settings before running the simulation.</li>
+ *     </ul>
+ *   </li>
+ *   <li><b>Apex potential adjustment (optional).</b>
+ *     <ul>
+ *       <li>If {@code budPlanner.apexPotentialEnable_T1} is {@code true},
+ *           delegates to
+ *           {@link BudPlanner#run_T1_adjustApexPotential(boolean)} to scale
+ *           the apex potential so that the simulated leaf area trajectory
+ *           matches the configured T1 target within the allowed deviation.</li>
+ *     </ul>
+ *   </li>
+ *   <li><b>Leaf twinning (current leaf area reconciliation).</b>
+ *     <ul>
+ *       <li>Calls {@link LeafPlanner#runFromProjectParams_T1(boolean)} to
+ *           reconcile the <em>current</em> leaf area with either:
+ *           <ul>
+ *             <li>a whole‑tree T1 leaf area target, or</li>
+ *             <li>grid‑based leaf area targets
+ *                 ({@code leafAreaTargetsGrid_T1}).</li>
+ *           </ul>
+ *       </li>
+ *       <li>Depending on the configuration, this may remove or (rarely)
+ *           promote leaves, but does <strong>not</strong> perform the
+ *           mass‑balanced, explicit leaf pruning step (that is handled by
+ *           {@code LeafPlanner.runFromProjectParams_Prune}).</li>
+ *     </ul>
+ *   </li>
+ *   <li><b>Fruit twinning (current fruit reconciliation).</b>
+ *     <ul>
+ *       <li>Calls {@link FruitPlanner#runFromProjectParams_T1(boolean)} to
+ *           reconcile actual flowers/fruits with whole‑tree or grid‑based
+ *           T1 fruit targets, using RAW fruit number and local grid targets.</li>
+ *       <li>In twinning mode, fruit operations are treated as calibration
+ *           events and are not necessarily mass‑balanced; only pruning
+ *           (see below) is reported as biomass removal in the output
+ *           tables.</li>
+ *     </ul>
+ *   </li>
+ * </ol>
+ *
+ * <h3>T2 – Late‑season twinning (STAGE_T2)</h3>
+ * <p>
+ * Invoked on {@code twinningDOY_T2}. This stage performs a final in‑season
+ * adjustment of leaf and fruit populations before separate pruning events
+ * (if any) are triggered:
+ * </p>
+ * <ul>
+ *   <li>{@link LeafPlanner#runFromProjectParams_T2(boolean)} –
+ *       reconcile current leaf area with T2 whole‑tree / grid targets.</li>
+ *   <li>{@link FruitPlanner#runFromProjectParams_T2(boolean)} –
+ *       reconcile current fruit population with T2 whole‑tree / grid targets,
+ *       respecting RAW fruit floor and cluster‑level structure.</li>
+ * </ul>
+ *
+ * <h2>Independent pruning events</h2>
+ * <p>
+ * In addition to the twinning stages, the main simulation loop can trigger
+ * explicit pruning events:
+ * </p>
+ * <ul>
+ *   <li>{@code LeafPlanner.runFromProjectParams_Prune(boolean)} –
+ *       leaf pruning on {@code leafPruningDOY}, with explicit
+ *       {@code leafPruningMode}, {@code leafPruningFraction} and target
+ *       post‑prune leaf area. Leaf pruning is mass‑balanced and its removal
+ *       statistics (leaf area and biomass, and associated internode biomass)
+ *       are written to the plant‑level output table.</li>
+ *   <li>{@code FruitPlanner.runFromProjectParams_Prune(boolean)} –
+ *       fruit pruning on {@code fruitPruningDOY}, performing cluster‑based
+ *       thinning and optional whole‑tree or grid‑based crop‑load targets.
+ *       Fruit pruning is mass‑balanced and its removal statistics (flowers
+ *       removed, fruits removed, fruit/flower biomass removed) are written to
+ *       the plant‑level output table.</li>
+ * </ul>
+ * <p>
+ * By design, twinning adjustments (T1/T2) are not reported into the
+ * mass‑balanced pruning output variables. Only explicit pruning passes
+ * contribute to the {@code prune*} output columns.
+ * </p>
+ *
+ * <h2>Dry‑run mode</h2>
+ * <p>
+ * All planners (bud, leaf, fruit, twinning) support a {@code dryRun} flag:
+ * </p>
+ * <ul>
+ *   <li>If {@code dryRun == true}, the planners compute and log their plans
+ *       (bud counts, LA deficits, fruit deficits and per‑cell targets) but do
+ *       not modify the graph.</li>
+ *   <li>If {@code dryRun == false}, structural edits are applied: buds, leaves
+ *       and fruits are added or removed, and the scene is re‑derived.</li>
+ * </ul>
+ *
+ * <h2>Typical call pattern</h2>
+ * <p>
+ * {@code TwinningPlanner.runFromProjectParams(false)} is usually called once
+ * per simulation day at a fixed hour from the main model loop. Stage selection
+ * is DOY‑based (T0/T1/T2) unless an explicit {@code twinningStage} override is
+ * provided in the model options.
+ * </p>
+ */
+
+public class TwinningPlanner {
+
+/** Stage identifier: T0 – pre‑season bud planning on {@code twinningDOY_T0}. */
+static final int STAGE_T0 = 0;
+
+/** Stage identifier: T1 – in‑season leaf/crop twinning on {@code twinningDOY_T1}. */
+static final int STAGE_T1 = 1;
+
+/** Stage identifier: T2 – late‑season leaf/fruit twinning on {@code twinningDOY_T2}. */
+static final int STAGE_T2 = 2;
+
+
+  /**
+   * Main entry for management twinning.
+   *
+   * Logic:
+   *   1) If useTwinningPlanner=false → exit.
+   *   2) Read DOY, twinningDOY_T0/T1/T2.
+   *   3) If DOY == any twinningDOY_Tk → run that stage k.
+   *   4) Else, if twinningStage ∈ {0,1,2} → run that explicit stage.
+   *   5) Else → log and do nothing.
+   *
+   * Each stage then calls BudPlanner/LeafPlanner/FruitPlanner as needed.
+   */
+  /**
+ * Entry point for the twinning management workflow.
+ * <p>
+ * This method decides whether a twinning stage should be executed at the
+ * current simulation step, and if so, which stage. It then orchestrates calls
+ * to {@link BudPlanner}, {@link LeafPlanner}, and {@link FruitPlanner} as
+ * appropriate.
+ * </p>
+ *
+ * <h3>Stage selection</h3>
+ * <ol>
+ *   <li>Read {@code modelOptions.useTwinningPlanner}. If {@code false}, log
+ *       and return immediately.</li>
+ *   <li>Determine the current DOY and hour from {@code dayOfYear} and
+ *       {@code hourOfDay}. A fixed trigger hour (typically 2 h) is used to
+ *       avoid running multiple times per day.</li>
+ *   <li>If the current hour matches the trigger hour:
+ *     <ul>
+ *       <li>If {@code twinningDOY_T0 == DOY} → {@link #STAGE_T0}.</li>
+ *       <li>Else if {@code twinningDOY_T1 == DOY} → {@link #STAGE_T1}.</li>
+ *       <li>Else if {@code twinningDOY_T2 == DOY} → {@link #STAGE_T2}.</li>
+ *     </ul>
+ *   </li>
+ *   <li>Optionally override via {@code modelOptions.twinningStage}:
+ *     <ul>
+ *       <li>{@code "T0"} → {@link #STAGE_T0}</li>
+ *       <li>{@code "T1"} → {@link #STAGE_T1}</li>
+ *       <li>{@code "T2"} → {@link #STAGE_T2}</li>
+ *       <li>{@code "AUTO"} → DOY‑driven only (no override).</li>
+ *     </ul>
+ *   </li>
+ *   <li>If no stage is triggered, log a message with DOY, hour and configured
+ *       twinning DOYs, then return.</li>
+ * </ol>
+ *
+ * <h3>Stage actions</h3>
+ * <ul>
+ *   <li><b>T0</b> – call {@link BudPlanner#runFromProjectParams(boolean)} to
+ *       run Stage‑A (pre‑season) bud and fruit potential planning.</li>
+ *   <li><b>T1</b> – run LA consistency check and, if within tolerance:
+ *     <ul>
+ *       <li>optionally adjust apex potential via
+ *           {@link BudPlanner#run_T1_adjustApexPotential(boolean)},</li>
+ *       <li>reconcile current leaf area via
+ *           {@link LeafPlanner#runFromProjectParams_T1(boolean)},</li>
+ *       <li>reconcile current fruit population via
+ *           {@link FruitPlanner#runFromProjectParams_T1(boolean)}.</li>
+ *     </ul>
+ *   </li>
+ *   <li><b>T2</b> – call
+ *       {@link LeafPlanner#runFromProjectParams_T2(boolean)} and
+ *       {@link FruitPlanner#runFromProjectParams_T2(boolean)} to perform
+ *       final in‑season twinning on leaves and fruits.</li>
+ * </ul>
+ *
+ * <h3>Dry‑run behaviour</h3>
+ * <p>
+ * The {@code dryRun} parameter is passed through into all delegated planner
+ * calls. If set to {@code true}, the planners compute and log their actions
+ * but do not alter the plant graph. This is useful for debugging and for
+ * scenario exploration without changing the simulated structure.
+ * </p>
+ *
+ * @param dryRun if {@code true}, run the planners in diagnostic mode without
+ *               modifying buds, leaves, or fruits in the graph.
+ */
+ 
+  public static void runFromProjectParams(boolean dryRun){
+	  boolean useTP = false;
+  try { useTP = modelOptions.useTwinningPlanner; } catch (Throwable t) {}
+  if (!useTP) {
+    println("[TwinningPlanner] useTwinningPlanner=false → skip.");
+    return;
+  }
+
+  int curDOY = 0;
+  try { curDOY = dayOfYear; } catch (Throwable t) {}
+
+  int curHour = 0;
+  try { curHour = hourOfDay; } catch (Throwable t) {}
+
+  int triggerHour = 2; // keep hour trigger
+  if (curHour != triggerHour) {
+    println("[TwinningPlanner] DOY=" + curDOY + " hourOfDay=" + curHour
+          + " (triggerHour=" + triggerHour + ") → skip.");
+    return;
+  }
+
+  // DOY triggers
+  int tw0 = 0, tw1 = 0, tw2 = 0;
+  try { tw0 = modelOptions.twinningDOY_T0; } catch (Throwable t) {}
+  try { tw1 = modelOptions.twinningDOY_T1; } catch (Throwable t) {}
+  try { tw2 = modelOptions.twinningDOY_T2; } catch (Throwable t) {}
+
+  int stage = -1;
+  String stageReason = "";
+
+  if (tw0 > 0 && curDOY == tw0) { stage = STAGE_T0; stageReason = "DOY trigger (twinningDOY_T0)"; }
+  else if (tw1 > 0 && curDOY == tw1) { stage = STAGE_T1; stageReason = "DOY trigger (twinningDOY_T1)"; }
+  else if (tw2 > 0 && curDOY == tw2) { stage = STAGE_T2; stageReason = "DOY trigger (twinningDOY_T2)"; }
+
+  if (stage == -1) {
+    println("[TwinningPlanner] No DOY trigger → skip."
+          + " (DOY=" + curDOY
+          + " tw0=" + tw0 + " tw1=" + tw1 + " tw2=" + tw2 + ")");
+    return;
+  }
+
+  println("==========================================================");
+  println("[TwinningPlanner] START"
+      + " | DOY=" + curDOY
+      + " | hourOfDay=" + curHour
+      + " | stage=" + stage + " (" + describeStage(stage) + ")"
+      + " | reason=" + stageReason
+      + " | dryRun=" + dryRun);
+  println("==========================================================");
+
+
+    // ---- Stage-specific orchestration ----
+    switch(stage){
+
+      case STAGE_T0:
+        // Pre-season: buds, LA & RAW fruit planning
+        try {
+          BudPlanner.runFromProjectParams(dryRun);
+        } catch(Throwable t){
+          println("[TwinningPlanner] ERROR: BudPlanner.runFromProjectParams → " + t);
+        }
+        break;
+
+      case STAGE_T1:
+        // (1) check consistency between pre-prune expected LA and current bud LA
+        if (!dryRun) {
+        
+			BudPlannerConfig.Cfg cfg =
+				BudPlannerConfig.buildCfgFromProjectParams(dryRun, /*twinningStage=*/1);
+			double LA_sim0 = BudPlannerT0.estimateLeafAreaFast_OrderMin_T1(cfg);
+
+			// pre-prune expected leaf area you stored earlier
+			double LA_ref  = expectedLeafArea_prePrune;
+	
+			double diff = LA_ref - LA_sim0;
+			println("diff: " + diff);
+			double maxDev = apexPotentialMaxDeviation_T1; // or cfg.apexPotentialMaxDeviation_T1
+	
+			if (diff > maxDev) {
+				println("[TwinningPlanner] WARNING: expected LA mismatch at T1: "
+						+ "sim=" + LA_sim0 + ", ref=" + LA_ref
+						+ " (Δ=" + diff + " > " + maxDev + "), please increase the bud number at the start of the simulation");
+						
+				resetBudNumber = true;
+				println("Trying to increase the bud number using bud target mode 2. Current maximum leaf area is 40 m2");
+			}
+        }
+
+
+      	// T1: in-season twinning
+        // (1) adjust apex potential (expected LA) if needed
+        try {
+          BudPlanner.run_T1_adjustApexPotential(dryRun);
+        } catch(Throwable t){
+          println("[TwinningPlanner] NOTE: BudPlanner.run_T1_adjustApexPotential failed/absent → " + t);
+        }
+
+        // (2) reconcile selected T1 objects (whole-tree / grid)
+        if (twinningStageIncludesObject(1, "leaf")) {
+          try {
+            LeafPlanner.runFromProjectParams_T1(dryRun);
+          } catch(Throwable t){
+            println("[TwinningPlanner] ERROR: LeafPlanner.runFromProjectParams_T1 → " + t);
+          }
+        } else {
+          println("[TwinningPlanner] T1 skip LeafPlanner: leaf not in twinningObjects_T1");
+        }
+        
+        if (twinningStageIncludesObject(1, "fruit")) {
+          try {
+            FruitPlanner.runFromProjectParams_T1(dryRun);
+          } catch(Throwable t){
+            println("[TwinningPlanner] ERROR: FruitPlanner.runFromProjectParams_T1 → " + t);
+          }
+        } else {
+          println("[TwinningPlanner] T1 skip FruitPlanner: fruit not in twinningObjects_T1");
+        }
+
+        if (twinningStageIncludesObject(1, "flower")) {
+          println("[TwinningPlanner] T1 flower twinning requested, but FlowerPlanner is not implemented yet.");
+        }
+
+        preT1PotentialGrowthActive = false;
+        println("[TwinningPlanner] T1 completed; preT1PotentialGrowthActive=false");
+        break;
+
+      case STAGE_T2: {        
+        if (twinningStageIncludesObject(2, "leaf")) {
+          try {
+            LeafPlanner.runFromProjectParams_T2(dryRun);
+          } catch(Throwable t){
+            println("[TwinningPlanner] ERROR: LeafPlanner.runFromProjectParams_T2 → " + t);
+          }
+        } else {
+          println("[TwinningPlanner] T2 skip LeafPlanner: leaf not in twinningObjects_T2");
+        }
+        
+        if (twinningStageIncludesObject(2, "fruit")) {
+          try {
+            FruitPlanner.runFromProjectParams_T2(dryRun);
+          } catch(Throwable t){
+            println("[TwinningPlanner] NOTE: FruitPlanner.runFromProjectParams_T2 failed/absent → " + t);
+          }
+        } else {
+          println("[TwinningPlanner] T2 skip FruitPlanner: fruit not in twinningObjects_T2");
+        }
+
+        if (twinningStageIncludesObject(2, "flower")) {
+          println("[TwinningPlanner] T2 flower twinning requested, but FlowerPlanner is not implemented yet.");
+        }
+        break;
+      }
+
+      default:
+        println("[TwinningPlanner] Unknown stage=" + stage + " → no actions.");
+        break;
+    }
+
+    println("==========================================================");
+    println("[TwinningPlanner] END stage=" + stage + " (" + describeStage(stage) + ")");
+    println("==========================================================");
+  }
+/**
+ * Returns a human‑readable label for a twinning stage.
+ *
+ * @param s stage identifier, one of {@link #STAGE_T0}, {@link #STAGE_T1},
+ *          {@link #STAGE_T2}
+ * @return short description of the stage (e.g.
+ *         {@code "T1 (in-season leaf/crop twinning)"}), or {@code "unknown"}
+ *         for invalid codes.
+ */
+  static String describeStage(int s){
+    switch(s){
+      case STAGE_T0: return "T0 (pre-season bud planning)";
+      case STAGE_T1: return "T1 (in-season leaf/crop twinning)";
+      case STAGE_T2: return "T2 (fruit thinning + leaf pruning)";
+    }
+    return "unknown";
+  }
+}
+
+
+ 

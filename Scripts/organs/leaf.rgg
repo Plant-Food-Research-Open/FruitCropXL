@@ -1,0 +1,1978 @@
+import static main.*;
+import static budBase.*;
+import static plantBase.*;
+import static globalParameters.*;
+import static plantParameters.*;
+import static modelOptions.*;
+import static initialConditions.*;
+import static photosynthesisAndTranspiration.*;
+import static absOrgan.*;
+import static leafShape.*;
+import static environment.*;
+import static rootSystem.*;
+import static extraTools.*;
+import static shoot.*;
+import static flowerBase.*;
+import static flowerApple.*;
+import static fineRoot.*;
+import static structuralRoot.*;
+import static fieldBase.*;
+import static tasks.*;
+import static carbonTransport.*;
+import interfaces.*;
+import io.github.fruitcropxl.config.params.groups.*;
+import io.github.fruitcropxl.config.params.structures.*;
+
+/**
+ * Represents a leaf in the model. This class extends PhotosynthateOrgan and includes methods
+ * for calculating the photosynthesis, light interception, and other physiological properties
+ * of a leaf.
+ */
+public module Leaf extends PhotosynthateOrgan
+{
+	private static final long serialVersionUID = 786985401011570709L;
+
+	/** the leaf area above was for calculating the fraction of 
+		light penetrated to the leaf using surrogate model to speed up the simulations*/
+	public double leafAreaAbove_plant = 0;
+	/** Dimensionless field-scale LAI strictly above this leaf, refreshed by the empirical light backend. */
+	public transient double cumulativeLaiAbove = Double.NaN;
+	/** Leaf area shoot is trying to capture the variations in shoot size and leaf area */
+    public double leafAreaAbove_shoot = 0;
+    /** local Leaf area density is trying to capture the local clusterness. */
+    public double leafAreaDensity_local = 0;
+    public float adjustedWidth;
+	/** Area increase per time step. */
+	double deltaArea;
+	/** Normalized leaf area coefficient. */
+	double shapeCoefficient;
+	
+	/** Number of segments in the leaf blade. */
+	long segments;
+	/** Bending angle per leaf segment. */
+	double bendingAngleSegment;
+	/** Number of facets in the leaf. */
+	int numFacets;
+	/** Facet ID number, updated in a loop. */
+	int fid = 0;
+	/** Shape definition of the leaf. */
+	int lobe = 0;
+	/** Trunk height. */
+	float trunkHeight;
+
+	/** Debug: time step used for leaf elongation decomposition (d). */
+	public transient double dbg_dt;
+	/** Debug: current length/potential length ratio (-). */
+	public transient double dbg_ratio;
+	/** Debug: potential elongation increment before stress multipliers (m step-1). */
+	public transient double dbg_Lpot;
+	/** Debug: water stress multiplier on elongation (-, 0..1). */
+	public transient double dbg_fw;
+	/** Debug: carbon stress multiplier on elongation (-, 0..1). */
+	public transient double dbg_fc;
+	/** Debug: elongation increment at potential stage (m step-1). */
+	public transient double dbg_dL_pot;
+	/** Debug: elongation increment after water stage (m step-1). */
+	public transient double dbg_dL_w;
+	/** Debug: elongation increment after water+carbon stage (m step-1). */
+	public transient double dbg_dL_final;
+	/** Debug: area increment at potential stage (m2 step-1). */
+	public transient double dbg_dA_pot;
+	/** Debug: area increment after water stage (m2 step-1). */
+	public transient double dbg_dA_w;
+	/** Debug: area increment after water+carbon stage (m2 step-1). */
+	public transient double dbg_dA_final;
+	/** Debug: area before update (m2). */
+	public transient double dbg_area_pre;
+	/** Debug: phloem sugar concentration used for sink unloading (g C m-3 equivalent). */
+	public transient double dbg_sc_phloem;
+	/** Debug: model step when expansion decomposition was refreshed (-). */
+	public transient int dbg_validStep = -1;
+	/** Debug: 1 when leaf is within active expansion age window, else 0 (-). */
+	public transient int dbg_growthActive = 0;
+
+	/** Rosette rank index (0-based); -1 for non-rosette leaves. */
+	public int rosetteRankIndex = -1;
+	/** Number of leaves planned in this rosette (-). */
+	public int rosetteLeafCount = 0;
+	/** Static rank-only size multiplier applied once at leaf creation (-). */
+	public double rosetteRankScale = 1.0;
+	/** Realized-to-potential final area ratio (-), for calibration/export. */
+	public double realizationRatio = 1.0;
+	/** True when profile-derived final leaf-size targets must not be overwritten by current area. */
+	public boolean profileFinalSizeLocked = false;
+	/** Current simulated area divided by realized final target area (-), diagnostic clamped to 0..2. */
+	public double currentAreaToRealizedFinalRatio = 0.0;
+	/** Apple leaf development class for diagnostics and timing controls. */
+	public String appleLeafDevelopmentClass = "";
+	/** True when this leaf uses fast early expansion timing. */
+	public boolean fastEarlyExpansionLeaf = false;
+	/** Rosette timing scale applied to tm/te for fast early expansion (-). */
+	public double rosetteExpansionScaleUsed = 1.0;
+
+	void updateRealizationRatio() {
+		double ratio = 1.0;
+		if (potentialFinalSize > 1.0e-12 && !Double.isNaN(potentialFinalSize) && !Double.isInfinite(potentialFinalSize)) {
+			ratio = realizedFinalSize / potentialFinalSize;
+		}
+		if (Double.isNaN(ratio) || Double.isInfinite(ratio)) ratio = 1.0;
+		realizationRatio = Math.max(0.0, ratio);
+	}
+
+	/** Initialization flag from XEG Reader. */
+	boolean initFromArchReader = false;
+	/** Optional blade-geometry species, independent from physiological species. */
+	public String shapeSpecies = null;
+	/** True when this leaf was initialized by the statistical field canopy cloud. */
+	public boolean initFromFieldCanopy = false;
+	/** Source patch id for fieldRandomCanopy leaves (-). */
+	public int fieldPatchId = -1;
+	/** Source layer id for fieldRandomCanopy leaves (-). */
+	public int fieldLayerId = -1;
+	/** Source layer lower height for fieldRandomCanopy leaves (m). */
+	public double fieldLayerZmin = 0.0;
+	/** Source layer leaf area density for fieldRandomCanopy leaves (m2 m-3). */
+	public double fieldLayerLAD = 0.0;
+	/** Leaf length-to-width ratio. */
+	double lwRatio;
+
+	/** Cached target mean leaf area used to scale rank-pattern leaf size (m2 leaf-1). */
+	static double leafTargetArea_m2 = 0.0;
+	/** Cached global leaf linear scale factor (-). */
+	static double leafSizeScale = 1.0;
+	/** Cache flag for target-based leaf-size scaling. */
+	static boolean leafScaleInitialized = false;
+
+	/** True when early-leaf fallback already calculated actual photosynthesis this step. */
+	public transient boolean earlyLeafFallbackUsedThisStep = false;
+	/** Diagnostic: true when this leaf has finite, positive light inputs for photosynthesis. */
+	public boolean hasValidLeafLightForPhotosynthesis = false;
+
+	public boolean shouldUseEarlyLeafPhotosynthesisFallback() {
+		return shouldUseLAILeafPhotosynthesisFallback();
+	}
+
+	public String getLeafShapeSpecies() {
+		if (shapeSpecies != null && shapeSpecies.length() > 0) return shapeSpecies;
+		if (leafShapeSpecies != null && leafShapeSpecies.length() > 0) return leafShapeSpecies;
+		return species;
+	}
+
+	public double getRefLengthForLeaf() {
+		return leafShape.getRefLength(getLeafShapeSpecies());
+	}
+
+	public double getRefWidthForLeaf() {
+		return leafShape.getRefWidth(getLeafShapeSpecies());
+	}
+
+	public boolean shouldContributeToActualWaterFlux() {
+		return shouldCalcAnet() || earlyLeafFallbackUsedThisStep;
+	}
+
+	public boolean shouldUseLAILeafPhotosynthesisFallback() {
+		if (!enableLAILeafPhotosynthesisFallback) return false;
+		if (isLeafGasExchangeTestScenario()) return false;
+		if (!calcPotential_PT) return false;
+		if (globalRadiation <= LIGHT_THRESHOLD) return false;
+		if (area <= 0.0) return false;
+
+		double threshold = leafPhotosynthesisFallbackLAI;
+		if (Double.isNaN(threshold) || Double.isInfinite(threshold) || threshold < 0.0) {
+			threshold = 1.0e-4;
+		}
+
+		boolean lowLAI = FieldBase.lai <= threshold;
+		boolean noFieldLight = !lightInterceptionComputed;
+		boolean invalidLeafLight =
+			continueFallbackUntilLeafLightValid &&
+			!hasValidLeafLightForPhotosynthesis();
+
+		return lowLAI || noFieldLight || invalidLeafLight;
+	}
+
+	public boolean hasValidLeafLightForPhotosynthesis() {
+		boolean valid =
+			area > 0.0 &&
+			!Double.isNaN(absPAR) && !Double.isInfinite(absPAR) &&
+			!Double.isNaN(incPARm2) && !Double.isInfinite(incPARm2) &&
+			!Double.isNaN(absm2) && !Double.isInfinite(absm2) &&
+			(absPAR > 0.0 || incPARm2 > 0.0 || absm2 > 0.0);
+		hasValidLeafLightForPhotosynthesis = valid;
+		return valid;
+	}
+
+	public void calcEarlyLeafPhotosynthesisFallback() {
+		applyLAILeafPhotosynthesisFallback();
+	}
+
+	public void applyLAILeafPhotosynthesisFallback() {
+		if (!shouldUseLAILeafPhotosynthesisFallback()) return;
+
+		/*
+		 * Units: globalRadiation is a radiation flux density; multiplying by the
+		 * fallback fPAR gives a provisional incident PAR flux density
+		 * (umol m-2 s-1) only when the proper light model is unavailable.
+		 */
+		double fallbackFpar = leafPhotosynthesisFallbackFpar;
+		if (Double.isNaN(fallbackFpar) || Double.isInfinite(fallbackFpar)) fallbackFpar = 0.30;
+		if (fallbackFpar < 0.0) fallbackFpar = 0.0;
+		if (fallbackFpar > 1.0) fallbackFpar = 1.0;
+		double fallbackPARm2 = Math.max(0.0, globalRadiation * fallbackFpar);
+
+		incPARm2 = fallbackPARm2;
+		absm2 = fallbackPARm2;
+		absPAR = fallbackPARm2 * Math.max(0.0, area);
+		abs = absPAR;
+		fpar = fallbackFpar;
+		fabs = fallbackFpar;
+
+		updateWindSpeed();
+		earlyLeafFallbackUsedThisStep = true;
+		hasValidLeafLightForPhotosynthesis();
+		calcPotentialPhotosynthesis();
+	}
+
+	public void calcActualPhotosynthesisForFallback() {
+		calcActualPhotosynthesisAndTranspiration();
+		if (Double.isNaN(AlimActual) || Double.isInfinite(AlimActual)) AlimActual = 0.0;
+		if (Double.isNaN(carbonAssimilation) || Double.isInfinite(carbonAssimilation)) {
+			carbonAssimilation = 0.0;
+			assimilatedCO2 = 0.0;
+		}
+	}
+
+	public double getRosetteExpansionScaleSafe() {
+		double s = rosettePhyllochronFactor;
+		if (Double.isNaN(s) || Double.isInfinite(s) || s <= 0.0) s = 1.0;
+		if (s > 1.0) s = 1.0;
+		return s;
+	}
+
+	public void markFastEarlyExpansionLeaf(String developmentClass) {
+		appleLeafDevelopmentClass = developmentClass;
+		fastEarlyExpansionLeaf = true;
+		double s = getRosetteExpansionScaleSafe();
+		tm = tm * s;
+		te = te * s;
+		if (tm < 1.0) tm = 1.0;
+		if (te <= tm) te = tm + 1.0;
+		rosetteExpansionScaleUsed = s;
+	}
+
+	/** Rolling mature-leaf self-carbon balance buffer (mg C step-1). */
+	private transient double[] carbonSelfBalanceBuffer;
+	private transient int carbonSelfBalanceBufferIndex = 0;
+	private transient int carbonSelfBalanceBufferCount = 0;
+	private transient int carbonSelfBalanceWindowSteps = 0;
+	private transient double carbonSelfBalanceWindowSum = 0.0;
+
+	/** Last-step gross local carbon gain (mg C leaf-1 step-1). */
+	public double carbonGainLastStep = 0.0;
+	/** Last-step local carbon cost excluding exported loading (mg C leaf-1 step-1). */
+	public double carbonCostLastStep = 0.0;
+	/** Last-step self-carbon balance (mg C leaf-1 step-1). */
+	public double carbonSelfBalanceLastStep = 0.0;
+	/** Rolling self-carbon balance over the configured window (mg C leaf-1 window-1). */
+	public double carbonSelfBalance10d = 0.0;
+	/** Diagnostic flag: 1 when the leaf currently satisfies the carbon-deficit predicate. */
+	public int carbonDeficitRemovalCandidate = 0;
+	/** Diagnostic flag set immediately before carbon-deficit structural removal. */
+	public int carbonDeficitRemoved = 0;
+	
+	
+	/**
+     * Fraction of NSC (Non-Structural Carbohydrates) ready to be loaded during the day.
+     * This is a fraction, not a rate, so it does not need to be multiplied by dt.
+     * Based on Chew 2014 PNAS and Vivian thesis Fig. 33.
+     */
+    static float HYDROLYSIS_LEAF_DAY = 0.8; 
+
+    /**
+     * Fraction of NSC ready to be loaded during the night.
+     * Based on Chew 2014 PNAS and Vivian thesis Fig. 33.
+     */
+    static float HYDROLYSIS_LEAF_NIGHT; 
+    
+    
+    transient PPTask pptask;
+	transient TranspirationTask trtask;
+	transient AnetTask antask;
+	{
+		pptask = new PPTask(this);
+		trtask = new TranspirationTask(this);
+		antask = new AnetTask(this);
+	}
+	 
+	
+    /**
+     * Loads the parameters for the leaf from the configuration files.
+     * This method sets the context for file name parameters and retrieves
+     * various leaf-related parameters such as carbon content, structure, 
+     * water content, and photosynthesis rates.
+     */
+	
+	public void loadParameters() {
+		
+		/** Set the context for file name initial conditions*/
+		//Need to load SLA first before leaf calculate the density
+		CategoryStore config_Init = ((DocumentCategoryNameGroup) CONFIG.getGroup(FILE_NAME_INITIAL_CONDITIONS, 
+			DocumentCategoryNameGroup.class)).getCategoryStore();			
+		config_Init.setCategoryContext("leaf");
+		fNSC                   = config_Init.getDouble("fNSC", 0.1);
+		structure_C            = 1- fNSC; 
+		//SLA                    = config_Init.getDouble("SLA");
+		
+		
+		/** Set the context for file name parameters*/
+		CategoryStore config = ((DocumentCategoryNameGroup) CONFIG.getGroup(FILE_NAME_PLANT_PARAMETERS, 
+			DocumentCategoryNameGroup.class)).getCategoryStore();
+
+		
+		/** Configuration context for carbon-related parameters */
+		config.setCategoryContext("leaf-carbon");
+		//common parameters
+		maintenanceCoff        = config.getDouble("MTNCE", 0.0003);
+		growthCoff             = config.getDouble("GROWTHRQ", 1.2);
+		C_content              = config.getDouble("C_CONTENT", 0.46);
+		maxRes                 = config.getDouble("RESERVES", 0.2);
+		
+		km_pri                 = config.getDouble("KM_PRI", 0.07);
+		km_sec                 = 0;
+		km_res                 = 0;
+		
+		hydRate                = config.getDouble("HYDROLYSIS_LEAF_DAY", 0.8);
+		synRate                = 0; 
+			
+		HYDROLYSIS_LEAF_DAY	   = config.getDouble("HYDROLYSIS_LEAF_DAY", 0.8);
+		//night rate is not calculated
+		//HYDROLYSIS_LEAF_NIGHT  = config.getDouble("HYDROLYSIS_LEAF_NIGHT", 0.05);
+		
+		tm	 = config.getDouble("tm", 4.5);
+		te	 = config.getDouble("te", 7.5);
+		initialLength = config.getDouble("initialLength", 0.01);
+		maxLength = config.getDouble("Lmax", 0.2);
+		LMA_min = config.getDouble("LMA_min", 45.0);   // g m⁻²
+		LMA_max = config.getDouble("LMA_max", 80.0);   // g m⁻²
+		//SLA is not updated yet, so use SLA_middle as a proxy 
+		density = 1.0/SLA_middle;  //(mgDW/m2) leaf density is in terms of area not volume, see the denfition for SLA
+		//println("leaf density: " + density);
+ 		/** Configuration context for water-related parameters */
+		/** Parameters for hydraulic conductance sensitivity to transpiration, water potential amplitude, and ABA.*/
+		config.setCategoryContext("leaf-water");
+		//paragxl a list of parameters for the sensitivities of hydraulic conductance leaf to transpiration (equation 8 in Tardieu, Simonneau and Parent, Journal of Experimental Botany, 2015), amplitude of water potential (equation 7) and ABA (equation 9).		 
+		Gxl0		 = config.getDouble("Gxl0", 1);
+		Gxlmin		 = config.getDouble("Gxlmin", 1);
+		Gxlmax		 = config.getDouble("Gxlmax", 12.5);
+		Tautranspigxl= config.getDouble("Tautranspigxl", 4);
+		Taucircadgxl = config.getDouble("Taucircadgxl", 0.12);
+		TauABAgxl	 = config.getDouble("TauABAgxl", -0.01);
+		eq1_beta	 = config.getDouble("eq1_beta", -0.00251);
+		eq1_delta	 = config.getDouble("eq1_delta", -0.48985);
+		eq1_a		 = config.getDouble("eq1_a", -2);
+		eq1_b		 = config.getDouble("eq1_b", -1.6);
+		
+		PLC_a		 = config.getDouble("PLC_a", 6.59);
+		PLC_b		 = config.getDouble("PLC_b", -1.52);
+		growth_a	 = config.getDouble("growth_a", -10);
+		growth_b	 = config.getDouble("growth_b", -0.5);
+		
+		waterContent = config.getDouble("WATER_CONTENT", 0.76);
+		
+		
+		config.setCategoryContext("leaf-nitrogen");
+		/** Slope of Nm decline with thermal time (fraction per °C·d). */
+		aN_slope = config.getDouble("aN_slope", -8.1e-6);
+		
+		/** SLA–PPFD regression coefficients (Prieto mode). */
+		aM = config.getDouble("aM", 6.3);
+		bM = config.getDouble("bM", 53.5);
+		
+		/** Clamps for Nm and LMA. */
+		Nm_min  = config.getDouble("Nm_min",  0.005);  // 0.5% N
+		Nm_max  = config.getDouble("Nm_max",  0.060);  // 6.0% N
+
+
+	}
+	
+	
+	
+	/**
+	 * Initializes the leaf parameters and sets up the leaf object with the provided plant identifier,
+	 * length, and diameter. This method calculates the dimensions, biomass, carbon, and nitrogen
+	 * content of the leaf, as well as water potential and other physiological properties.
+	 *
+	 * @param pb        The plant identifier containing plant-specific attributes.
+	 * @param length_   The initial length of the leaf.
+	 * @param diameter_ The initial diameter of the leaf.
+	 * @return The initialized Leaf object with the specified parameters and calculated values.
+	 */
+	Leaf initiate_pi(PlantIdentifier pb, float length_, float diameter_) 
+	{
+		//initialize the parameters
+		loadParameters();
+		//IDENTIFIERS
+		plantNumber = pb.plantNumber;
+		
+		if(this.plantBaseID <= 0) { this.plantBaseID = first((* p:PlantBase, (p.plantNumber == this.plantNumber)*)).nodeID;}
+		
+		border = pb.border;
+		
+		length = Math.max(length_, 1e-2);
+		this.potLength = length; 
+		
+		lwRatio	 = getRefLength()/getRefWidth();
+		calcLeafRH();
+		//calcShapeCoefficient();
+		lobe = getLobes();
+		
+		//use fixed lwratio based on the reference leaf to make the area calculation more acculate
+		width = length/lwRatio;
+		//refArea[lobe];
+		//leaf shape stuffs
+		numFacets = polyleaf[lobe].length;
+		//facet polygonArea is updated during initiation as 
+		//it is easier to update in the initiation than revise all the initate method to include facet id 
+		area = calcLeafPolygonArea(length, width, fid);
+		
+		//CARBON
+		biomass = area*density;
+		
+		//NITROGEN
+		
+		// Initialize carbon and nitrogen content based on biomass and 
+		//carbon and nitrogen concentration
+		//if (printFlag) { println("biomass leaf:" + biomass); }
+		this.initCN_content(this.biomass);
+		
+		
+		// seed PPFD buffer & assign initial traits with a benign PPFD10
+		for (int i = 0; i < PPFD_BUF_LEN; i++) ppfdBuf[i] = 10.0;
+		ppfdIdx = 0; ppfdCount = PPFD_BUF_LEN;
+		assignLeafTraits(0.0, 10.0);  // will be refined once real layer is known
+		//leafNcontent = inputLeafN ? leafNContent_input : nitrogen_total * mgTogram/area;
+		
+		this.waterPotential_b = inputWaterPotential;
+		this.waterPotential = inputWaterPotential+1e-2;;
+		waterPotential_pre = waterPotential;
+		
+		Gxltranspi = Gxlmin;
+				
+		numFacets = polyleaf[lobe].length;
+		//if (printFlag) { println(" TauABAgxl " + TauABAgxl + " Gxlmin " + Gxlmin); }
+		initFromArchReader = true;
+		
+		return this;
+	}
+
+	/**
+	 * Initializes the leaf parameters based on the given PlantBase object and other
+	 * identifying attributes such as rank, node number, and cordon number.
+	 * This method sets up various properties of the leaf, including its dimensions, 
+	 * carbon and nitrogen content, and state variables.
+	 *
+	 * @param pb           The PlantBase object containing plant-specific information.
+	 * @param Rank         The rank of the leaf on the plant.
+	 * @param NodeNumber   The node number where the leaf is located.
+	 * @param CordonNumber The cordon number associated with the leaf.
+	 */
+	static void initLeafSizeScaleIfNeeded(double targetArea_m2, int fid) {
+		if (targetArea_m2 <= 0) {
+			leafSizeScale = 1.0;
+			leafTargetArea_m2 = 0.0;
+			leafScaleInitialized = false;
+			return;
+		}
+		if (leafScaleInitialized && Math.abs(leafTargetArea_m2 - targetArea_m2) < 1e-12) return;
+
+		// Species-specific calibration windows keep the shared linear scale factor from being dominated
+		// by padded tail leaves while preserving the rank-size profile shape.
+		int refMaxRank = MAX_PHYTOMER_NUM;
+		if ("apple".equals(species)) {
+			refMaxRank = Math.min(MAX_PHYTOMER_NUM, 8);
+			if (refMaxRank < 1) refMaxRank = 1;
+		} else if ("grapevine".equals(species)) {
+			refMaxRank = Math.min(MAX_PHYTOMER_NUM, 16);
+			if (refMaxRank < 1) refMaxRank = 1;
+		}
+
+		double sumArea = 0.0;
+		int cnt = 0;
+		for (int r = 1; r <= refMaxRank; r++) {
+			try {
+				double l0 = organSize[r][1];
+				double w0 = organSize[r][2];
+				if (l0 > 0 && w0 > 0) {
+					double a0 = calcLeafPolygonArea(l0, w0, fid);
+					if (a0 > 0 && Double.isFinite(a0)) {
+						sumArea += a0;
+						cnt++;
+					}
+				}
+			} catch (ArrayIndexOutOfBoundsException e) {
+				// Compatibility-safe skip for legacy organ-size tables.
+			}
+		}
+
+		double baselineMean = (cnt > 0) ? (sumArea / cnt) : 0.0;
+		double scale = 1.0;
+		if (baselineMean > 0 && Double.isFinite(baselineMean)) {
+			scale = Math.sqrt(targetArea_m2 / baselineMean);
+		}
+		if (!Double.isFinite(scale)) scale = 1.0;
+		scale = Math.max(0.1, Math.min(10.0, scale));
+		leafSizeScale = scale;
+		leafTargetArea_m2 = targetArea_m2;
+		leafScaleInitialized = true;
+			if (printFlag) {
+				println("[Leaf] meanLeafArea_m2=" + targetArea_m2 +
+					", baselineRanks=1-" + refMaxRank +
+					", baselineMean=" + baselineMean +
+					", leafSizeScale=" + leafSizeScale);
+			}
+		}
+
+	void initiate_pb(PlantBase pb, int Rank, int NodeNumber, int CordonNumber)
+	{ 
+		//initialize the parameters
+		loadParameters();
+		
+		//IDENTIFIERS
+		this.plantBaseID = pb.nodeID;
+		plantNumber = pb.plantNumber;
+		border = pb.border;
+		rank = Rank;
+		nodeNumber = NodeNumber; 
+		cordonNumber = CordonNumber;
+		age = pb.age - (rank+4) * plastochron;
+		cpn = Rank;
+		order = 0; 
+		assignAge(pb, cpn);
+		//STATE VARIABLES
+			//STATE VARIABLES
+		double targetMeanLeafArea_m2;
+		try {
+			targetMeanLeafArea_m2 = pb.meanLeafAreaTarget_m2;
+		} catch (NoSuchFieldError e) {
+			// Compatibility fallback: older serialized/runtime PlantBase may miss this field.
+			targetMeanLeafArea_m2 = 0.0;
+		} catch (RuntimeException e) {
+			// Some GroIMP/Groovy runtimes surface missing fields as a runtime MissingPropertyException
+			// that is not available as a compile-time type in RGG.
+			if ("groovy.lang.MissingPropertyException".equals(e.getClass().getName())) {
+				targetMeanLeafArea_m2 = 0.0;
+			} else {
+				throw e;
+			}
+		}
+		int rankIdx = (Rank == 0) ? 1 : Rank;
+		boolean useTargetMeanLeafAreaScaling = scaleLeafSizeToTargetMeanLeafArea && (targetMeanLeafArea_m2 > 0);
+		try {
+			if (useTargetMeanLeafAreaScaling) {
+				initLeafSizeScaleIfNeeded(targetMeanLeafArea_m2, fid);
+				length = organSize[rankIdx][1] * leafSizeScale;
+				width = organSize[rankIdx][2] * leafSizeScale;
+			} else {
+				length = organSize[rankIdx][1];
+				width = organSize[rankIdx][2];
+			}
+		} catch (ArrayIndexOutOfBoundsException e) {
+			double fallbackLength = organSize[MAX_PHYTOMER_NUM][1];
+			double fallbackWidth = organSize[MAX_PHYTOMER_NUM][2];
+			if (useTargetMeanLeafAreaScaling) {
+				length = fallbackLength * leafSizeScale;
+				width = fallbackWidth * leafSizeScale;
+			} else {
+				length = fallbackLength;
+				width = fallbackWidth;
+			}
+		} finally {
+			if(length == 0) length = 5e-2;
+			if(width == 0) width = length;
+		}
+		
+		this.potLength = length; 
+		
+		calcLeafRH();
+		//calcShapeCoefficient();
+		lobe = getLobes();
+		lwRatio	 = getRefLength()/getRefWidth();
+		//use fixed lwratio based on the reference leaf to make the area calculation more acculate
+		width = length/lwRatio;
+				
+		//leaf shape stuffs
+		numFacets = polyleaf[lobe].length;	
+		area = calcLeafPolygonArea(length, width, fid);
+		
+		//CARBON
+		biomass = area*density;
+		
+		//NITROGEN
+		  // seed PPFD buffer & assign initial traits with a benign PPFD10
+		for (int i = 0; i < PPFD_BUF_LEN; i++) ppfdBuf[i] = 10.0;
+		ppfdIdx = 0; ppfdCount = PPFD_BUF_LEN;
+		assignLeafTraits(0.0, 10.0);  // will be refined once real layer is known
+		//leafNcontent = inputLeafN ? leafNContent_input : nitrogen_total * mgTogram/area;
+		
+		// Initialize carbon and nitrogen content based on biomass and 
+		//carbon and nitrogen concentration
+		this.initCN_content(this.biomass);
+		
+		this.waterPotential_b = inputWaterPotential;
+		this.waterPotential = inputWaterPotential+1e-2;;
+		waterPotential_pre = waterPotential;
+		
+		this.organType = "Leaf";
+		Gxltranspi = Gxlmin;
+		numFacets = polyleaf[lobe].length;
+		initFromArchReader = false;
+		TT_birth = tt;
+		
+		
+	}
+
+	void initiate_fieldRandomCanopy(PlantBase pb,
+									double leafLength_,
+									int patchId_,
+									int layerId_,
+									double zmin_,
+									double lad_)
+	{
+		loadParameters();
+
+		this.plantBaseID = pb.nodeID;
+		this.plantNumber = pb.plantNumber;
+		this.border = pb.border;
+
+		this.rank = 0;
+		this.nodeNumber = 0;
+		this.cordonNumber = 0;
+		this.order = 0;
+		this.cpn = 0;
+
+		this.fieldPatchId = patchId_;
+		this.fieldLayerId = layerId_;
+		this.fieldLayerZmin = zmin_;
+		this.fieldLayerLAD = lad_;
+
+		this.shapeSpecies = getLeafShapeSpecies();
+		this.initFromFieldCanopy = true;
+		this.initFromArchReader = false;
+
+		this.length = Math.max((float) leafLength_, 1e-3f);
+		this.potLength = this.length;
+
+		this.lobe = getLobes();
+		this.lwRatio = getRefLengthForLeaf() / getRefWidthForLeaf();
+		this.width = this.length / this.lwRatio;
+
+		this.fid = 0;
+		this.numFacets = polyleaf[lobe].length;
+		this.area = leafShape.calcLeafPolygonArea(this.getLeafShapeSpecies(), this.length, this.width, this.fid);
+
+		this.biomass = this.area * density;
+		this.initCN_content(this.biomass);
+
+		for (int i = 0; i < PPFD_BUF_LEN; i++) ppfdBuf[i] = 10.0;
+		ppfdIdx = 0;
+		ppfdCount = PPFD_BUF_LEN;
+		assignLeafTraits(0.0, 10.0);
+
+		this.waterPotential_b = inputWaterPotential;
+		this.waterPotential = inputWaterPotential + 1e-2;
+		this.waterPotential_pre = this.waterPotential;
+
+		this.organType = "Leaf";
+		this.Gxltranspi = Gxlmin;
+		this.TT_birth = tt;
+
+		this.nodeID = this.getId();
+		this.parentID = pb.nodeID;
+	}
+
+	/**
+	 * Initializes the leaf parameters based on the given ApexService object.
+	 * This method sets up various properties of the leaf, including its dimensions,
+	 * carbon and nitrogen content, and state variables.
+	 *
+	 * @param a The ApexService object providing apex-specific information for leaf initialization.
+	 */
+	void initiate_apex(ApexService a)
+	{ 
+		//initialize the parameters
+		loadParameters();
+		
+		//IDENTIFIERS
+		plantNumber = a.plantNumber;
+		if(this.plantBaseID <= 0) { this.plantBaseID = first((* p:PlantBase, (p.plantNumber == this.plantNumber)*)).nodeID;}
+		
+		border = a.border;
+		rank = a.rank;
+		nodeNumber = a.nodeNumber; 
+		cordonNumber = a.cordonNumber;
+		cpn = a.cpn;
+		order = a.order;
+		age = Math.max(0.01 *plastochron, a.age - plastochron);
+		
+		//STATE VARIABLES
+		length = initialLength;
+		this.potLength = this.length; 
+		
+		calcLeafRH();		
+		lobe = getLobes();
+		lwRatio	 = getRefLength()/getRefWidth();
+		width = this.initialLength/lwRatio; //use fixed lwratio based on the reference leaf to make the area calculation more acculate 
+				
+		area = calcLeafPolygonArea(length, width, fid);
+		//CARBON
+		biomass = area*density;
+		//if (printFlag) { println("length : " + length + "width: "+ width + "area: " + this.area + " SLA " + SLA + "bomass: " + biomass); }
+		
+		//NITROGEN
+		// Initialize carbon and nitrogen content based on biomass and 
+		//carbon and nitrogen concentration
+		this.initCN_content(this.biomass);
+		// seed PPFD buffer & assign initial traits with a benign PPFD10
+		for (int i = 0; i < PPFD_BUF_LEN; i++) ppfdBuf[i] = 10.0;
+		ppfdIdx = 0; ppfdCount = PPFD_BUF_LEN;
+		assignLeafTraits(0.0, 10.0);  // will be refined once real layer is known
+		//leafNcontent = inputLeafN ? leafNContent_input : nitrogen_total * mgTogram/area;
+		
+		this.waterPotential_b = a.waterPotential;
+		this.waterPotential = a.waterPotential+1e-2;;
+		Gxltranspi = Gxlmin;
+		numFacets = polyleaf[lobe].length;
+		
+		this.organType = "Leaf";
+		initFromArchReader = false;
+		
+		PlantBase pb = getPlantBase();
+		if (pb != null) {
+			TT_birth = (Double.isNaN(pb.ageGdd) ? 0.0 : pb.ageGdd);
+		} else {
+			TT_birth = 0.0;
+		}
+		LMA_locked = false;
+		LMA_lock   = Double.NaN;
+		TT_lock    = Double.NaN;
+			rosetteRankIndex = -1;
+			rosetteLeafCount = 0;
+			rosetteRankScale = 1.0;
+			appleLeafDevelopmentClass = "";
+			fastEarlyExpansionLeaf = false;
+			rosetteExpansionScaleUsed = 1.0;
+			updateRealizationRatio();
+		}
+
+	public void applyRosetteRankScaleAtInit() {
+		if (!"rosetteLeaf".equals(this.organType)) return;
+		double scale = rosetteRankScale;
+		if (Double.isNaN(scale) || Double.isInfinite(scale)) return;
+		scale = Math.max(0.05, Math.min(2.0, scale));
+		this.maxLength = this.maxLength * scale;
+		this.initialLength = this.initialLength * scale;
+		this.length = this.length * scale;
+		this.potLength = this.potLength * scale;
+		if (Double.isNaN(this.lwRatio) || this.lwRatio <= 0) {
+			this.lwRatio = getRefLength()/getRefWidth();
+		}
+		this.width = this.length / this.lwRatio;
+	}
+	
+	// conditions for leaf shedding
+	/* boolean shouldFall()
+	{
+		double criticalPAR = 100;					// light level below which leaf should drop
+		double lifeSpan = leafLife * te;					// age beyond which leaf should drop
+		if (leafSenescence == true && age > 0.5 * te && (absm2 < criticalPAR || age > lifeSpan)) {
+			return true;
+		} 
+	}*/
+
+	/**
+	 * Carbon-deficit leaf-removal logic
+	 * --------------------------------
+	 *
+	 * This block tracks whether a mature leaf can sustain its own carbon cost over
+	 * a recent rolling time window. At each model time step, the leaf calculates:
+	 *
+	 *     current-step carbon balance = carbon assimilation - own carbon cost
+	 *
+	 * The value is stored in a circular buffer. The buffer length is calculated from
+	 * the configured window length and the model time step:
+	 *
+	 *     carbonSelfBalanceWindowSteps = leafCarbonDeficitWindowDays / DT
+	 *
+	 * With hourly time steps and a 10-day window, the buffer contains 240 values.
+	 * Once the buffer is full, each new value overwrites the oldest value. A running
+	 * sum is maintained by subtracting the overwritten value and adding the new one.
+	 *
+	 * Therefore, carbonSelfBalance10d represents the cumulative carbon balance over
+	 * the most recent window. It is a rolling sum, not a rolling average.
+	 *
+	 * A leaf can be removed only if it is mature, has enough valid history in the
+	 * buffer, has non-trivial area, and its rolling cumulative carbon balance is
+	 * below leafCarbonDeficitBalanceThresholdMgC.
+	 */
+	/**
+	 * Lazily initializes this leaf's circular buffer for carbon self-balance
+	 * records. The buffer length is derived from calendar days divided by
+	 * {@code DT}; with the default 10 d window and hourly steps it stores
+	 * 240 step-level records.
+	 */
+	private void ensureCarbonSelfBalanceBuffer() {
+		int n = (int) Math.round(leafCarbonDeficitWindowDays / Math.max(1.0e-9, DT));
+		if (n < 1) n = 1;
+
+		if (carbonSelfBalanceBuffer == null || carbonSelfBalanceWindowSteps != n) {
+			carbonSelfBalanceWindowSteps = n;
+			carbonSelfBalanceBuffer = new double[n];
+			for (int i = 0; i < n; i++) {
+				carbonSelfBalanceBuffer[i] = 0.0;
+			}
+			carbonSelfBalanceBufferIndex = 0;
+			carbonSelfBalanceBufferCount = 0;
+			carbonSelfBalanceWindowSum = 0.0;
+			carbonSelfBalance10d = 0.0;
+			carbonDeficitRemovalCandidate = 0;
+		}
+	}
+
+	/**
+	 * Returns the current-step leaf carbon gain (mg C leaf-1 step-1).
+	 * Negative, NaN, or infinite assimilation values are treated as zero.
+	 */
+	double currentLeafCarbonGainMgC() {
+		double gain = this.carbonAssimilation;
+		if (Double.isNaN(gain) || Double.isInfinite(gain)) gain = 0.0;
+		return Math.max(0.0, gain);
+	}
+
+	/**
+	 * Returns the current-step self carbon cost for this leaf
+	 * (mg C leaf-1 step-1). Exported loading is intentionally not counted as
+	 * a self-maintenance cost, so productive source leaves are not penalized
+	 * for exporting carbon.
+	 */
+	double currentLeafCarbonCostMgC() {
+		double cost = 0.0;
+		if (!Double.isNaN(this.maintenanceDM_PT) && !Double.isInfinite(this.maintenanceDM_PT)) {
+			cost += Math.max(0.0, this.maintenanceDM_PT);
+		}
+		if (!Double.isNaN(this.carbonMobilizationCost) && !Double.isInfinite(this.carbonMobilizationCost)) {
+			cost += Math.max(0.0, this.carbonMobilizationCost);
+		}
+		return cost;
+	}
+
+	/**
+	 * Updates this leaf's rolling carbon self-balance history for the configured
+	 * carbon-deficit leaf-removal window.
+	 *
+	 * <p>The current-step self-balance is {@code carbon gain - carbon cost},
+	 * in mg C leaf-1 step-1. Each value is written into a circular buffer and
+	 * maintained as an incremental rolling sum. With
+	 * {@code leafCarbonDeficitWindowDays = 10.0} and {@code DT = 1.0 / 24.0},
+	 * {@code carbonSelfBalance10d} is the cumulative balance over the previous
+	 * 10 calendar days, not a moving average.</p>
+	 *
+	 * <p>After updating the buffer, this method refreshes
+	 * {@code carbonDeficitRemovalCandidate} from the mature-leaf removal
+	 * predicate.</p>
+	 */
+	public void updateCarbonSelfBalanceHistory() {
+		if (!enableCarbonDeficitLeafRemoval) return;
+
+		ensureCarbonSelfBalanceBuffer();
+
+		double gain = currentLeafCarbonGainMgC();
+		double cost = currentLeafCarbonCostMgC();
+		double balance = gain - cost;
+		if (Double.isNaN(balance) || Double.isInfinite(balance)) {
+			balance = 0.0;
+		}
+
+		if (carbonSelfBalanceBufferCount == carbonSelfBalanceWindowSteps) {
+			carbonSelfBalanceWindowSum -= carbonSelfBalanceBuffer[carbonSelfBalanceBufferIndex];
+		} else {
+			carbonSelfBalanceBufferCount++;
+		}
+
+		carbonSelfBalanceBuffer[carbonSelfBalanceBufferIndex] = balance;
+		carbonSelfBalanceWindowSum += balance;
+		carbonSelfBalanceBufferIndex =
+			(carbonSelfBalanceBufferIndex + 1) % carbonSelfBalanceWindowSteps;
+
+		carbonGainLastStep = gain;
+		carbonCostLastStep = cost;
+		carbonSelfBalanceLastStep = balance;
+		carbonSelfBalance10d = carbonSelfBalanceWindowSum;
+		carbonDeficitRemovalCandidate = shouldRemoveForCarbonDeficit() ? 1 : 0;
+	}
+
+	/**
+	 * Returns whether this leaf is mature enough for carbon-deficit removal.
+	 * The threshold is {@code te * leafCarbonDeficitMatureAgeFactor}; the
+	 * default factor of 1.0 means only leaves with {@code age >= te} qualify.
+	 */
+	public boolean isMatureForCarbonDeficitRemoval() {
+		double matureAge = this.te * leafCarbonDeficitMatureAgeFactor;
+		if (Double.isNaN(matureAge) || Double.isInfinite(matureAge)) matureAge = this.te;
+		return this.age >= matureAge;
+	}
+
+	/**
+	 * Returns whether this leaf has enough valid step-level records to make a
+	 * rolling-window removal decision. The required record count is
+	 * {@code ceil(windowSteps * leafCarbonDeficitMinValidFraction)}, with the
+	 * fraction clamped to {@code [0, 1]} for configuration safety.
+	 */
+	public boolean hasEnoughCarbonBalanceHistory() {
+		ensureCarbonSelfBalanceBuffer();
+		double validFraction = leafCarbonDeficitMinValidFraction;
+		if (Double.isNaN(validFraction) || Double.isInfinite(validFraction)) validFraction = 0.95;
+		validFraction = Math.max(0.0, Math.min(1.0, validFraction));
+		int required = (int) Math.ceil(carbonSelfBalanceWindowSteps * validFraction);
+		if (required < 1) required = 1;
+		return carbonSelfBalanceBufferCount >= required;
+	}
+
+	/**
+	 * Tests whether this mature leaf should be removed for persistent carbon
+	 * deficit. Removal requires the feature switch and {@code leafSenescence},
+	 * mature age, enough rolling-history records, non-trivial leaf area, the
+	 * plant-level minimum leaf-area guard, and a rolling cumulative balance
+	 * below {@code leafCarbonDeficitBalanceThresholdMgC} (mg C leaf-1 window-1).
+	 */
+	public boolean shouldRemoveForCarbonDeficit() {
+		if (!enableCarbonDeficitLeafRemoval) return false;
+		if (!leafSenescence) return false;
+		if (!isMatureForCarbonDeficitRemoval()) return false;
+		if (!hasEnoughCarbonBalanceHistory()) return false;
+		if (this.area <= 1.0e-4) return false;
+
+		PlantBase pb = getPlantBase();
+		if (pb != null && pb.leafArea <= leafCarbonDeficitMinPlantLeafArea) return false;
+
+		return carbonSelfBalance10d < leafCarbonDeficitBalanceThresholdMgC;
+	}
+	
+	@Override
+	public void initializeCarbonTransport() {
+		this.r = 0;
+		this.xp = 0;
+		this.cpb = this.cpt = SOURCEcp;
+		//float Rs = ( R0 * PhloemResistanceRatio(initial_c0)/(PressureRatio(initial_c0)*R*Tk));   // resistance per unit length (initial case)
+		//this.cpt = SOURCEcp - cpn * length * SOURCEj * Rs;
+		//this.cpb = SOURCEcp - (cpn - 1) * length * SOURCEj * Rs;
+		this.j = j;
+	}
+	@Override
+	public void updateCTRs(double carbonConcentration) {		
+		this.r = 0; 
+		this.xp = 0;
+	}	
+	
+	
+	@Override
+	void calcLeakage(double sugarConcentration_phloem) 
+	{ //leakage only calculates for shoot, leaf is zero
+		leakage = 0;
+	}
+	
+	
+	@Override
+	double reserveHydrolysis()
+	{
+/* 		if(debug) {
+			checkForNaN(printFlag, 
+				"carbonAssimilation", carbonAssimilation, 
+				"carbon_nonStructure", carbon_nonStructure
+				);
+		} */
+						
+	double res = 0;
+	
+	if(globalRadiation > LIGHT_THRESHOLD) {
+		if(this.carbon_nonStructure > 0.8 * this.carbon_structure *this.maxRes/(1-this.maxRes)) {
+			res = carbonAssimilation + carbon_nonStructure * Math.min(HYDROLYSIS_LEAF_DAY, HYDROLYSIS_LEAF_NIGHT * 2);
+		} else {
+			res = carbonAssimilation * HYDROLYSIS_LEAF_DAY + carbon_nonStructure * HYDROLYSIS_LEAF_NIGHT;
+		}
+		
+	} else {
+		res = this.carbon_nonStructure > 0.8 * this.carbon_structure *this.maxRes/(1-this.maxRes) ? 
+				carbon_nonStructure * Math.min(HYDROLYSIS_LEAF_DAY, HYDROLYSIS_LEAF_NIGHT * 2) :
+				carbon_nonStructure * HYDROLYSIS_LEAF_NIGHT;
+	}
+	
+	if(res < 0) res = 0;
+	return res;
+	}
+
+	 /**
+     * Calculate the rate of reserve synthesis in the organ.
+     * @return Rate of reserve synthesis
+     */
+    @Override
+    double reserveSynthesis() {
+        if (this.fNSC < MINIMUM_NSC) {
+			double calculatedPotentialSynthesis = synRate *
+				(biomass * maxRes * CARBON_FRACTION_SUCROSE - carbon_nonStructure) *
+				tempRes_enzyme(Ta) * MINIMUM_NSC;
+			return Math.max(0.0, calculatedPotentialSynthesis);
+        } else return 0;
+    }
+	
+	@Override	
+	void calcPTCTRAM(double sc) {
+		structureDM_SEC_PT = 0;
+		calcLeakage(sc);
+
+		if (this.age < this.te) {
+			// Potential growth in length, avoiding NaN issues
+			float growthFactor = (plantBaseID > 0) ? getPlantBase().fMb_shoot : 1.0f;
+			float primaryGrowth = primaryGrowthRate();
+			
+			deltalength_PT = growthFactor * primaryGrowth;
+			
+			float newLength = length + deltalength_PT;
+			
+			deltaArea = calcLeafPolygonArea(newLength, newLength / lwRatio, fid) - area;
+			
+			structureDM_PRI_PT = C_content * growthCoff * density * deltaArea;
+			if (Float.isNaN(structureDM_PRI_PT) || Float.isInfinite(structureDM_PRI_PT)) {
+				structureDM_PRI_PT = 0.0f; // Default if invalid
+			}
+		} else {
+			deltalength_PT = 0;
+			structureDM_PRI_PT = 0;
+		}
+
+		// Ensure maintenance respiration does not produce NaN
+		maintenanceDM_PT = calcMaintanceRespiration(this.fNSCtoSC);
+		
+		reserveDM_PT = reserveSynthesis();
+	
+		loading_PT = reserveHydrolysis();
+	}
+
+	/**
+	 * Debug-only decomposition of leaf expansion into potential, water-limited, and final terms.
+	 *
+	 * <p>The final leaf primary-growth term shown here matches the production logic in
+	 * {@link #calcUnloading(double)} and uses the dominant-limiter rule
+	 * {@code min(fw, fc)} (not {@code fw * fc}).
+	 */
+	void debugLeafExpansionDecomp(double sugarConcentration_phloem) {
+		if (!outputLeafGrowthDiagnostics) {
+			return;
+		}
+
+		dbg_validStep = step;
+		dbg_growthActive = (this.age < this.te) ? 1 : 0;
+		dbg_sc_phloem = sugarConcentration_phloem;
+		dbg_area_pre = this.area;
+		dbg_dt = this.age - this.age_pre;
+		if (Double.isNaN(dbg_dt) || Double.isInfinite(dbg_dt) || dbg_dt <= 0) {
+			dbg_dt = 1.0;
+		}
+
+		// Match production primaryGrowthPotential(): no length/potLength self-penalty.
+		dbg_ratio = 1.0;
+
+		dbg_Lpot = primaryGrowthPotential();
+		if (Double.isNaN(dbg_Lpot) || Double.isInfinite(dbg_Lpot)) {
+			dbg_Lpot = 0.0;
+		}
+
+		float growthFactor = (this.plantBaseID > 0) ? getPlantBase().fMb_shoot : 1.0f;
+
+		if (organGrowthMethod.equals("TempLimited")) {
+			dbg_fw = 1.0;
+		} else {
+			double psi = (Double.isNaN(this.waterPotential) || Double.isInfinite(this.waterPotential)) ? -0.1 : this.waterPotential;
+			dbg_fw = waterPotentialRes(psi, this.growth_a, this.growth_b);
+			if (Double.isNaN(dbg_fw) || Double.isInfinite(dbg_fw)) {
+				dbg_fw = 1.0;
+			}
+			dbg_fw = Math.max(0.0, Math.min(1.0, dbg_fw));
+		}
+
+		dbg_fc = sinkUnloading(sugarConcentration_phloem, km_pri);
+		if (Double.isNaN(dbg_fc) || Double.isInfinite(dbg_fc)) {
+			dbg_fc = 0.0;
+		}
+		dbg_fc = Math.max(0.0, Math.min(1.0, dbg_fc));
+		if (shouldUsePreT1PotentialGrowth()) {
+			dbg_fc = 1.0;
+		}
+		double dbg_stress = (dbg_fw < dbg_fc) ? dbg_fw : dbg_fc;
+
+		dbg_dL_pot = growthFactor * dbg_Lpot;
+		dbg_dL_w = growthFactor * dbg_Lpot * dbg_fw;
+		dbg_dL_final = growthFactor * dbg_Lpot * dbg_stress;
+
+		double L0 = this.length;
+		double W0 = L0 / lwRatio;
+		double area0 = calcLeafPolygonArea((float) L0, (float) W0, fid);
+
+		double L_pot = L0 + dbg_dL_pot;
+		double L_w = L0 + dbg_dL_w;
+		double L_final = L0 + dbg_dL_final;
+
+		dbg_dA_pot = calcLeafPolygonArea((float) L_pot, (float) (L_pot / lwRatio), fid) - area0;
+		dbg_dA_w = calcLeafPolygonArea((float) L_w, (float) (L_w / lwRatio), fid) - area0;
+		dbg_dA_final = calcLeafPolygonArea((float) L_final, (float) (L_final / lwRatio), fid) - area0;
+	}
+
+	@Override
+	void calcUnloading(double sugarConcentration_phloem) {
+		debugLeafExpansionDecomp(sugarConcentration_phloem);
+		if (this.age < this.te) {
+			float growthFactor = (this.plantBaseID > 0) ? getPlantBase().fMb_shoot : 1.0f;
+			// Leaf primary elongation uses a dominant-limiter rule for water/carbon coupling:
+			// apply min(fw, fc) to the potential elongation (Lpot) to avoid compounding
+			// limitations as fw * fc.
+			double fc = sinkUnloading(sugarConcentration_phloem, km_pri);
+			if (Double.isNaN(fc) || Double.isInfinite(fc)) fc = 0.0;
+			if (fc < 0.0) fc = 0.0;
+			if (fc > 1.0) fc = 1.0;
+			if (shouldUsePreT1PotentialGrowth()) {
+				fc = 1.0;
+			}
+
+			double Lpot = primaryGrowthPotential();
+			double fw = primaryGrowthWaterEffect();
+			double stress = (fw < fc) ? fw : fc;
+
+			deltalength = growthFactor * Lpot * stress;
+			
+			float newLength = length + deltalength;
+			
+			deltaArea = calcLeafPolygonArea(newLength, newLength / lwRatio, fid) - 
+						calcLeafPolygonArea(length, length / lwRatio, fid);
+			
+			
+			structureDM = C_content * growthCoff * density * deltaArea;
+			if (Float.isNaN(structureDM) || Float.isInfinite(structureDM)) {
+				structureDM = 0.0f;
+			}
+		} else {
+			deltalength = 0;
+			structureDM = 0;
+		}
+	
+		maintenanceDM = calcMaintanceRespiration(this.fNSCtoSC) * 
+						sinkUnloading(sugarConcentration_phloem, KM_MTNCE);
+		
+		//println("maintenanceDM: " + maintenanceDM + " Rd: " + Rd);
+		
+		reserveDM = reserveSynthesis()* 
+					sinkUnloading(sugarConcentration_phloem, km_res);	
+	
+		unloading = structureDM + maintenanceDM + reserveDM;
+		
+		if (Float.isNaN(unloading) || Float.isInfinite(unloading)) {
+			unloading = 0.0f;
+		}
+	}
+
+	
+	@Override
+	void calcLoading(double sugarConcentration_phloem)
+	{
+		if (fNSC > MINIMUM_NSC) {
+			double potentialLoading = reserveHydrolysis() * 
+									  sourceLoading(sugarConcentration_phloem, sourceLoading_b, sourceLoading_cp);
+	
+			// Estimate post-loading fNSC assuming simple linear relation (adjust as needed)
+			double potentialLeafNSC = carbon_nonStructure - potentialLoading;
+			double potential_fNSC = potentialLeafNSC / carbon_total; // Assuming leafBiomass exists and is > 0
+	
+			if (potential_fNSC >= MINIMUM_NSC) {
+				loading = potentialLoading;
+			} else {
+				// Limit loading to avoid dropping below MINIMUM_NSC
+				double safeLeafNSC = MINIMUM_NSC * carbon_total;
+				double maxAllowedLoading = carbon_nonStructure - safeLeafNSC;
+				loading = Math.max(0, maxAllowedLoading); // Ensure loading isn't negative
+			}
+		} else {
+			loading = 0;
+		}
+	
+		// Optional debug print
+		// if (printFlag) {
+		//     println("leaf " + "node " + nodeNumber + " rank " + this.rank +
+		//             " loading: " + loading + " fNSC: " + fNSC + " reserveHydrolysis: " + reserveHydrolysis());
+		// }
+	}
+
+	@Override
+	double calcMaintanceRespiration(double fNSCtoSC) 
+	{ 
+		//Rd is umol CO2 m-2 s-1
+		float deltaT;
+		if (globalRadiation > LIGHT_THRESHOLD ) {
+			deltaT = timeInterval; 
+			if(this.carbonAssimilation < 0) {
+				maintenanceDM = Math.abs(carbonAssimilation);
+				return maintenanceDM;
+			} else {
+				maintenanceDM = 0; 
+				return 0;
+			} 
+		} else {
+			/** this seems too big compared to all other organs*/
+			/* deltaT = 3600; 	//DT = 1/24, this make deltaT into 1 hour
+			//almost the same as Rd
+			/* float mainTS = carbon_total * maintenanceCoff;
+			float teff = Q10MN**( ((Ta - REFTMP)/10f) );
+			maintenanceDM = mainTS*teff; */
+			
+			/* float cp_adj;   //adjustment by phloem carbon concentration
+		  //assume that the basic maintenance is 25% of the parameterized value,it decreases with the neighbouring phloem concentration. 
+		   // Check for NaN and handle gracefully
+			if (Float.isNaN(fNSCtoSC) || Float.isInfinite(fNSCtoSC)) {
+				fNSCtoSC = 0.5; // Default to 0 if NaN is detected
+			}
+			
+		    cp_adj = 0.25+ Math.max(0.1, Math.min(0.75, fNSCtoSC));  
+		
+			Rd = Rd(Ta, leafNcontent);  //umol CO2 m-2 s-1
+			
+			if (Double.isNaN(Rd) || Double.isInfinite(Rd)) {
+				println("Invalid Rd value: " + Rd);
+				Rd = 0.1;
+			}
+			
+			
+			maintenanceDM = Rd * area * deltaT * 1e-6 * 12 * 1e3*cp_adj;  // mg/leaf/hour
+			
+			} */
+			  
+			maintenanceDM = super.calcMaintanceRespiration(this.fNSCtoSC);
+			 			
+			return maintenanceDM;
+		}
+	}
+	
+	
+	@Override
+	void calcNSynthesis()
+	{
+	
+		Nsynthesis = Ta > 0 ? Ta*DT * NSynthRate * biomass * 
+					 (getPlantBase().mobileNContent / (getPlantBase().mobileNContent + kNpool)) * (EP/ (EP + kEP))
+					 : 0;
+		nitrogen_nonStructure += Nsynthesis;
+		nitrogen_total += Nsynthesis;  //= nitrogen_structure + nitrogen_nonStructure;
+	}
+	
+	
+	// update the leaf RH
+		
+	double leafRH;
+	void calcLeafRH() {
+		 leafRH = random(-10,10);
+	}
+
+
+	
+	
+	/**
+	 * Updates the state and pointer variables of the leaf. This method performs various updates
+	 * including searching and setting state variables, updating organ size and area, and managing 
+	 * carbon and nitrogen status of the leaf based on the current growth conditions and environmental inputs.
+	 * 
+	 * The method calculates new dimensions, biomass, and nitrogen content depending on 
+	 * whether potential growth is used or other growth constraints are applied.
+	 */
+
+	@Override
+	void update()
+	{
+		super.update();
+
+		/**searching and update state and pointer variables */
+		if(this.plantBaseID <= 0) { this.plantBaseID = first((* p:PlantBase, (p.plantNumber == this.plantNumber)*)).nodeID;} 
+		
+		if (parentID <= 0) {  // Assuming 0 is an uninitialized ID
+			GrowingOrgan parentOrgan = (GrowingOrgan) first((* this (<--)+ Internode*));
+			if (parentOrgan != null) {
+				this.parentID = parentOrgan.nodeID;
+				parentOrgan.addChildLeafId(this.nodeID);
+			}
+		}
+			
+		if(trunkHeight == 0) {
+			trunkHeight = mean((* t:Trunk, (t.plantNumber == this.plantNumber) *)[length]);
+			//println("trunkHeight: " + trunkHeight);
+		}
+		
+				
+		if(outputIndividualLeaf && (leafAreaAbove_plant == 0 || leafAreaAbove_shoot == 0)) {
+		
+			leafAreaAbove_plant = sum( (* lf:Leaf, (lf.plantNumber == this.plantNumber && 
+										  lf.z > this.z) *)[area]);
+			leafAreaAbove_shoot = sum( (* lf:Leaf, (lf.plantNumber == this.plantNumber &&
+				lf.cordonNumber == this.cordonNumber && lf.nodeNumber == this.nodeNumber &&
+									lf.z > this.z) *)[area]);
+			double boundBox = 0.2; //currently put 20 cm as the bouding box size						
+			leafAreaDensity_local = sum( (* lf:Leaf, (lf.plantNumber == this.plantNumber &&
+									(lf.x + lf.endX)/2 <= this.x + boundBox &&
+									(lf.x + lf.endX)/2 >= this.x - boundBox &&
+									(lf.y + lf.endY)/2 <= this.y + boundBox &&
+									(lf.y + lf.endY)/2 >= this.y - boundBox &&
+									(lf.z + lf.endZ)/2 <= this.z + boundBox &&
+									(lf.z + lf.endZ)/2 >= this.z - boundBox
+									) *)[area]) / (boundBox * boundBox * boundBox);
+		
+		} 
+		
+		if (parentID >= 0 && getPlantBase().height_low >= trunkHeight && step <= 2) {
+			assignLeafLayersByZ(getPlantBase().height_low, getPlantBase().height_mid);
+			//default input
+			assignLeafTraits(0.0, 10);
+		} 
+
+
+		/** update organ size and area */
+		double prevLength = this.length;
+		if(this.age >= te) {
+			this.potLength = this.maxLength;
+		} else {
+			this.potLength = this.maxLength * betaGrowthFunction(this.age, this.tm, this.te);
+		}
+		this.potLength = clampNonShrinkingPotentialLength(prevLength, this.potLength, this.maxLength);
+		//println("age:" + this.age + " potLength: " + potLength);
+		//if organGrowthMethod.equals("TempLimited") is true, length increase by potential length
+		if(organGrowthMethod.equals("TempLimited")) {
+			this.length = this.potLength;
+		} else if(organGrowthMethod.equals("TempWaterLimited")) { 
+			this.length = length + deltalength_PT;
+		} else if(organGrowthMethod.equals("TempWaterCarbonLimited")){
+			this.length = length + deltalength;
+		} else {
+			this.length = length + deltalength;
+		}
+		
+		//if (printFlag) { println("delta length " + deltalength); }
+		width =  length/lwRatio;
+		//for leaf, make diameter equal to width
+		this.diameter = width;
+		area = calcLeafPolygonArea(length, width, fid);
+			if (!this.profileFinalSizeLocked && this.potentialFinalSize > 0.0 && !Double.isNaN(area) && !Double.isInfinite(area)) {
+				this.realizedFinalSize = area;
+			}
+			if (this.realizedFinalSize > 1.0e-12 && !Double.isNaN(area) && !Double.isInfinite(area)) {
+				this.currentAreaToRealizedFinalRatio = area / this.realizedFinalSize;
+			} else {
+				this.currentAreaToRealizedFinalRatio = 0.0;
+			}
+			if (Double.isNaN(this.currentAreaToRealizedFinalRatio) || Double.isInfinite(this.currentAreaToRealizedFinalRatio)) this.currentAreaToRealizedFinalRatio = 0.0;
+			if (this.currentAreaToRealizedFinalRatio < 0.0) this.currentAreaToRealizedFinalRatio = 0.0;
+			if (this.currentAreaToRealizedFinalRatio > 2.0) this.currentAreaToRealizedFinalRatio = 2.0;
+			updateRealizationRatio();
+			shapeCoefficient = area/(length * width);
+		adjustedWidth = width * shapeCoefficient;
+		
+		/** update organ carbon and nitrogen status */
+		if(organGrowthMethod.equals("TempLimited")) {
+			biomass = area*density;
+			this.initCN_content(this.biomass);
+			//if (printFlag) { println("biomass leaf: " + this.biomass); }
+			
+		} else {
+			delta_str = structureDM - growthCost; //maintenanceDM + reserveDM
+			delta_NSC = carbonAssimilation + maintenanceDM + reserveDM 
+							- loading - carbonMobilizationCost - maintenanceDM_PT;
+			updateCarbonStatus(delta_str, delta_NSC);
+			
+			//setting the fNSC for photosynthesis test
+			if("photosynthesisTest".equals(special_scenario)) {
+				this.fNSC = 0.1; 
+			}
+			//updating specific leaf area based on new leaf area and biomass;
+			//SLA is not fluctuating based on nonstructural carbon,
+			//but this variation is removed in Nitrogen content calculation
+			//because accumulation of strach etc does not accompanied by N
+			if(!Double.isNaN(this.biomass) && this.area > 4e-4) {
+				this.SLA = this.area/this.biomass;
+                this.density	  = 1/SLA;
+			}
+			/* if(Double.isNaN(this.biomass)) {
+				this.initCN_content(this.biomass_pre);
+			} */
+		}
+		
+	
+		
+		//calcNdegradation();
+		//calcNSynthesis(); 
+		//leafNcontent = nitrogen_total * mgTogram/area;
+		if (outputLeafGrowthDiagnostics) {
+			writeLeafExpansionDiagnostic(this);
+		}
+
+		//for float it is not a good idea to use == sign
+		//println(leafNcontent + " " + (leafNcontent >= leafNContent_input)); 
+	}
+	
+	/**
+	 * Calculates and returns the scale factor for the leaf length relative to the reference length.
+	 *
+	 * @return The scale factor for the leaf length.
+	 */
+	double getLengthScaleFactor()
+	{
+		return length/getRefLengthForLeaf();
+	}
+	/**
+	 * Calculates and returns the scale factor for the leaf width relative to the reference width.
+	 *
+	 * @return The scale factor for the leaf width.
+	 */
+	double getWidthScaleFactor()
+	{
+		return width/getRefWidthForLeaf();
+	}
+}	 //everything is using multifacet leaf now. this is just a convention
+==>
+	if(initFromFieldCanopy == false) (
+		RH(leafRH)
+		if(initFromArchReader == false) (RL(90) RH(90))
+		if(initFromArchReader == true) (AdjustLU RL(250))
+	)
+	if(initFromFieldCanopy == true) (
+		// Orientation is supplied by the field canopy production rule.
+	)
+	[Scale(length/getRefLengthForLeaf(),width/getRefWidthForLeaf(),Math.sqrt( (length/getRefLengthForLeaf())* (width/getRefWidthForLeaf())))
+	 MeshNode.(setPolygons(LeafShapeFactory.getPolygonForLeaf(getLeafShapeSpecies(), getId(), lobe, fid)), setLayer(border?borderLayer:0),
+	 			demoVisualization ? setShader(new AlgorithmSwitchShader(new RGBAShader(0,0.39,0),LightShader)): 
+				 			setShader(new AlgorithmSwitchShader(new RGBAShader(0,fabs,0),LightShader))
+	 		 ) //meshnode
+	] 
+	;
+	//LightShader or leafSideSwitchShader
+	// petiole module
+module Petiole extends GrowingOrgan
+{
+	double vol;  //m3 the volume of the petiole
+	double width; 
+	
+	double fpetio; // = 0.5;				// petiole length (expressed as fraction of leaf blade length)
+		
+	public void loadParameters() {
+			
+		/** Set the context for file name parameters*/
+		CategoryStore config = ((DocumentCategoryNameGroup) CONFIG.getGroup(FILE_NAME_PLANT_PARAMETERS, 
+			DocumentCategoryNameGroup.class)).getCategoryStore();
+
+		
+		/** Configuration context for carbon-related parameters */
+		config.setCategoryContext("leaf-carbon");
+		//common parameters
+		maintenanceCoff        = config.getDouble("MTNCE", 0.000336);
+		growthCoff             = config.getDouble("GROWTHRQ", 1.2);
+		C_content              = config.getDouble("C_CONTENT", 0.46);
+		maxRes                 = config.getDouble("RESERVES", 0.2);
+		
+		km_pri                 = config.getDouble("KM_PRI", 0.00029);
+		km_sec                 = 0;
+		km_res                 = 0;
+		
+		hydRate                = config.getDouble("HYDROLYSIS_LEAF_DAY", 0.8);
+		synRate                = 0; 
+		
+		
+		fpetio = config.getDouble("fpetio", 0.5);
+		tm	 = config.getDouble("tm", 4.5);
+		te	 = config.getDouble("te", 7.5);
+		initialLength = fpetio*config.getDouble("initialLength", 0.01);
+		maxLength = fpetio*config.getDouble("Lmax", 0.15);
+		//the density was in unit of mg/cm3, so need to times 1e6 to convert into mg/m3;
+		density = config.getDouble("PETIOLE_DENSITY", 50)*1e6;  
+		
+ 		config.setCategoryContext("leaf-water");
+ 		growth_a	 = config.getDouble("growth_a", -10);
+		growth_b	 = config.getDouble("growth_b", -0.5);
+		
+		waterContent = config.getDouble("WATER_CONTENT", 0.85);
+		
+		config.setCategoryContext("leaf-nitrogen");
+		/** Slope of Nm decline with thermal time (fraction per °C·d). */
+		aN_slope = config.getDouble("aN_slope", -8.1e-6);
+		
+		/** Clamps for Nm and LMA. */
+		Nm_min  = config.getDouble("Nm_min",  0.005);  // 0.5% N
+		Nm_max  = config.getDouble("Nm_max",  0.060);  // 6.0% N
+		
+		
+		
+		
+		/** INITIAL CONDITIONS*/
+		CategoryStore config_Init = ((DocumentCategoryNameGroup) CONFIG.getGroup(FILE_NAME_INITIAL_CONDITIONS, 
+			DocumentCategoryNameGroup.class)).getCategoryStore();			
+		
+		config_Init.setCategoryContext("leaf");
+		
+		fNSC                   = config_Init.getDouble("fNSC", 0.1);
+		structure_C            = 1- fNSC; 
+	
+		
+
+		
+	}
+	
+	
+	Petiole initiate_pi(PlantIdentifier pi, float length_, float diameter_)
+	{ 
+		//initialize the parameters
+		loadParameters();
+		//IDENTIFIERS
+		
+		plantNumber = pi.plantNumber;
+		if(this.plantBaseID <= 0) { this.plantBaseID = first((* p:PlantBase, (p.plantNumber == this.plantNumber)*)).nodeID;}
+		
+		border = pi.border;
+		
+		length =Math.max(length_, 1e-2);
+		this.potLength = length; 
+		width = 2e-3;
+				
+		area = Math.PI * (width*width/4);
+		vol = calcVol(length, width);
+		//CARBON
+		biomass = vol * density; 
+		Ka = 1e5;		 //the hydraulic resistence of petiole has been accounted by leaf
+		
+		// Initialize carbon and nitrogen content 
+		this.initCN_content(this.biomass);
+		
+		this.organType = "Petiole";
+		return this;
+	}
+	
+	
+	void initiate_pb(PlantBase pb, int i, int k, int l)
+	{ 
+		//initialize the parameters
+		loadParameters();
+		//IDENTIFIERS
+		this.plantBaseID = pb.nodeID;
+		plantNumber = pb.plantNumber;
+		border = pb.border;
+		rank = i;
+		nodeNumber = k; 
+		cordonNumber = l;
+		cpn = i;
+		order = 0; 
+		assignAge(pb, this.cpn);
+		//STATE VARIABLES
+		try {
+			if(i == 0) i = i+1;
+			length = organSize[i][4];
+		} catch (ArrayIndexOutOfBoundsException e) {
+			length = organSize[organSize.length-1][4];	
+		}
+		this.potLength = length; 
+	//	if (printFlag) { println("width " + width); }
+		width =  2e-3;
+
+		area = Math.PI * (width*width/4);
+		vol = calcVol(length, width);
+		
+		//CARBON
+	
+		biomass = vol * density; 
+		Ka = 1e5;		 //the hydraulic resistence of petiole has been accounted by leaf
+	
+		// Initialize carbon and nitrogen content
+		this.initCN_content(this.biomass);
+		
+		this.organType = "Petiole";
+	}
+	
+	void initiate_apex(ApexService a)
+	{
+		//initialize the parameters
+		loadParameters();
+		plantNumber = a.plantNumber;
+		if(plantBaseID <= 0) { this.plantBaseID = first((* p:PlantBase, (p.plantNumber == this.plantNumber)*)).nodeID;}
+		border = a.border;
+		rank = a.rank;
+		nodeNumber = a.nodeNumber; 
+		cordonNumber = a.cordonNumber;
+		age = Math.max(1e-3, a.age - plastochron);
+		cpn = a.cpn ;
+		order = a.order;
+		
+		length = initialLength;
+		this.potLength = length;
+		
+		width =  2e-3;
+		area = Math.PI * (width*width/4);
+		vol = calcVol(length, width);
+		
+		biomass = vol * density;
+		//CARBON
+		Ka = 1e5;		
+		
+		// Initialize carbon and nitrogen content
+		this.initCN_content(this.biomass);
+		this.organType = "Petiole";
+
+	}
+	
+	@Override
+	public void initializeCarbonTransport() {
+		double length_cm = this.length * 1e2;
+	    double area_cm2   = this.area * 1e4;
+		float Rs = ( R0 * PhloemResistanceRatio_mixture(initial_c0, FRACTION_SORBITOL)/(PressureRatio(initial_c0)*R_ct*Tk));   // resistance per unit length (initial case)
+		this.r =  Rs * length_cm / area_cm2; //r is in unit of cm //divided by diameter
+		float h_internode_rs = 0; //1/o.Ka /3.6; 	// hydraulic resistance
+		this.xp = 0;//(-Jw * h_internode_rs * initial_c0)/(PressureRatio(initial_c0)*R*Tk);  //need to update this term
+		
+		this.cpb = this.cpt =  SOURCEcp;
+		 
+		//this.cpt = SOURCEcp - cpn * ini_length * SOURCEj * Rs;
+		//this.cpb = SOURCEcp - (cpn - 1) * length * SOURCEj * Rs;
+		this.j = j;
+	}
+	@Override
+	public void updateCTRs(double carbonConcentration) {
+		double length_cm = this.length * 1e2;
+	    double area_cm2   = this.area * 1e4;
+		float Rs = ( R0 * PhloemResistanceRatio_mixture(carbonConcentration, FRACTION_SORBITOL)/(PressureRatio(carbonConcentration)*R_ct*Tk));   // resistance per unit length (initial case)
+		this.r =  Rs * length_cm / area_cm2; //r is in unit of cm //divided by diameter
+		float h_internode_rs = 0; //1/o.Ka /3.6; 	// hydraulic resistance
+		this.xp = 0;//(-Jw * h_internode_rs * initial_c0)/(PressureRatio(initial_c0)*R*Tk);  //need to update this term
+		//println("petiole: r: " + r);
+	}	
+
+	@Override
+	void calcLeakage(double sugarConcentration_phloem) 
+	{ //leakage only calculates for shoot, leaf is zero
+		leakage = 0;
+	}	
+	
+	@Override
+	double reserveHydrolysis()
+	{
+		return (0);
+	}
+	
+	@Override
+	boolean shouldRemove(double odd)
+	{
+		return (random(0,1) > odd);
+	}
+	@Override
+	void calcPTCTRAM(double sc) {
+		structureDM_SEC_PT = 0;
+		calcLeakage(sc);
+	
+		if (this.age < this.te) {
+			float growthFactor = (this.plantBaseID > 0) ? getPlantBase().fMb_shoot : 1.0f;
+			float primaryGrowth = primaryGrowthRate();
+	
+			deltalength_PT = growthFactor * primaryGrowth;
+			
+			float calculatedVolume = calcVol(deltalength_PT, width);
+			
+			structureDM_PRI_PT = C_content * growthCoff * density * calculatedVolume;
+			
+			if (Float.isNaN(structureDM_PRI_PT) || Float.isInfinite(structureDM_PRI_PT)) {
+				structureDM_PRI_PT = 0.0f;
+			}
+		} else {
+			deltalength_PT = 0;
+			structureDM_PRI_PT = 0;
+		}
+	
+		maintenanceDM_PT = calcMaintanceRespiration(this.fNSCtoSC);
+
+		reserveDM_PT = 0;
+	
+		loading_PT = 0;
+	
+	}
+
+	@Override
+	void calcUnloading(double sugarConcentration_phloem) {
+		if (this.age < this.te) {
+			float growthFactor = (this.plantBaseID > 0) ? getPlantBase().fMb_shoot : 1.0f;
+			float primaryGrowth = primaryGrowthRate();
+			double fc = sinkUnloading(sugarConcentration_phloem, km_pri);
+			if (Double.isNaN(fc) || Double.isInfinite(fc)) fc = 0.0;
+			if (fc < 0.0) fc = 0.0;
+			if (fc > 1.0) fc = 1.0;
+			if (shouldUsePreT1PotentialGrowth()) {
+				fc = 1.0;
+			}
+			
+			deltalength = growthFactor * primaryGrowth * fc;
+
+			float calculatedVolume = calcVol(deltalength, width);
+	
+			structureDM = C_content * growthCoff * density * calculatedVolume;
+			if (Float.isNaN(structureDM) || Float.isInfinite(structureDM)) {
+				structureDM = 0.0f;
+			}
+		} else {
+			deltalength = 0;
+			structureDM = 0;
+		}
+	
+		float unloadingFactor = sinkUnloading(sugarConcentration_phloem, KM_MTNCE);
+		
+		maintenanceDM = calcMaintanceRespiration(this.fNSCtoSC) * unloadingFactor;
+	
+		reserveDM = 0;
+	
+		unloading = structureDM + maintenanceDM + reserveDM;
+		
+		if (Float.isNaN(unloading) || Float.isInfinite(unloading)) {
+			unloading = 0.0f;
+		}
+	}
+	
+	
+	@Override
+	void calcLoading(double sugarConcentration_phloem)
+	{
+		loading =  0;
+	    //if (printFlag) { println("this is loading from internode " + "node " + nodeNumber + " rank "+ this.rank + " loading " + loading); }
+	} 
+	
+	@Override
+	void update()
+	{
+		super.update();
+		
+		if(this.plantBaseID <= 0) { this.plantBaseID = first((* p:PlantBase, (p.plantNumber == this.plantNumber)*)).getId();} 
+		
+		if (parentID <= 0) {  // Assuming 0 is an uninitialized ID
+			GrowingOrgan parentOrgan = (GrowingOrgan) first((* this (<--)+ Internode*));
+			if (parentOrgan != null) {
+				storeParentId(parentOrgan);
+				//this is based on the organ type of the current organ
+				parentOrgan.addChildPetioleId(this.getId());
+				
+			}
+		}
+		
+		if ( parentID > 0) {
+			this.waterPotential = getParent().waterPotential;	
+		}
+
+		
+		Ka = 1e3;
+		/** update organ size and area */
+		double prevLength = this.length;
+		this.potLength = this.maxLength * betaGrowthFunction(this.age, this.tm, this.te);
+		this.potLength = clampNonShrinkingPotentialLength(prevLength, this.potLength, this.maxLength);
+		//if organGrowthMethod.equals("TempLimited") is true, length increase by potential length
+		if(organGrowthMethod.equals("TempLimited")) {
+			this.length = this.potLength;
+		} else if(organGrowthMethod.equals("TempWaterLimited")) { 
+			this.length = length + deltalength_PT;
+		} else if(organGrowthMethod.equals("TempWaterCarbonLimited")){
+			this.length = length + deltalength;
+		} else {
+			this.length = length + deltalength;
+		}
+		//if (printFlag) { println(" delta length " + deltalength); }
+		
+		area = Math.PI * (width*width/4);
+		vol = calcVol(length, width); 
+		
+		
+		/** update organ carbon and nitrogen status */
+		if(organGrowthMethod.equals("TempLimited")) {
+			biomass = vol * density;
+			this.initCN_content(this.biomass);
+		} else {
+			delta_str = structureDM - growthCost; //maintenanceDM + reserveDM
+			delta_NSC = maintenanceDM + reserveDM + leakage 
+						- loading - carbonMobilizationCost - maintenanceDM_PT;
+						   
+			updateCarbonStatus(delta_str, delta_NSC);
+		
+			/* if(Double.isNaN(this.biomass)) {
+				this.initCN_content(this.biomass_pre);
+			} */
+		}
+		
+	}
+	
+}
+==> 
+Cylinder(length,width/3).(setLayer(border?borderLayer:0), 
+	demoVisualization ? setShader(new AlgorithmSwitchShader(new RGBAShader(0,0.39,0),LightOpaqueShader)):  
+						setShader(new AlgorithmSwitchShader(petiole,LightOpaqueShader))
+);
+
+// Module to adjust the angle between petiole and leaf
+module JMidrib(super.angle) extends RL(angle)
+{
+    
+	// ---- reference to the controlled leaf (ID-based, lazy resolved) ----
+    private long   parentLeafId = 0L;     // set in initiate(Leaf)
+    private transient Leaf leafRef = null;
+    int rank = 1;
+    float finalBladeInsertionAngle = 0;
+
+    // NEW: sampled once per leaf
+    float petioleDeclDeg = 45f;   // petiole declination wrt shoot
+    float bladeRollDeg   = 0f;    // roll around midrib
+    // bend angle is the results returned from calcLeafDeclination(int rank, int order, float scale) {
+    float bladeBendDeg;
+    // Constants (grapevine; Schmidt et al., 2019)
+    static float i  = 50.2723362857435f;
+    static float c1 = -6.1389930787212f;
+    static float c2 = -5.44651247774916f;
+    static float c3 = 0.474933577122149f;
+
+    static float scaleFactor = 1.602614f;
+    static float primaryAngleConstant = -40.0441f;
+    static float lateralAngleConstant = -35.623863f;
+    static float lateralMidribAngle   = -25.0179f;
+
+    void initiateWithAngles(Leaf leaf, float petDeclDeg, float rollDeg) {
+	 if (leaf != null) {
+				this.parentLeafId = leaf.getId();
+				this.leafRef = leaf;             // immediate use if valid now
+				this.rank = leaf.rank;
+			} else {
+				this.parentLeafId = 0L;
+				this.leafRef = null;
+			}
+			 // Sample angle scheme ONCE per leaf
+			this.petioleDeclDeg = petioleDeclDeg; // ~N(90°-incl, sd)
+			this.bladeRollDeg   = rollDeg;    // ~N(0, 0.3491 rad) in deg
+    }
+
+    // (optional) keep the old initiate() for backward-compat
+    void initiate(Leaf leaf) {
+        initiateWithAngles(
+            leaf,
+            samplePetioleDeclDeg(),
+            sampleLeafRollDeg()
+        );
+    }
+
+    // ---------- getters so rules can fetch the current scheme ----------
+    float getPetioleDeclDeg() { return this.petioleDeclDeg; }
+    float getBladeRollDeg()   { return this.bladeRollDeg; }
+
+    // ---------- (optional) resample utilities if you ever need them ----------
+    void resampleAngles() {
+        this.petioleDeclDeg = samplePetioleDeclDeg();
+        this.bladeRollDeg   = sampleLeafRollDeg();
+    }
+
+    	
+	/** Get any node by id (null if id<=0 or not found). */
+	public Node getNode(long id) {
+		if (id <= 0) return null;
+		return graph() != null ? (Node) graph().getNodeForId(id) : null;
+	}
+	
+    	/** Get any Organ by id (null if not an Organ). */
+	public Organ getOrgan(long id) {
+		Node n = getNode(id);
+		return (n instanceof Organ) ? (Organ) n : null;
+	}
+	
+    // ---------- lazy resolver (safe for Java 1.5; assumes getOrgan(long) exists) ----------
+    Leaf resolveLeaf() {
+        if (leafRef != null) return leafRef;
+        if (parentLeafId > 0L) {
+            Organ o = getOrgan(parentLeafId);
+            if (o instanceof Leaf) {
+                leafRef = (Leaf) o;
+                this.rank = leafRef.rank;
+                return leafRef;
+            }
+            
+        }
+        return null;
+    }
+
+    // --------- sampling helpers (unchanged) ----------
+    static float samplePetioleDeclDeg() {
+        double x = PET_DECL_MEAN_DEG + PET_DECL_SD_DEG * rng.nextGaussian();
+        return (float)Math.max(0, Math.min(85, x));
+    }
+    static float sampleLeafBendDeg() { return (float)(LEAF_BEND_MEAN_DEG + LEAF_BEND_SD_DEG * rng.nextGaussian()); }
+    static float sampleLeafRollDeg() { return (float)(LEAF_ROLL_SD_DEG * rng.nextGaussian()); }
+    
+    
+    
+    // ---------- species-specific declination (grapevine vs apple) ----------
+    static float calcLeafDeclination(int rank, int order, float scale) {
+        float midribAngle = 1.0f;
+        float res = -30;
+        if (species.equals("grapevine")) {
+            if (order == 0) {
+                float lsl = scale / scaleFactor * 100f;
+                midribAngle = i + c1*lsl + c2*rank + c3*lsl*rank + primaryAngleConstant;
+            } else {
+                midribAngle = lateralAngleConstant + lateralMidribAngle;
+            }
+            res = midribAngle - PET_DECL_MEAN_DEG;
+            return res;     // petiole→blade offset around the petiole declination
+            
+        }  else if ("apple".equals(species)) {
+         // simple: follow petiole insertion with small random deviation (±5°)
+         res = Math.min(0, sampleLeafBendDeg());
+         
+         // midrib around petiole axis (0 means co-planar with petiole plane)
+         return res;
+      } else {
+        return 0f;
+      }
+      
+    }
+
+    /**
+     * Update and return the current blade declination (deg) relative to petiole.
+     * Robust to missing leaf on first call:
+     *  - If leaf can’t be resolved yet → use a safe default (55–65° for rosette; else 45°)
+     *  - On later ticks, it will re-attempt resolution and switch to the calibrated angle.
+     */
+    float updateDeclinationAngle() {
+        Leaf lf = resolveLeaf();
+
+        // If we don't have the leaf yet, provide a safe default and retry next time.
+        if (lf == null) {
+            if (Math.abs(this.finalBladeInsertionAngle) < 1f) {
+                // conservative default if no leaf object yet
+                this.finalBladeInsertionAngle = 45f;
+            }
+            return this.finalBladeInsertionAngle; // static until we can resolve
+        }
+
+        // First-time setup of the final target angle
+        if (Math.abs(this.finalBladeInsertionAngle) < 1f) {
+            if ("rosetteLeaf".equals(lf.organType)) {
+                finalBladeInsertionAngle = random(55, 65);     // apple rosette
+            } else {
+                finalBladeInsertionAngle = calcLeafDeclination(
+                        lf.rank, lf.order, lf.getLengthScaleFactor());
+            }
+        }
+
+        // Growth progression (from ~vertical to final angle)
+        if (lf.age < 0.1f * lf.tm) {
+            return 1.0f;
+        } else if (lf.age < lf.te) {
+            return finalBladeInsertionAngle * lf.age / lf.te;
+        } else {
+            return finalBladeInsertionAngle;
+        }
+    }
+}

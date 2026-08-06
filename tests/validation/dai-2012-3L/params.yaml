@@ -1,0 +1,18 @@
+# Example parameter file for running the model evaluation script
+discrepancy:
+  threshold: 0.1
+  dataset:
+  - "mean-fruit-DAI_2012_3L.csv"
+  - "plant-level-DAI_2012_3L.csv"
+
+rmse:
+  dataset: Exp2012_Dai_Bordeaux_berryProfileSubset_3L_mean.csv
+  synthetic-columns:
+    - name: meanFruitFW
+      rmse: 86.0
+    - name: meanFruitDW
+      rmse: 16.0
+    - name: meanFruitSc
+      rmse: 0.026
+
+

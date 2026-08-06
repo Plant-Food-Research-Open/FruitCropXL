@@ -1,0 +1,953 @@
+
+import de.grogra.imp.objects.FixedImageAdapter;
+//import de.grogra.imp3d.spectral.BlackbodySpectralCurve; // at temperature of 5000K = daylight
+import java.time.*;
+import java.util.Calendar;
+import net.e175.klaus.solarpositioning.*;
+import java.util.GregorianCalendar;
+import java.util.TimeZone;
+import java.util.Date;
+import java.text.SimpleDateFormat;
+import java.util.StringTokenizer;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Vector;
+import java.util.Arrays;
+import java.util.SimpleTimeZone;
+
+import static java.lang.Math.*;
+import static globalParameters.*;
+import static plantParameters.*;
+import static modelOptions.*;
+import static lightInterception.*;
+import static initialConditions.*;
+import static leafAngleOptimization.*;
+import static soil.*;
+import static extraTools.*;
+import io.github.fruitcropxl.config.params.groups.*;
+import io.github.fruitcropxl.config.params.structures.*;
+
+// the unit of output light intensity is umol photos/m2/s
+/* This global radiation is converted to Photosynthetic Photon Flux Density PAR [umolPPFD/(m2s)] by multiplication with a conversion
+factor (0.55, fPAR in the case of daylight Gourdiaan 1994). */
+//simulation location
+
+static float latitude =  -41.51; // the latitude of the place in degrees, based on the convention that use North as positive, South is negative. 
+//static float  lat_r	= Math.toRadians(latitude);
+static float  longitude =  173.98;  //longitude in degrees, based on the convention use East as positive and West as negative
+static float  elevation = 10 ; //elevation m
+static float  airPressure = 1010 ; // avg. air pressure (hPa), this unit is used in the solar position package
+static float  turbidity = 0.05; 	//Angstrom's aerosol turbidity coefficient.
+
+// INTERMEDIATE VARIABLE, CHANGES IN CALCULATION
+static AzimuthZenithAngle solarPosition; 
+static double azimuth = 0;
+static double zenith = 0;
+static double solarElevation = 90-zenith;
+static double Eb_PAR = 1;
+static double Eb_NIR =1;
+//Eb, total flux at a surface that is perpendicular to the incoming radiation, times cos(zenith) to convert to horizontal plane
+static double Eb = Eb_PAR + Eb_NIR;  
+static double fPAR = 0.5; //Eb_PAR / Eb;
+/**
+ * this is mainly used for glass house conditions when radiation need to be set
+ * only used when inputEnvironmentCondition == false, which is rare
+ */
+static boolean inputRadiation = false;
+
+static double fdiff; //the default calculation is just for clear sky condition.
+static double kt;   //clearness index (dimensionless), for correcting the fdiff
+
+//unit umol/m2/s was used in the photosynthesis model
+static double directRadiation = 1; //by convention, this direct radiation was defined as the intensity at the horizontal surface
+static double diffuseRadiation = 1; //by convention, this diffuse radiation was defined as the intensity at the horizontal surface
+static double globalRadiation = directRadiation + diffuseRadiation;  //Global radiation is the total short-wave radiation from the sky falling onto a horizontal surface on the ground.  
+const  int HeightOfSun 		= 100; 		// meter above the soil, doesn't have influence on the result
+static float Transmissivity = 0.36;		////0.36;	  //based on KNMI data 10 years' mean, percentage of light that transmitted through atmosphere on a day of clear sky
+
+const float tilt 			= 23.45 * DEGREE_TO_RADIANS;	// tilt of the earth axis
+const float c				= 0.4;      // parameter for collecting radiation transition related with elevation angle Spitter 1986
+
+static float dayLength			= 12;			// in hours updated in environment calculation
+static int sunriseTime			= 5;			// in hours updated in environment calculation
+static int sunsetTime			= 19;			// in hours updated in environment calculation
+static int month;
+static int dayOfMonth;
+ 
+// INTERMEDIATE VARIABLE, CHANGES IN CALCULATION
+static float timeInterval = DT * 24 * 3600;				// approximately 3600s as daylength is not an integer
+
+public static double thermalTimeAfterBudBurst = START_TT_AFTER_BUDBURST;
+static float rainfall;
+
+static boolean isLightTreatmentActiveByDAWS(int currentDAWS) {
+	if (modelOptions.useLightTreatment == false) return false;
+	if (modelOptions.lightTreatmentStartDOY == 1 && modelOptions.lightTreatmentEndDOY >= 365) return true;
+	int startDAWS = modelOptions.lightTreatmentStartDAWS;
+	int endDAWS = modelOptions.lightTreatmentEndDAWS;
+	if (startDAWS <= endDAWS) {
+		return currentDAWS >= startDAWS && currentDAWS <= endDAWS;
+	}
+	return currentDAWS >= startDAWS || currentDAWS <= endDAWS;
+}
+
+static String getTimeZoneOffset(double longitude) {
+        // Each time zone is roughly 15 degrees of longitude wide
+        int timeZoneOffset = (int)Math.round(longitude / 15);
+
+        // Adjust for UTC and format the string
+        String offsetString;
+        if(timeZoneOffset >= 0) {
+            offsetString = "UTC+" + timeZoneOffset;
+        } else {
+            // Convert negative offset to positive and format
+            offsetString = "UTC-" + Math.abs(timeZoneOffset);
+        }
+
+        return offsetString;
+}
+    
+    
+//note the model use solar noon, it is slightly different from the local time
+//for example, in Bordeaux the solar noon is at 13:00 or 14:00 in the summer time due to the change of time
+static float calcDayLength(int dayOfYear, float latitude) {
+
+	float sinDelta = -Math.sin(tilt) * Math.cos(2*Math.PI*(dayOfYear+10)/365); //delta is the declination of the sun with respect to the earth equator
+	float cosDelta = Math.sqrt(1-(sinDelta)**2);  
+	float a = Math.sin(latitude)*sinDelta;  // the season-dependent solar shift with respect to the equator
+	float b = Math.cos(latitude)*cosDelta;  // the season-dependent amlitude of tthe sine of solar height
+	float dayLength = 12 *(1+(2/Math.PI)*Math.asin(a/b));
+
+    return(dayLength);
+}
+
+static int calcSunriseTime(float dayLength) {
+      float tsr = 12 - dayLength/2;			// time of sun rise
+	  int sunrise = (int) Math.round(tsr);  //the hour of the model starts from 0, hour 1 means 1-2. the calculated sunrise is using 1 as start, thus need to minus 1
+	  return(sunrise);
+}
+
+static int calcSunsetTime(float dayLength) {
+      float tst = 12 + dayLength/2;			// time of sun rise
+	  int sunset = Math.round(tst)+1;  //works better with NZ data
+	  return(sunset);
+}
+//hourOfDay starts from 0, 7 o'clock represent the hourly mean condition between 6 to 7. thus larger than the sunrise hour is better
+static boolean calcDaytime(int hourOfDay, int sunriseTime, int sunsetTime) { //check it is daytime or nighttime
+	  return(hourOfDay > sunriseTime && hourOfDay < sunsetTime);
+}
+
+static float calcTemperature(float Tmax, float Tmin) {
+     int hour_i = (hourOfDay - 6 < 1 ? hourOfDay-6 + 24 : hourOfDay-6);
+	 return 0.5*((Tmax+Tmin)+(Tmax-Tmin)*Math.cos(Math.PI*(hour_i - 8)/12));
+}
+
+static float calcHumidity(float RHmax, float RHmin) {
+     int hour_i = (hourOfDay - 6 < 1 ? hourOfDay-6 + 24 : hourOfDay-6);
+	 return 0.5*((RHmax+RHmin)+(RHmax-RHmin)*Math.cos(Math.PI*(hour_i +4)/12));
+}
+ 
+
+module SingleLight(float power) extends LightNode()
+{ 
+	{setLight(new DirectionalLight().(setPowerDensity(power), setVisualize(true), setRaylength(0.1),
+	  setLayer(lightLayer), getColor().set(new RGBColor(1,1,1))));} 
+	  
+	//{setLight(new DirectionalLight().(setPowerDensity(power), setLayer(lightLayer), getColor().set(new RGBColor(1,1,1))));} 
+}
+
+module DirectLight
+{
+	float power;				 // Radiation intensity for every node
+	float anglecorection; 
+	void update() {
+		power = directRadiation + 1e-6;
+		anglecorection = Math.max(0, Math.cos(toRadians(zenith)))+1e-6;
+		// if (printFlag) { println("direct light  " + power); }
+	}
+		 
+} 
+==> 
+AdjustLU RL(90)
+//convert to the power PERPENDICULAR to the incoming direction
+//by convention, the direct radiation was defined as the intensity at the horizontal surface
+[RU(azimuth) RL(-solarElevation) M(HeightOfSun*2) RL(180) SingleLight(power/anglecorection)]  //{println("Power = " + power);}	
+;
+
+
+// diffuse sky light
+module DiffuseLight
+{
+	float power;
+	
+	{
+	numDiffuseLights = 72;
+	numDiffuseLights = useTurtleRadiation ? 46 : 72;}
+	float powers[] = new float[numDiffuseLights];
+	//float[] turtlePowers = new float[numDiffuseLights];	// Power of each single light for when turtle radiation used
+
+	void update() {		
+		power = diffuseRadiation + 1e-6; 
+		// if (printFlag) { println("diffuse light  " + power); }
+		if (useTurtleRadiation == true) {
+		     for (int i : (0 : numDiffuseLights - 1)) {
+		     	 //0.51 is the correction factor for the incoming diffuse radition from a isotropic radiation distribution 
+					   powers[i] = power*1/numDiffuseLights/0.517374915;	   
+				   }
+		   } else {
+		   	   //the last column is the correction factor for the light from that angle cos(zenith)
+		   	   for (int i : (0 : 11)) { powers[i] = power*0.003218/0.205; }
+		   	   for (int i : (12 : 23)) { powers[i] = power*0.01163/0.563; }
+		   	   for (int i : (24 : 35)) { powers[i] = power*0.019812/0.817; }
+		   	   for (int i : (36 : 47)) { powers[i] = power*0.023022/0.945; }
+		   	   for (int i : (48 : 59)) { powers[i] = power*0.018522/0.991; }
+		   	   for (int i : (60 : 71)) { powers[i] = power*0.007096/0.998; }
+		   }
+	}
+		
+}
+==> 
+RH(random(0,360))// make random rotation to make it more even
+if(useTurtleRadiation == false)
+	(
+	RL(90)
+	[ for (int i = 1; i<=12; i++) ([ RU(i*360/12) RL(-11.7) M(HeightOfSun) RL(180) SingleLight(power*0.003218/0.205)] )]						// 0.205
+	[ for (int i = 1; i<=12; i++) ([ RU(20) RU(i*360/12) RL(-34.2) M(HeightOfSun) RL(180) SingleLight(power*0.01163/0.563)] )]				    // 0.563
+	[ for (int i = 1; i<=12; i++) ([ RU(40) RU(i*360/12) RL(-54.9) M(HeightOfSun) RL(180) SingleLight(power*0.019812/0.817)] )]				// 0.817
+	[ for (int i = 1; i<=12; i++) ([ RU(60) RU(i*360/12) RL(-71.1) M(HeightOfSun) RL(180) SingleLight(power*0.023022/0.945)] )]				// 0.945
+	[ for (int i = 1; i<=12; i++) ([ RU(80) RU(i*360/12) RL(-82.8) M(HeightOfSun) RL(180) SingleLight(power*0.018522/0.991)] )]				// 0.991
+	[ for (int i = 1; i<=12; i++) ([ RU(80) RU(i*360/12) RL(-89.1) M(HeightOfSun) RL(180) SingleLight(power*0.007096/0.998)])]  	            // 0.998
+
+	//[ for (int j = 0; j<72; j++) ([ RU(diffuseLightYRotation[j]) RL(diffuseLightXRotation[j]) M(HeightOfSun) RL(180) SingleLight(powers[j])] )]
+	)	
+	if(useTurtleRadiation == true)
+	(
+	RL(90)
+	//[ for (int j = 0; j<46; j++) ([ RU(diffuseLightYRotation[j]) RL(diffuseLightXRotation[j]) M(HeightOfSun) RL(180) SingleLight(powers[j])] )]
+	[ for (int i = 0; i<=0; i++) ([ RU(0) RL(-90) M(HeightOfSun) RL(180) SingleLight(power*1/46/0.517374915)])]
+	[ for (int i = 0; i<=4; i++) ([ RU(i*72) RL(-70.95) M(HeightOfSun) RL(180) SingleLight(power*1/46/0.517374915)])]
+	[ for (int i = 0; i<=4; i++) ([ RU(i*72+36) RL(-49.44) M(HeightOfSun) RL(180) SingleLight(power*1/46/0.517374915)])]
+	[ for (int i = 0; i<=4; i++) ([ RU(i*72) RL(-44.12) M(HeightOfSun) RL(180) SingleLight(power*1/46/0.517374915)])]
+	[ for (int i = 0; i<=4; i++) ([ RU(i*72+24) RL(-30.99) M(HeightOfSun) RL(180) SingleLight(power*1/46/0.517374915)])]
+	[ for (int i = 0; i<=4; i++) ([ RU(i*72+48) RL(-30.99) M(HeightOfSun) RL(180) SingleLight(power*1/46/0.517374915)])]
+	[ for (int i = 0; i<=4; i++) ([ RU(i*72) RL(-25.07) M(HeightOfSun) RL(180) SingleLight(power*1/46/0.517374915)])]
+	[ for (int i = 0; i<=14; i++) ([ RU(i*24+12) RL(-13.42) M(HeightOfSun) RL(180) SingleLight(power*1/46/0.517374915)])]
+	)
+	;
+	
+	
+ /**
+ * The PARLightSensor module is designed to simulate a virtual light sensor for plant modeling.
+ * It measures the Photosynthetically Active Radiation (PAR) absorbed by a given area, 
+ * useful in studying the light absorption characteristics of different plant species.
+ * This sensor can be positioned in various locations relative to the plant, 
+ * and can differentiate between border and non-border positions.
+ */
+module LightSensor extends SensorNode().(setRadius(0.05), setTwoSided(false), setLayer(16)) {
+	double abs; //the irradiance in Watts per square meter which is sensed by the sensor attached to the volume of the given node
+	float height;
+	
+	void initiate(float height) {
+		this.height = height;		
+	}
+	void update() {
+		abs = getSensorIrradiance(this);
+	}	
+
+} 
+
+
+	
+   //Clear-sky solar fluxes are calculated using the 'REST-2' model of Gueymard (2008). 
+   //REST-2 is a state-of-the-art atmospheric transmission model that calculates the solar flux at Earth's surface after attenuation by water vapor, CO2, Ozone, NO2, and aerosols. 
+   //The model partitions the total radiative flux into direct and diffuse components.
+   //IT IS CRITICAL TO NOTE THAT THE CALCULATED FLUX IS FOR A SURFACE PERPENDICULAR TO THE SUN DIRECTION. 
+   //To get the flux on a horizontal surface, multiply by the cosine of the solar zenith angle.
+static void GueymardSolarModel(float airPressure, float Tk, float humidity, 
+ 						 float turbidity){
+ 
+   float pressure = airPressure * 100; //converting from hpa to pa;					 	 
+   float beta = turbidity;
+   float theta = zenith * Math.PI/180;
+ 
+   if( theta>0.5*Math.PI ){
+     Eb_PAR = 0.f;
+     Eb_NIR = 0.f;
+     fdiff = 1.f;
+     return;
+   }
+   
+   float m=pow(cos(theta)+0.15*pow(93.885-theta*180/Math.PI,-1.25),-1);
+ 
+   float E0_PAR=635.4;
+   float E0_NIR=709.7;
+   float alpha_x = 1.3;
+   float alpha_y = 1.3;
+   
+ 
+   //---- Rayleigh ----//
+   //NOTE: Rayleigh scattering dominates the atmospheric attenuation, and thus variations in the model predictions are almost entirely due to pressure (and theta)
+   float mR=1.f/(cos(theta)+0.48353*pow(theta*180/Math.PI,0.095846)/pow(96.741-theta*180/Math.PI,1.754));
+ 
+   float mR_p=mR*pressure/101325;
+ 
+   float TR_PAR=(1.f+1.8169*mR_p-0.033454*mR_p*mR_p)/(1.f+2.063*mR_p+0.31978*mR_p*mR_p);
+   Transmissivity = TR_PAR; 
+   float TR_NIR=(1.f-0.010394*mR_p)/(1.f-0.00011042*mR_p*mR_p);
+ 
+   //---- Uniform gasses ----//
+   mR=1.f/(cos(theta)+0.48353*pow(theta*180/Math.PI,0.095846)/pow(96.741-theta*180/Math.PI,1.754));
+ 
+   mR_p=mR*pressure/101325;
+ 
+   float Tg_PAR=(1.f+0.95885*mR_p+0.012871*mR_p*mR_p)/(1.f+0.96321*mR_p+0.015455*mR_p*mR_p);
+ 
+   float Tg_NIR=(1+0.27284*mR_p-0.00063699*mR_p*mR_p)/(1.f+0.30306*mR_p);
+ 
+   float BR_PAR=0.5*(0.89013-0.0049558*mR+0.000045721*mR*mR);
+ 
+   float BR_NIR=0.5;
+ 
+   float Ba=1-exp(-0.6931-1.8326*cos(theta));
+ 
+   //---- Ozone -----//
+   float uo=(235+(150+40*sin(0.9856*(dayOfYear-30)*Math.PI/180.f)+20*sin(3*(longitude*Math.PI/180.f+20)))*pow(sin(1.28*latitude*Math.PI/180.f),2))*0.001f; //O3 atm-cm
+   //NOTE: uo model from van Heuklon (1979)
+   float mo=m;
+ 
+   float f1=uo*(10.979-8.5421*uo)/(1.f+2.0115*uo+40.189*uo*uo);
+   float f2=uo*(-0.027589-0.005138*uo)/(1.f-2.4857*uo+13.942*uo*uo);
+   float f3=uo*(10.995-5.5001*uo)/(1.f+1.678*uo+42.406*uo*uo);
+   float To_PAR=(1.f+f1*mo+f2*mo*mo)/(1.f+f3*mo);
+ 
+   float To_NIR=1.f;
+ 
+   //---- Nitrogen ---- //
+   float un=0.0002; //N atm-cm
+   float mw=1.f/(cos(theta)+1.065*pow(theta*180/Math.PI,1.6132)/pow(111.55-theta*180/Math.PI,3.2629));
+ 
+   float g1=(0.17499+41.654*un-2146.4*un*un)/(1+22295*un*un);
+   float g2=un*(-1.2134+59.324*un)/(1.f+8847.8*un*un);
+   float g3=(0.17499+61.658*un+9196.4*un*un)/(1.f+74109*un*un);
+   float Tn_PAR= min(1.f,(1.f+g1*mw+g2*mw*mw)/(1.f+g3*mw));
+   float Tn_PAR_p=min(1.f,(1.f+g1*1.66+g2*1.66*1.66)/(1.f+g3*1.66));
+ 
+   float Tn_NIR=1.f;
+   float Tn_NIR_p=1.f;
+ 
+   //---- Water -----//
+   float gamma=log(humidity)+17.67*(Tk-273)/(243+25);
+   float tdp=243*gamma/(17.67-gamma)*9/5+32;//dewpoint Tk in Fahrenheit
+   float w=exp((0.1133-log(4.0+1))+0.0393*tdp); //cm of precipitable water
+   //NOTE: precipitable water model from Viswanadham (1981), Eq. 5
+   mw=1.f/(cos(theta)+1.1212*pow(theta*180/Math.PI,0.6379)/pow(93.781-theta*180/Math.PI,1.9203));
+ 
+   float h1=w*(0.065445+0.00029901*w)/(1.f+1.2728*w);
+   float h2=w*(0.065687+0.0013218*w)/(1.f+1.2008*w);
+   float Tw_PAR=(1.f+h1*mw)/(1.f+h2*mw);
+   float Tw_PAR_p=(1.f+h1*1.66)/(1.f+h2*1.66);
+ 
+   float c1=w*(19.566-1.6506*w+1.0672*w*w)/(1.f+5.4248*w+1.6005*w*w);
+   float c2=w*(0.50158-0.14732*w+0.047584*w*w)/(1.f+1.1811*w+1.0699*w*w);
+   float c3=w*(21.286-0.39232*w+1.2692*w*w)/(1.f+4.8318*w+1.412*w*w);
+   float c4=w*(0.70992-0.23155*w+0.096541*w*w)/(1.f+0.44907*w+0.75425*w*w);
+   float Tw_NIR=(1.f+c1*mw+c2*mw*mw)/(1.f+c3*mw+c4*mw*mw);
+   float Tw_NIR_p=(1.f+c1*1.66+c2*1.66*1.66)/(1.f+c3*1.66+c4*1.66*1.66);
+ 
+   //---- Aerosol ----//
+   float ma=1.f/(cos(theta)+0.16851*pow(theta*180/Math.PI,0.18198)/pow(95.318-theta*180/Math.PI,1.9542));
+   float ua=log(1.f+ma*beta);
+ 
+   float d0=0.57664-0.024743*alpha_x;
+   float d1=(0.093942-0.2269*alpha_x+0.12848*alpha_x*alpha_x)/(1.f+0.6418*alpha_x);
+   float d2=(-0.093819+0.36668*alpha_x-0.12775*alpha_x*alpha_x)/(1.f-0.11651*alpha_x);
+   float d3=alpha_x*(0.15232-0.08721*alpha_x+0.012664*alpha_x*alpha_x)/(1.f-0.90454*alpha_x+0.26167*alpha_x*alpha_x);
+   float lambdae_PAR=(d0+d1*ua+d2*ua*ua)/(1.f+d3*ua*ua);
+   float Ta_PAR=exp(-ma*beta*pow(lambdae_PAR,-alpha_x));
+ 
+   float e0 = (1.183-0.022989*alpha_y+0.020829*alpha_y*alpha_y)/(1.f+0.11133*alpha_y);
+   float e1 = (-0.50003-0.18329*alpha_y+0.23835*alpha_y*alpha_y)/(1.f+1.6756*alpha_y);
+   float e2 = (-0.50001+1.1414*alpha_y+0.0083589*alpha_y*alpha_y)/(1.f+11.168*alpha_y);
+   float e3 = (-0.70003-0.73587*alpha_y+0.51509*alpha_y*alpha_y)/(1.f+4.7665*alpha_y);
+   float lambdae_NIR = (e0+e1*ua+e2*ua*ua)/(1.f+e3*ua);
+   float Ta_NIR=exp(-ma*beta*pow(lambdae_NIR,-alpha_y));
+ 
+   float omega_PAR=1.0;
+   float omega_NIR=1.0;
+ 
+   float Tas_PAR=exp(-ma*omega_PAR*beta*pow(lambdae_PAR,-alpha_x));
+ 
+   float Tas_NIR=exp(-ma*omega_NIR*beta*pow(lambdae_NIR,-alpha_y));
+ 
+   //global irradiation
+   Eb_PAR=TR_PAR*Tg_PAR*To_PAR*Tn_PAR*Tw_PAR*Ta_PAR*E0_PAR;
+   Eb_NIR=TR_NIR*Tg_NIR*To_NIR*Tn_NIR*Tw_NIR*Ta_NIR*E0_NIR;
+   Eb=Eb_PAR+Eb_NIR;
+ 
+   //diffuse irradiation
+   float Edp_PAR=To_PAR*Tg_PAR*Tn_PAR_p*Tw_PAR_p*(BR_PAR*(1.f-TR_PAR)*pow(Ta_PAR,0.25)+Ba*TR_PAR*(1.f-pow(Tas_PAR,0.25)))*E0_PAR;
+   float Edp_NIR=To_NIR*Tg_NIR*Tn_NIR_p*Tw_NIR_p*(BR_NIR*(1.f-TR_NIR)*pow(Ta_NIR,0.25)+Ba*TR_NIR*(1.f-pow(Tas_NIR,0.25)))*E0_NIR;
+   float Edp=Edp_PAR+Edp_NIR;
+ 
+   //diffuse fraction
+   //float fdiff_PAR=Edp_PAR/Eb_PAR;
+   //float fdiff_NIR=Edp_NIR/Eb_NIR;
+   fdiff = Edp/Eb;
+ 
+   //fraction can't be greater than 1.0
+   if( fdiff>1.0 ){
+     fdiff=1;
+   }
+ 
+   //fraction can't be less than 0
+   if( fdiff<0 ){
+     fdiff=0;
+   }
+  
+   
+	 Eb_PAR = Eb_PAR * WATT_TO_PPFD;
+	 Eb_NIR = Eb_NIR * WATT_TO_PPFD;
+	 Eb = Eb_PAR + Eb_NIR;
+	 
+  
+     
+ }
+ 
+ float getAmbientLongwaveFlux( float Tk,  float humidity ){
+ 
+   //Model from Prata (1996) Q. J. R. Meteorol. Soc.
+ 
+   float e0 = 611.f*exp(17.502f*(Tk-273.f)/((Tk-273.f)+240.9f))*humidity; //Pascals
+ 
+   float K = 0.465f; //cm-K/Pa
+ 
+   float xi = e0/Tk*K;
+   float eps = 1.f-(1.f+xi)*exp(-sqrt(1.2f+3.f*xi));
+ 
+   return eps*5.67e-8*pow(Tk,4);
+ 
+ }
+
+/* 
+	Correction for fraction of diffuse radiation based on clearness index kt
+	kt is calculated based on the ratio between the measured radiation and the 
+	theorectical total radiation of that day. 
+	The method we adopted is Erbs model (ER)  1982, which is a multible regression
+	between direct and global radiance data.
+	
+	coefficient need calibration for each location
+*/
+ static void calcFdiff(float kt, float zenith){
+ 	float projection =  Math.cos(toRadians(zenith));
+ 	if(projection < 0.1) {fdiff = 1.0;}
+ 	
+ 	else if(projection >= 0.1 && kt <= 0.22) {fdiff = 1 - 0.09 * kt;}
+ 	else if(projection >= 0.1 && kt > 0.22 && kt <= 0.8 ) 
+ 		{fdiff = 0.9511 - 0.1604*kt + 4.39 * Math.pow(kt,2) - 16.64 * Math.pow(kt,3) + 12.34 * Math.pow(kt,4); }
+ 	//else fdifss will keep the same as from the clear sky calculation. 
+ 	//assume all lights are diffuse radiation for low solar angles, like 6AM, this
+ 	//aim to reduce the side effects on fabs being too high for low angles.
+ 	if(90 - zenith <= 15) {fdiff = 1.0;}
+ }
+ 
+	/**
+After adopting the solar angle calculation in the package of et.e175.klaus.solarpositioning,
+Solar Position Algorithm (SPA)
+we use the same convention as in the paper1.  
+1. azimuth the topocentric azimuth angle, range from 0° to 360° , measured eastward from north.
+2. the topocentric zenith angle, θ (in degrees), the declination angle from the zenith to the sun.
+sun angle above the horizontal plane is 90 – zenith. 
+Thus, for direct radiation, we define the positive direction of global X-axis (
+local x-axis of the light node as well) as the EAST direction,  and 
+negative direction of the global y-axis (positive direction of the local z axis of the light node) as the NORTH direction. 
+See the following screenshot of the axis. So RU(0) is the north direction and RU(180) is the south direction. 
+*/
+static void updateSolarPosition(int year, int month, int dayOfMonth, 
+							  int hourOfDay, float lat, float lon, float elv, 
+							  float airPressure, float Ta) {
+	//hour of day minus 1 is because the current hourOfDay starts from 0, 12 o'clock represent the hourly mean condition between 11 to 12. 
+	/* GregorianCalendar dateTime = new GregorianCalendar(year, month, dayOfMonth, hourOfDay-1, 30, 0);
+	//setTime zone remove the daylight issue
+	String utcOffset = getTimeZoneOffset(longitude);
+	*/
+	//if (printFlag) { println("time " + dateTime.getTimeZone()); }
+		
+	// Adjust hourOfDay for mean hourly condition and create the calendar
+	GregorianCalendar dateTime = new GregorianCalendar(year, month, dayOfMonth, hourOfDay-1, 30, 0);
+	 // Calculate UTC offset in milliseconds based on longitude
+     int offsetHours = Math.round(longitude / 15f);  // Longitude to hours
+     int offsetMillis = offsetHours * 60 * 60 * 1000;  // Hours to milliseconds
+     
+     // Create a custom time zone based on the calculated offset
+     SimpleTimeZone customTimeZone = new SimpleTimeZone(offsetMillis, "Custom Time Zone");
+     dateTime.setTimeZone(customTimeZone);
+        
+	// Set the time zone based on the calculated UTC offset
+/* 	String utcOffset = getTimeZoneOffset(longitude);  // Ensure this function is accurate
+	TimeZone timeZone = TimeZone.getTimeZone("Pacific/Auckland");
+    dateTime.setTimeZone(timeZone); */
+	
+	// Print out to verify
+/* 	if (printFlag) { println("DateTime: " + dateTime.getTime()); }
+	if (printFlag) { println("Time Zone: " + timeZone.getDisplayName()); }
+	println("UTC Offset: " + utcOffset); */
+					   
+                           
+    solarPosition = SPA.calculateSolarPosition(
+                                            dateTime,
+                                            lat, // latitude (degrees)
+                                            lon, // longitude (degrees)
+                                            elv, // elevation (m)
+                                            DeltaT.estimate(dateTime), // delta T (s)
+                                            airPressure, // avg. air pressure (hPa)
+                                            Ta); // avg. air temperature (°C)
+    
+	azimuth = solarPosition.getAzimuth();
+	zenith = solarPosition.getZenithAngle();
+	solarElevation = 90 - zenith;
+	
+	//if (printFlag) { println(" hourOfDay " + hourOfDay + " SPA: " + solarPosition +" " + " solarElevation " + solarElevation + "_cos(Zenith)_" + cos(toRadians(zenith))); }
+	//if (printFlag) { println(" SPA: " + solarPosition); }
+	GregorianCalendar[] sunriseTransitSet = SPA.calculateSunriseTransitSet(
+                                    dateTime, 
+                                    lat, // latitude (degrees)
+                                    lon, // longitude (degrees)
+                                    DeltaT.estimate(dateTime));// delta T
+                                    
+	  
+	int sunriseHour = sunriseTransitSet[0].get(Calendar.HOUR_OF_DAY);
+	int sunriseMin = sunriseTransitSet[0].get(Calendar.MINUTE);
+	int sunsetHour = sunriseTransitSet[2].get(Calendar.HOUR_OF_DAY);
+	int sunsetMin = sunriseTransitSet[2].get(Calendar.MINUTE);
+	//hourOfDay starts from 0, 7 o'clock represent the hourly mean condition between 6 to 7. thus larger than the sunrise hour is better
+	sunriseTime = round(sunriseHour + sunriseMin/60f);
+	sunsetTime = round(sunsetHour + sunsetMin/60f);
+	dayLength = sunsetTime - sunriseTime;  
+	       // Print out all the details
+     /*    if (printFlag) { println("Sunrise Hour: " + sunriseHour); }
+        if (printFlag) { println("Sunrise Minute: " + sunriseMin); }
+        if (printFlag) { println("Sunset Hour: " + sunsetHour); }
+        if (printFlag) { println("Sunset Minute: " + sunsetMin); }
+        if (printFlag) { println("Sunrise Time (decimal): " + sunriseTime); }
+        println("Sunset Time (decimal): " + sunsetTime); */
+        
+
+        
+	//if (printFlag) { println("sunriseTime " + sunriseTime + "sunsetTime " + sunsetTime); }
+	daytime = calcDaytime(hourOfDay,sunriseTime, sunsetTime);
+	
+	
+/* 		println("Year: " + year +
+		   ", Month: " + month +
+		   ", Day: " + dayOfMonth +
+		   ", Hour: " + hourOfDay +
+		   ", Latitude: " + latitude +
+		   ", Longitude: " + longitude +
+		   ", Elevation: " + elevation +
+		   ", Air Pressure: " + airPressure +
+		   ", Temperature: " + Ta +
+		   ", Day Length: " + dayLength + " hours"); */
+		   
+	// can use this when needed
+	if(inputEnvironmentCondition == false)  //only for clear sky 
+	{
+		GueymardSolarModel(airPressure, Tk, rh, turbidity);
+		if(solarElevation < 10) fdiff = 1;
+		
+		CategoryStore config = ((DocumentCategoryNameGroup) CONFIG.getGroup(FILE_NAME_MODEL_OPTIONS, 
+			DocumentCategoryNameGroup.class)).getCategoryStore();
+			config.setCategoryContext("mean_climate");
+		
+		if(inputRadiation == false) {
+			fPAR = Math.max(0.45, Eb_PAR / Eb);	
+			globalRadiation = Eb * cos(toRadians(zenith));
+			if (isLightTreatmentActiveByDAWS(daysSinceWinterSolstice)) {
+				double originalRadiation = globalRadiation;
+				globalRadiation *= modelOptions.lightTreatmentIntensity;
+				if (printFlag && step <= 1) {
+					println("[LightTreatment] step=" + step + " DAWS=" + daysSinceWinterSolstice + " window=" + modelOptions.lightTreatmentStartDAWS + "-" + modelOptions.lightTreatmentEndDAWS + " originalRadiation=" + originalRadiation + " scaledRadiation=" + globalRadiation + " intensity=" + modelOptions.lightTreatmentIntensity);
+				}
+			}
+		} else {
+			
+			fPAR = config.getDouble("inputfPAR", 0.5);
+			//temporary solution for HGU simulation with 15 hours of light
+			//maybe better to read the radiation data from a 24 hour cycle
+			
+			dayLength = config.getInteger("inputDayLength", 14);
+			sunriseTime = round(12 - dayLength/2);
+			sunsetTime = round(12 +  dayLength/2);
+			
+			daytime = calcDaytime(hourOfDay,sunriseTime, sunsetTime);
+			
+			globalRadiation = daytime ? config.getDouble("inputPAR", 1000)/fPAR : 0;
+			if (isLightTreatmentActiveByDAWS(daysSinceWinterSolstice)) {
+				double originalRadiation = globalRadiation;
+				globalRadiation *= modelOptions.lightTreatmentIntensity;
+				if (printFlag && step <= 1) {
+					println("[LightTreatment] step=" + step + " DAWS=" + daysSinceWinterSolstice + " window=" + modelOptions.lightTreatmentStartDAWS + "-" + modelOptions.lightTreatmentEndDAWS + " originalRadiation=" + originalRadiation + " scaledRadiation=" + globalRadiation + " intensity=" + modelOptions.lightTreatmentIntensity);
+				}
+			}
+			if(useDirectRadiation == true && useDiffuseRadiation == false) {
+				fdiff = 0;
+			} else if(useDirectRadiation == false && useDiffuseRadiation == true) {
+				fdiff = 1;
+			}
+			
+		}
+		
+		println("fdiff: " + fdiff);
+		
+		diffuseRadiation = globalRadiation * fdiff;
+		directRadiation = globalRadiation - diffuseRadiation;  
+	
+	}
+	
+	if(inputEnvironmentCondition == true) 
+	{
+		GueymardSolarModel(airPressure, Tk, rh, turbidity);
+		/** as GueymardSolarModel only deals with the calculations on sunny day, 
+			thus when adding fraction diffuse radiation calculation, the FPAR is incorrect.
+			so, fPAR_min = 0.45 is added based on search. 
+			The fraction of PAR in global radiation on a cloudy day might remain within the range of 45% to 55%, 
+			or potentially even higher, depending on the type, thickness, and altitude of the clouds, 
+			as well as other atmospheric conditions.
+		*/
+		double fPAR_min = 0.45;
+		fPAR = Math.max(fPAR_min, Eb_PAR / Eb);
+		kt = globalRadiation/(Eb * cos(toRadians(zenith)));  
+		calcFdiff(kt, zenith);
+		
+		if(useDirectRadiation == true && useDiffuseRadiation == false) {
+			fdiff = 0;
+		} else if(useDirectRadiation == false && useDiffuseRadiation == true) {
+			fdiff = 1;
+		}
+		
+		if(solarElevation < 10) fdiff = 1;
+		
+		diffuseRadiation = globalRadiation * fdiff;
+		directRadiation = globalRadiation - diffuseRadiation; 
+		
+		//, Eb * (1-fdiff)*cos(toRadians(zenith))
+		//println("fdiff: " + fdiff + " diffuseRadiation: " + diffuseRadiation + " directRadiation: " + directRadiation );
+	
+	}
+	
+}
+
+
+
+static int startStep;
+// Set start step for reading climate data based on start day and start year in parameter file.
+/**
+ * Compute the starting index (startStep) in climateList for the requested
+ * START_YEAR, START_DAY, and START_HOUR. If an exact match is not found,
+ * this returns the first index whose timestamp is AFTER the requested time.
+ * If the requested time is before the file begins, startStep = 0.
+ * If the requested time is after the file ends, startStep = last index.
+ *
+ * Assumptions:
+ * - climateList is a List (or Vector) of ClimateData sorted by time.
+ * - ClimateData has int fields: year, day (DOY, 1..365/366), hour (0..23).
+ * - Globals: START_YEAR, START_DAY, START_HOUR (ensure they’re set).
+ * - Uses UTC to serialize hours, consistent across DST / locales.
+ *
+ * Returns: computed startStep (also stored in the static field).
+ */
+static int setStartStep() {
+    if (climateList == null || climateList.size() == 0) {
+        startStep = 0;
+        if (printFlag) { println("climateList is empty; startStep=0"); }
+        return startStep;
+    }
+
+    // Clamp inputs to safe ranges
+    int yReq = START_YEAR;
+    int dReq = START_DAY;   // 1..366
+    int hReq = START_HOUR;  // 0..23
+    if (dReq < 1) dReq = 1;
+    if (hReq < 0) hReq = 0;
+    if (hReq > 23) hReq = 23;
+
+    // Serialize target time to an absolute hour (UTC) so leap years are handled
+    int targetKey = serializeHourUTC(yReq, dReq, hReq);
+
+    // Fast path: check file bounds
+    ClimateData first = (ClimateData) climateList.get(0);
+    ClimateData last  = (ClimateData) climateList.get(climateList.size() - 1);
+    int firstKey = serializeHourUTC(first.year, clampDOY(first.year, first.day), clampHour(first.hour));
+    int lastKey  = serializeHourUTC(last.year,  clampDOY(last.year,  last.day),  clampHour(last.hour));
+
+    if (targetKey <= firstKey) {
+        startStep = 0;
+    } else if (targetKey >= lastKey) {
+        startStep = climateList.size() - 1;
+    } else {
+        // Linear scan to first index >= target (safe, simple). Replace with binary search if needed.
+        int i, n = climateList.size();
+        startStep = n - 1; // fallback, should be overwritten
+        for (i = 0; i < n; i++) {
+            ClimateData cd = (ClimateData) climateList.get(i);
+            int key = serializeHourUTC(cd.year, clampDOY(cd.year, cd.day), clampHour(cd.hour));
+            if (key >= targetKey) {
+                startStep = i;
+                break;
+            }
+        }
+    }
+
+    // Guard for any off-by-one issues GroIMP sometimes triggers
+    if (startStep < 0) startStep = 0;
+    if (startStep >= climateList.size()) startStep = climateList.size() - 1;
+
+    if (printFlag) {
+        println("START_YEAR " + START_YEAR + " START_DAY " + START_DAY + " START_HOUR " + START_HOUR);
+        println("climate data length " + climateList.size());
+        println("startStep " + startStep
+                + " -> (" + ((ClimateData) climateList.get(startStep)).year
+                + ", DOY " + ((ClimateData) climateList.get(startStep)).day
+                + ", H " + ((ClimateData) climateList.get(startStep)).hour + ")");
+    }
+    return startStep;
+}
+
+/** Serialize (year, DOY, hour) to absolute UTC hours since epoch; Java 1.5–safe. */
+private static int serializeHourUTC(int year, int doy, int hour) {
+    java.util.Calendar c = java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone("UTC"));
+    c.clear();
+    c.set(java.util.Calendar.YEAR, year);
+    // Clamp DOY to that year’s maximum to avoid IllegalArgument for 366 on non-leap years
+    int maxDOY = c.getActualMaximum(java.util.Calendar.DAY_OF_YEAR);
+    if (doy < 1) doy = 1;
+    if (doy > maxDOY) doy = maxDOY;
+    c.set(java.util.Calendar.DAY_OF_YEAR, doy);
+    if (hour < 0) hour = 0;
+    if (hour > 23) hour = 23;
+    c.set(java.util.Calendar.HOUR_OF_DAY, hour);
+    long ms = c.getTimeInMillis();
+    long h  = ms / 3600000L;
+    return (int) h; // safe for years near 1900–2100
+}
+
+private static int clampDOY(int year, int doy) {
+    java.util.Calendar c = java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone("UTC"));
+    c.clear();
+    c.set(java.util.Calendar.YEAR, year);
+    int max = c.getActualMaximum(java.util.Calendar.DAY_OF_YEAR);
+    if (doy < 1) return 1;
+    if (doy > max) return max;
+    return doy;
+}
+
+private static int clampHour(int hour) {
+    if (hour < 0) return 0;
+    if (hour > 23) return 23;
+    return hour;
+}
+	
+
+
+
+/**
+ * This method converts either the soilWater_Potential or soilWater_content 
+ * ArrayList from a given ClimateData object into a double array.
+ *
+ * @param currentClimate A ClimateData object containing the soil water fields.
+ * @param fieldType A string to specify the field type, either "potential" or "content".
+ * @return soilWaterArray A double array containing the soil water values.
+ */
+static double[] convertSoilWaterToArray(ClimateData currentClimate, String fieldType) {
+    if (currentClimate == null) {
+        return new double[0];  // Return an empty array if null
+    }
+    
+    ArrayList soilWaterObj = null;
+    
+    if ("potential".equals(fieldType)) {
+        soilWaterObj = (ArrayList) currentClimate.soilWater_potential;
+    } else if ("content".equals(fieldType)) {
+        soilWaterObj = (ArrayList) currentClimate.soilWater_content;
+    } else {
+        return new double[0];  // Return an empty array if fieldType is neither "potential" nor "content"
+    }
+    
+     // Check if the ArrayList is null
+    if (soilWaterObj == null) {
+        return new double[0];  // Return an empty array if the ArrayList is null
+    }
+    
+    // Initialize a double array with the size of the ArrayList
+    double[] soilWaterArray = new double[soilWaterObj.size()];
+    
+    // Populate the double array with values from the ArrayList
+    for (int i = 0; i < soilWaterObj.size(); i++) {
+        soilWaterArray[i] = Double.parseDouble(soilWaterObj.get(i).toString());
+    }
+    
+    // Return the populated double array
+    return soilWaterArray;
+}
+
+/**
+ * Updates the environmental variables based on either input data or preset values.
+ * <p>
+ * The method reads from a list of ClimateData objects to update various environmental
+ * variables, such as air temperature, relative humidity, and soil water content. If
+ * input data is not provided, the method uses preset values for these variables.
+ * </p>
+ * 
+ * <h3>Workflow:</h3>
+ * <ol>
+ *   <li>If inputEnvironmentCondition is true, the method attempts to read from the climateList.</li>
+ *   <li>Updates year, day of the year, hour of the day, air temperature (Ta), relative humidity (rh),
+ *       total radiation, CO2 concentration (cca), and wind speed from the ClimateData object.</li>
+ *   <li>If soil water potential input is enabled, calculates mean soil water potential; otherwise,
+ *       updates soil water content.</li>
+ *   <li>Handles IndexOutOfBoundsException if errors occur in data reading.</li>
+ *   <li>Updates thermal time after bud burst and optionally reads rainfall data.</li>
+ *   <li>Converts the year and day of the year to the month and day of the month for solar calculations.</li>
+ * </ol>
+ * 
+ * @throws IndexOutOfBoundsException If an error occurs during reading from the climateList.
+ * 
+ * @see ClimateData
+ */
+
+static void updateEnvironment()
+{
+	 
+	if(inputEnvironmentCondition == true) 
+	  {	
+		 try {				 
+			// Get the ClimateData object for the current step and cast it to ClimateData
+			ClimateData currentClimate = (ClimateData) climateList.get(step);		
+			// Extract the required fields from the ClimateData object
+			year = currentClimate.year;
+			dayOfYear = currentClimate.day;
+			hourOfDay = currentClimate.hour;
+			timestamp = getTimestamp(year, dayOfYear, hourOfDay);
+			daysSinceWinterSolstice = calcDaysSinceWinterSolstice(year, dayOfYear, latitude); 		
+			Ta = currentClimate.temp;   //step start from zero or 20 constant
+			Tk = 273.15 + Ta; 
+			rh = currentClimate.rh;   // 
+			globalRadiation = currentClimate.totalRadiation;
+			if (isLightTreatmentActiveByDAWS(daysSinceWinterSolstice)) {
+				double originalRadiation = globalRadiation;
+				globalRadiation *= modelOptions.lightTreatmentIntensity;
+				if (printFlag && step <= 1) {
+					println("[LightTreatment] step=" + step + " DAWS=" + daysSinceWinterSolstice + " window=" + modelOptions.lightTreatmentStartDAWS + "-" + modelOptions.lightTreatmentEndDAWS + " originalRadiation=" + originalRadiation + " scaledRadiation=" + globalRadiation + " intensity=" + modelOptions.lightTreatmentIntensity);
+				}
+			}
+			diffuseRadiation = globalRadiation * fdiff;
+			directRadiation = globalRadiation - diffuseRadiation;  
+		 
+			cca = currentClimate.CO2;
+			wind = currentClimate.wind;
+			rainfall = currentClimate.rainfall;
+			if(useSoilWaterBalanceModel== false) { 
+				if(inputSoilWaterPotential == true) {
+					soilWaterPotentialArray = convertSoilWaterToArray(currentClimate, "potential");
+					//if (printFlag) { println(Arrays.toString(soilWaterPotentialArray)); }
+					inputWaterPotential = mean(Arrays.copyOfRange(soilWaterPotentialArray, 0, numofSoilLayers));
+					
+					} else {
+						soilWaterContentArray = convertSoilWaterToArray(currentClimate, "content");
+					}
+				} 
+				} catch (IndexOutOfBoundsException e) {	
+						if (printFlag) { println("Error in reading the year, day of year, and hour of day"); }
+						throw e;
+			}
+			if(step == 0) {totalSoilDepth = sum((* s:Soil, (s[plantNumber] == 1) *)[length]); }
+		
+	
+		 /**
+		 * Updates thermal time after bud burst and rainfall based on current climate data.
+		 * <p>
+		 * Thermal time after bud burst is updated using Wang and Engel's temperature function.
+		 * Rainfall data is read from the climate array if available.
+		 * </p>
+		 */
+		 if (usePhenology == true) {	
+		 	 thermalTimeAfterBudBurst += extraTools.wangEngelTempFunction(Ta, MIN_TEMP, OPT_TEMP, MAX_TEMP,REFTMP)*DT;
+		 }
+	 
+		 /**
+		 * Converts year and day of year to month and day of month for solar positions calculation.
+		 * <p>
+		 * The conversion is avoided in the first column (row 0) to prevent errors.
+		 * </p>
+		 */
+		
+			 Year y = Year.of(year) ;
+			 LocalDate ld = y.atDay(dayOfYear); 
+			 month = ld.getMonthValue();
+			 dayOfMonth = ld.getDayOfMonth();
+			 
+			 leaf.Leaf.HYDROLYSIS_LEAF_NIGHT = calcHourlyDegradationRate(dayLength);
+		 	 	 
+	} //end of input Environment	 
+
+		 			
+	if(inputEnvironmentCondition == false)
+	   {
+		  if (step <= 0) {
+			  year = START_YEAR;
+		  }
+		  hourOfDay++;
+		  if(hourOfDay >= 24) {
+			  hourOfDay = 0;
+			  dayOfYear++;
+			  Year yearForWrap = Year.of(year);
+			  if (dayOfYear > yearForWrap.length()) {
+				  dayOfYear = 1;
+				  year++;
+			  }
+		  }
+		  Year y = Year.of(year) ;
+		  LocalDate ld = y.atDay(dayOfYear); 
+		  month = ld.getMonthValue();
+		  dayOfMonth = ld.getDayOfMonth();	
+		  daysSinceWinterSolstice = calcDaysSinceWinterSolstice(year, dayOfYear, latitude);
+		  timestamp = getTimestamp(year, dayOfYear, hourOfDay);
+	   	  Ta = calcTemperature(Tmax, Tmin);
+		  rh = calcHumidity(RHmax, RHmin);
+		  Tk = Ta + 273.15;
+		   
+		  rainfall = 0;
+	   }
+	   	  	
+	
+	// Each timestep (no reloads; clean call-site)
+	// load the shading factor as global parameter; helpers return neutral 1.0 ratios when disabled
+	fLow = getFabsLowRatioOrOne(year, dayOfYear, hourOfDay);
+	fMid = getFabsMidRatioOrOne(year, dayOfYear, hourOfDay);
+	fUp  = getFabsUpRatioOrOne(year, dayOfYear, hourOfDay);
+	fabsFarRedCorrection = getFabsFarRedCorrectionOrOne(year, dayOfYear, hourOfDay);
+	/* if (printFlag && step < 9) {
+		println(formatActiveShadingFactorDebugRow("[SFT] active", year, dayOfYear, hourOfDay));
+	}
+	 */
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

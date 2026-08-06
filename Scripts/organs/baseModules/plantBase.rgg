@@ -1,0 +1,1680 @@
+import java.util.Arrays;
+import java.util.ArrayList;
+import java.util.List;
+
+import static main.*;
+import static absOrgan.*;
+import static globalParameters.*;
+import static plantParameters.*;
+import static modelOptions.*;
+import static initialConditions.*;
+import static environment.*;
+import static extraTools.*;
+import static java.lang.Math.*;
+import static rootSystem.*;
+import static soil.*;
+import static leaf.*;
+import static shoot.*;
+import static fruitBase.*;
+import static fineRoot.*;
+import static structuralRoot.*;
+import static flowerBase.*;
+import static fieldBase.*;
+import static shootBase.*;
+
+/**
+ * This module contains plant-wide identifier variables.
+ * These variables are used to identify and characterize plants in a field.
+ */
+module PlantIdentifier extends Node 
+{
+    /**
+     * Represents the plant number in the field.
+     */
+    int plantNumber; // plant number in the field
+
+    /**
+     * Indicates whether the plant is a border plant (true) or a focal plant (false).
+     */
+    boolean border; // true: border plant, false: focal plant
+
+    /**
+     * Represents the strip number.
+     */
+    int strip; // strip number
+
+    /**
+     * Represents the row number.
+     */
+    int row; // row number
+
+    /**
+     * Represents the position within the row.
+     */
+    int pos; // position within row
+
+    /**
+     * Represents the species of the plant.
+     */
+    String species;
+    /** True for the original field domain that may be reported to outputs. */
+    boolean isReportable = true;
+    /** Field instance identifier; original field = 0, clones > 0. */
+    int fieldInstanceId = 0;
+	
+	 /**
+     * Initializes the plant with the provided parameters.
+     *
+     * @param i      The plant number.
+     * @param row    The row number.
+     * @param pos    The position within the row.
+     * @param strip  The strip number.
+     * @param species The species name.
+     */
+	void initiate(int i, int row, int pos, int strip, String species)
+	{
+		// assign plant number
+		this.plantNumber = i;		
+		// assign strip number
+		this.strip = strip;
+		// assign row number
+		this.row = row;
+		// assign position number
+		this.pos = pos;
+		// assign species name
+		this.species = species;
+		// assign border
+		assignBorder(row,pos,strip);
+	}
+	
+	/**
+     * Assigns whether the plant is a border plant based on its location in the plot.
+     *
+     * @param row   The row number.
+     * @param pos   The position within the row.
+     * @param strip The strip number.
+     */
+	void assignBorder(int row, int pos, int strip) {
+		if (strip == 1) {
+			if (row <= borderRows || pos <= borderPlants || pos > nrPlants - borderPlants) {
+				border = true;
+			}
+			
+		}
+		if (strip > 1 && strip < nrStrips) {
+			if (pos <= borderPlants || pos > nrPlants - borderPlants) {
+				border = true;
+			}
+		}
+		if (strip == nrStrips) {
+			if (row > nrRows - borderRows || pos <= borderPlants || pos > nrPlants - borderPlants) {
+				border = true;
+			}
+		}
+	}
+	
+} ==> Sphere(0.01).(setShader(border?RED:YELLOW));
+
+
+/**
+ * The `PlantBase` class serves as the core modeling component for simulating a plant's life cycle, 
+ * physiological processes, and interactions with environmental conditions. This class extends the `PlantIdentifier` 
+ * class and incorporates a myriad of plant-related attributes for simulating plant behavior, such as growth rates,
+ * age, water and carbon flux, and more.
+ * It solves the actual water flux and phloem carbon concentration at plant level under a certain soil water potential and environemntal conditions
+ * This class adheres to the ODD (Object Design Description) principle for documentation.
+ *
+ * @author junqi zhu
+ * @version 1.0
+ *
+ * Attributes:
+ * ------------
+ * - age, ageD, ageGdd: Various forms of representing the age of the plant.
+ * - biomass, biomassLeaf, biomassFineRoot, etc.: Metrics to track the biomass in different plant organs.
+ * - leafNSC, internodeNSC, etc.: Non-Structural Carbohydrate (NSC) content in various plant organs.
+ * - maintenanceDM, growthCost, carbonMobilizationCost: Substrate costs related to different physiological activities.
+ * - leafArea, plantHeight: Physical dimensions of the plant.
+ * - leafRad, leafPAR, fabs, fpar, etc.: Metrics related to light and radiation absorption.
+ * - assimilatedCO2, carbonAssimilation, meanAnet, meanPAnet: Metrics related to carbon assimilation and photosynthesis.
+ * - sugarConcentration_phloem, totalLoading, totalUnloading, etc.: Variables related to phloem transport.
+ * - nitrogenCommonPool: Common pool of nitrogen available to the plant.
+ *
+ * Methods:
+ * --------
+ * - initiate(): Initializes the plant with given parameters such as row position, plant number, etc.
+ * - addRootBase(): Adds a root base to the plant.
+ * - calcAge(): Calculates the plant's age based on environmental conditions.
+ * - updateWaterFlux(): Updates the water flux of the plant based on environmental conditions.
+ * - updateCarbonAssimilation(): Calculates the carbon assimilation of the plant based on environmental conditions.
+ * - updateWaterPotential(): Calculates the water potential considering Munch counter flow.
+ * - getLeafStatus(): Retrieves and stores various attributes of individual leaves.
+ * - shouldCalcWaterFlux(): Determines whether to commence water flux and photosynthesis calculations.
+ * - calcActualWaterFlux(): Calculates the actual water flux using an iterative solver.
+ * - calcphloemSugarConcentration(): Calculates the phloem concentration of carbon compounds in the plant.
+ *
+ */
+module PlantBase extends PlantIdentifier
+{
+	/** Preserve saved-graph compatibility across the transport-facade addition. */
+	private static final long serialVersionUID = 2880287385063320302L;
+
+	//the groimp unique node id of itself, can also use getId() function
+	long nodeID;
+	/** the id of RootBase objects */
+	long rbID;
+	
+	protected RootBase getRootBase() {
+		if (rbID > 0) {
+			Node n = (Node) graph().getNodeForId(rbID);
+			if (n instanceof RootBase) {
+				return (RootBase) n;
+			}
+		}
+		return null;
+	}
+	
+	
+	
+	/** the id of trunk or first internode connected to plantbase */
+	long childTrunkID;
+	long childStructuralRootID;
+	/** Target mean leaf area from plant-bud-property (m2 leaf-1); <=0 disables size scaling. */
+	public double meanLeafAreaTarget_m2 = 0.0;
+	
+	protected Internode getChildInternode() {
+		if (childTrunkID > 0) {
+			Node n = (Node) graph().getNodeForId(childTrunkID);
+			if (n instanceof Trunk) {
+				return (Trunk) n;
+			} else if (n instanceof Internode) {
+				return (Internode) n;
+			}
+		}
+		return null;
+	}
+	
+	protected StructuralRoot getChildStructuralRoot() {
+		if (childStructuralRootID > 0) {
+			Node n = (Node) graph().getNodeForId(childStructuralRootID);
+			if (n instanceof StructuralRoot) {
+				return (StructuralRoot) n;
+			} 
+		}
+		return null;
+	}
+	
+	/**
+	* The age of the organ in the previous time step (in dd).
+	*/
+	double agePrevious;
+	/**
+	* The organ age in terms of effective growing days adjusted for temperature effects.
+	*/
+	public double age;
+	/**
+	* The organ age in days.
+	*/
+	public double ageD;
+	/**
+	* The organ age in growing degree days.
+	*/
+	double ageGdd;
+	
+	/**
+	* The organ age in growing degree days at the start of the simulation.
+	*/
+	double ageGdd_start;
+	
+	/**
+	* The developmental age of the organ.
+	*/
+	float devAge;
+	/**
+	* The total plant biomass including all organs and reserves (in mg).
+	*/
+	public double biomass;
+	/**
+	* Biomass of the organ for checking biomass changes in each step (in mg).
+	*/
+	double biomassPre;
+	/**
+	* Accumulated biomass for checking (in mg).
+	*/
+	public double accBiomass;
+	/**
+	* Accumulated shoot cost for checking (in mg).
+	*/
+	//double accShootCost;
+	/**
+	* Biomass of leaves (in mg).
+	*/
+	public double biomassLeaf;
+	/**
+	* Biomass of fine roots (in mg).
+	*/
+	public double biomassFineRoot;
+	/**
+	* Biomass of structural roots (in mg).
+	*/
+	public double biomassStructuralRoot;
+	
+	
+	/**
+	* Biomass of internodes (in mg).
+	*/
+	double biomassInternode;
+	/**
+	* Biomass of cordons (in mg).
+	*/
+	double biomassCordon;
+	/**
+	* Biomass of all berries (in mg).
+	*/
+	double biomassFruit;
+	/**
+	* Biomass of all flowers (in mg).
+	*/
+	double biomassFlower;
+	
+	/**
+	* Fresh weight of berries.
+	*/
+	double freshWeightFruit;
+	/**
+	* Biomass of the trunk (in mg).
+	*/
+	double biomassTrunk;
+	/**
+	* Biomass of all perenniel wood (in mg).
+	*/
+	double biomassPerennielWood;
+	/**
+	* NSC (Non-Structural Carbohydrate) content in leaves (in mg).
+	*/
+	double leafNSC;
+	/**
+	* mean NSC content in internodes with age smaller than 365 days (in mg).
+	*/
+	double internodeNSC;
+	/**
+	* NSC content in cordons (in mg).
+	*/
+	double cordonNSC;
+	/**
+	* NSC content in the trunk (in mg).
+	*/
+	double trunkNSC;
+	/**
+	* NSC content in fine roots (in mg).
+	*/
+	double fineRootNSC;
+	/**
+	* NSC content in structural roots (in mg).
+	*/
+	double structuralRootNSC;
+	/** Flower self-assimilation carbon summed over plant (mg C h-1). */
+	double flowerSelfAssimC;
+	/** Number of dropped flowers at current step (-). */
+	int droppedFlowerCount;
+	/** Number of total flowers at current step (-). */
+	int totalFlowerCount;
+	/**
+	* Sugar content of berries.
+	*/
+	double berrySugar;
+	/**
+	* Total carbon content in the plant.
+	*/
+	double carbon_total;
+	/**
+	* Substrates used for dry matter maintenance (in mg/hour).
+	*/
+	double maintenanceDM;
+	/**
+	* Substrates used for reserve (in mg/hour).
+	*/
+	double reserveDM;
+	
+	/**
+	* Substrates used for leaf maintenance respiration (in mg/hour).
+	*/
+	double maintenanceLeaf;
+	
+	/**
+	* "Cost associated with maintaining internodes, measured in mg/hour."
+	*/
+	double maintenanceInternode;
+	
+	/**
+	* "Cost associated with maintaining fruit, measured in mg/hour."
+	*/
+	double maintenanceFruit;
+	
+	/**
+	* "Cost associated with maintaining fine roots, measured in mg/hour."
+	*/
+	double maintenanceFineRoot;
+	
+	/**
+	* "Cost associated with maintaining structural roots, measured in mg/hour."
+	*/
+	double maintenanceStructuralRoot;
+
+	/** Secondary structural growth demand for cordons (mg C h-1). */
+	double cordonStructureDM_SEC;
+	/** Secondary structural growth demand for trunks (mg C h-1). */
+	double trunkStructureDM_SEC;
+	/** Secondary structural growth demand for cordon plus trunk (mg C h-1). */
+	double perennielWoodStructureDM_SEC;
+	/** Secondary structural growth demand for structural roots (mg C h-1). */
+	double structuralRootStructureDM_SEC;
+
+	/** Maintenance demand for cordons (mg C h-1). */
+	double cordonMaintenanceDM;
+	/** Maintenance demand for trunks (mg C h-1). */
+	double trunkMaintenanceDM;
+	/** Maintenance demand for cordon plus trunk (mg C h-1). */
+	double perennielWoodMaintenanceDM;
+	/** Maintenance demand for structural roots (mg C h-1). */
+	double structuralRootMaintenanceDM;
+
+	/** Reserve synthesis demand for cordons (mg C h-1). */
+	double cordonReserveDM;
+	/** Reserve synthesis demand for trunks (mg C h-1). */
+	double trunkReserveDM;
+	/** Reserve synthesis demand for cordon plus trunk (mg C h-1). */
+	double perennielWoodReserveDM;
+	/** Reserve synthesis demand for structural roots (mg C h-1). */
+	double structuralRootReserveDM;
+	
+	/**
+	* Cost for total growth (in mg/plant/hour).
+	*/
+	double growthCost;
+	
+	/**
+	* Substrates used for leaf growth respiration (in mg/hour).
+	*/
+	double growthCostLeaf;
+	
+	/**
+	* "Cost associated with growth of internodes, measured in mg/hour."
+	*/
+	double growthCostInternode;
+	
+	/**
+	* "Cost associated with growth of fruit, measured in mg/hour."
+	*/
+	double growthCostFruit;
+	
+	/**
+	* "Cost associated with growth of fine roots, measured in mg/hour."
+	*/
+	double growthCostFineRoot;
+	
+	/**
+	* "Cost associated with growth of structural roots, measured in mg/hour."
+	*/
+	double growthCostStructuralRoot;
+	
+	
+	/**
+	* Cost for carbon mobilization (in mg/hour).
+	*/
+	double carbonMobilizationCost;
+	/**
+	* Total leaf area of the plant.
+	*/
+	double leafArea;
+	/**
+	* Fraction of the plant's leaves that absorb more than 10% of the incident radiation.
+	*/
+	double sunExposedLeafFraction;
+	/**
+	* Height of the entire plant.
+	*/
+	public double plantHeight;
+	/**
+	* Height of the trunk.
+	*/
+	public double trunkHeight;
+	/**
+	* low layer of the canopy (below 1/3 of plant height - trunk height).
+	*/
+	public double height_low;
+	/**
+	* middle layer of the canopy (between 1/3 to 2/3 of plant height - trunk height).
+	*/
+	public double height_mid;
+	/**
+	* Absorbed radiation by all leaves (in umol/m2/s).
+	*/
+	public double leafRad;
+	/**
+	* Absorbed photosynthetically active radiation (PAR) by all leaves (in umol/m2/s).
+	*/
+	public double leafPAR;
+	/**
+	* Hourly absorbed radiation (in MJ).
+	*/
+	double hourlyAbsorbedRadiation;
+	/**
+	* Cumulative absorbed radiation (in MJ).
+	*/
+	double accumulatedRadiation;
+	/**
+	* Fraction of absorbed radiation of global radiation per square meter.
+	*/
+	public double fabs;
+	/**
+	* Fraction of absorbed PAR per square meter.
+	*/
+	public double fpar;
+	/**
+	* Fraction of PAR penetrated to low layer leaves, trunk height to 1/3 of the plant height - trunk height.
+	*/
+	public double fPARLow;
+	/**
+	* Fraction of PAR penetrated to mid layer leaves,  1/3 to 2/3 of the plant height - trunk height
+	*/
+	public double fPARMid;
+	/**
+	* Fraction of PAR penetrated to upper layer leaves,  2/3 of the canopy height. to the plant height.
+	*/
+	public double fPARUp;
+	/**
+	* Assimilated carbon dioxide (in umol CO2/hour).
+	*/
+	double assimilatedCO2;
+	/**
+	* Assimilated carbon (in mg/hour).
+	*/
+	double carbonAssimilation;
+	/** Daily carbon assimilation accumulator (mg C day-1). */
+	public double dailyCarbonAssimilationAccum = 0.0;
+	/** Daily flower self-assimilation accumulator (mg C day-1). */
+	public double dailyFlowerSelfAssimCAccum = 0.0;
+	/** Daily growth-cost accumulator (mg C day-1). */
+	public double dailyGrowthCostAccum = 0.0;
+	/** Daily maintenance-cost accumulator (mg C day-1). */
+	public double dailyMaintenanceDMAccum = 0.0;
+	/** Previous-day net carbon balance (mg C day-1). */
+	public double previousDailyNetCarbonBalance = 0.0;
+	/** True when previous-day net carbon balance is negative. */
+	public boolean dailyCarbonBalanceNegative = false;
+	/** True when previous-day carbon stress should throttle woody secondary growth. */
+	public boolean plantCarbonStressForSecondaryGrowth = false;
+	/** Legacy growth-control diagnostic, now set from previous daily balance. */
+	public double plantCarbonGainForGrowthControl = 0.0;
+	/** Legacy growth-control diagnostic, now set from previous daily balance. */
+	public boolean plantCarbonGainNegative = false;
+	/**
+	* Mean net photosynthesis (in umol/m2/s).
+	*/
+	double meanAnet;
+	/**
+	* Potential photosynthesis (in umol/m2/s).
+	*/
+	double meanPAnet;
+
+	
+	/**
+	* Sugar concentration (with different forms of sugar) in the phloem (gSugar/gsolution).
+	*/
+	double sugarConcentration_phloem;
+	
+	/**
+	* Carbon concentration in the phloem for the previous time step (gSugar/gsolution).
+	*/
+	double sugarConcentration_phloem_pre = 1e-4;
+	/** Reliable phloem concentration history used for fallback diurnal-amplitude estimation (gSugar/gsolution). */
+	private transient int phloemReliableHistorySize = 48;
+	transient double[] phloemReliableHistory = new double[phloemReliableHistorySize];
+	transient int phloemReliableHistoryIndex = 0;
+	transient int phloemReliableHistoryCount = 0;
+	/** Consecutive steps resolved without an exact accepted root; used to relax tie-breaking against plateaus. */
+	transient int phloemConsecutiveFallbackCount = 0;
+	/** Consecutive fallback steps that effectively held the previous phloem concentration (gSugar/gsolution). */
+	transient int phloemConsecutiveFlatFallbackCount = 0;
+	/** Number of fallback wins from diurnal prior candidates (delta or target). */
+	transient int phloemDiurnalFallbackWinCount = 0;
+	/** Number of fallback wins from the plateau-break candidate. */
+	transient int phloemPlateauBreakWinCount = 0;
+	/** Number of fallback steps that held the previous value within the flat epsilon. */
+	transient int phloemPreviousValueHoldCount = 0;
+	/** Consecutive accepted phloem states with unresolved residuals after finalization. */
+	transient int phloemConsecutiveUnresolvedCount = 0;
+	/**
+	* Total carbon loading in the plant (mgC).
+	*/
+	double totalLoading;
+	/**
+	* Total carbon unloading from the plant (mgC).
+	*/
+	double totalUnloading;
+	/**
+	* Total carbon leakage from the plant (mgC).
+	*/
+	double totalLeakage;
+	/**
+	* Carbon loading in leaves (mgC).
+	*/
+	double leafLoading;
+	/**
+	* Carbon loading in fine roots (mgC).
+	*/
+	double fineRootLoading;
+	/**
+	* Carbon loading in structural roots (mgC).
+	*/
+	double structuralRootLoading;
+	/**
+	* Carbon loading in internodes (mgC).
+	*/
+	double internodeLoading;
+	/**
+	* Carbon loading in cordons (mgC).
+	*/
+	double cordonLoading;
+	/**
+	* Carbon loading in wood (mgC).
+	*/
+	double perennielWoodLoading;
+	/**
+	* Carbon unloading from leaves (mgC).
+	*/
+	double leafUnloading;
+	
+	/**
+	* Carbon unloading from flowers (mgC).
+	*/
+	double flowerUnloading;
+	
+	/**
+	* Carbon unloading from petio (mgC).
+	*/
+	double petioleUnloading;
+	
+	/**
+	* Carbon unloading from internodes (mgC).
+	*/
+	double internodeUnloading;
+	/**
+	* Carbon unloading from cordons (mgC).
+	*/
+	double cordonUnloading;
+	/**
+	* Carbon unloading from wood (mgC).
+	*/
+	double perennielWoodUnloading;
+	/**
+	* Carbon unloading from berries (mgC).
+	*/
+	double fruitUnloading;
+	/**
+	* Carbon unloading from fine roots (mgC).
+	*/
+	float fineRootUnloading;
+	/**
+	* Carbon unloading from structural roots (mgC).
+	*/
+	float structuralRootUnloading;
+	/**
+	* Carbon leakage from internodes (mgC).
+	*/
+	float internodeLeakage;
+	/**
+	* Carbon leakage from cordons (mgC).
+	*/
+	float cordonLeakage;
+	/**
+	* Carbon leakage from wood (mgC).
+	*/
+	float perennielWoodLeakage;
+	/**
+	* Carbon leakage in structural roots (mgC).
+	*/
+	float structuralRootLeakage;
+	
+	/**
+	* Fraction of carbon loading in leaves.
+	*/
+	float fraction_leafLoading;
+	/**
+	* Fraction of carbon loading in the stem, including wood.
+	*/
+	float fraction_internodeLoading;
+	/**
+	* Fraction of carbon loading from the perenniel wood, including cordon and trunk.
+	*/
+	float fraction_perennielWoodLoading;
+	/**
+	* Fraction of carbon loading in structural roots.
+	*/
+	float fraction_structuralRootLoading;
+	
+	/**
+	* Fraction of carbon loading in fine roots.
+	*/
+	float fraction_fineRootLoading;
+	
+	/**
+	* Fraction of carbon unloading from leaves.
+	*/
+	float fraction_leafUnloading;
+	/**
+	* Fraction of carbon unloading from the stem, including wood.
+	*/
+	float fraction_internodeUnloading;
+	
+	/**
+	* Fraction of carbon unloading from the perennielWood
+	*/
+	float fraction_perennielWoodUnloading;
+	
+	/**
+	* Fraction of carbon unloading from fine roots.
+	*/
+	float fraction_fineRootUnloading;
+	/**
+	* Fraction of carbon unloading from structural roots.
+	*/
+	float fraction_structuralRootUnloading;
+	/**
+	* Fraction of carbon unloading from berries.
+	*/
+	float fraction_fruitUnloading;
+	/**
+	* Fraction of carbon unloading from flowers.
+	*/
+	float fraction_flowerUnloading;
+	/**
+	* Fraction of carbon unloading from flowers.
+	*/
+	float fraction_petioleUnloading;
+	
+	/**
+	* "Total amount of nitrogen present in the entire plant including mobile and nonmobile, measured in milligrams."
+	* mg
+	*/
+	double totalNitrogen;	
+	/**
+	* "Total amount of nitrogen present at the start of the simulation in the entire plant including mobile and nonmobile, measured in milligrams."
+	* mg
+	*/
+	double totalNitrogen_start;	
+	
+	/** Computes the nitrogen-to-carbon storage capacity ratio (N_C_ratio) at the plant level.*/
+	double N_C_ratio;
+	
+	/** The concentration of total nitrogen in total plant biomass, mg /mg. */
+	double NConcentration;
+	/**
+	* The common pool of nitrogen (in mg).
+	*/
+	double nitrogenCommonPool;
+	
+	/** The concentration of mobile nitrogen in the plant, measured in mg. */
+	double mobileNContent;
+	/** The degradation of nitrogen in the plant, measured in mg. */
+	double Ndegradation;
+	/** The synthesis of nitrogen in the plant, measured in mg. */
+	double Nsynthesis;
+	/** The uptake of nitrogen by the plant, measured in mg. */
+	double Nuptake;
+	/** Flag indicating whether the plant has been harvested. */
+	boolean harvested;
+	/** The number of non-dormant buds or branches on the plant. */
+	int nrBranches;
+	
+	
+	/** The potential water flux in the plant, measured in mg/plant/s. */
+	public double waterFluxPotential;
+	/** The optimized water flux in the plant, measured in mg/plant/s. */
+	public double waterFlux_optimized;
+	/** The optimized water flux in the plant, measured in mg/plant/s. */
+	double waterFlux_optimized_pre;
+	/** The fraction by which the water flux is reduced in the plant. */
+	public double f_waterFlux;
+	/** The water flux in the plant, measured in mmol/m2/s, for comparison with real data. */
+	double waterFluxMMol;
+	
+	/** The xylem water potential in the plant. */
+	public double xylemWaterPotential;
+	/** The concentration of Abscisic Acid (ABA) in the plant. */
+	public float ABA;
+	/** The sum of potential demand for biomass from all growing organs of the plant. */
+	double potentialBiomassDemand;
+	/** The sum of potential supply of biomass from all growing organs of the plant. */
+	double potentialBiomassSupply;
+	/** the ratio of supply and demand */
+	double potentialSupplyDemandRatio;
+	
+		public double WUE;  //    = (pb!= null)? (pb.carbonAssimilation + pb.leafMaintenance)/timeInterval/pb.waterFlux_optimized:0;
+
+		public double waterFluxSolverResidual;
+		public double waterFluxSolverLowerBound;
+		public double waterFluxSolverUpperBound;
+		public double waterFluxSolverLeafSum;
+		public double waterFluxSolverRepeatedResidualDelta;
+		public int waterFluxSolverEvalCount;
+		public int waterFluxSolverFallbackUsed;
+		public int waterFluxSolverAccepted;
+		public double meanLeafWaterPotential_solver;
+		public double minLeafWaterPotential_solver;
+		public double maxLeafWaterPotential_solver;
+		public double meanPLC_leaf_solver;
+		public double meanGs_solver;
+		
+		/** The fraction by which the water flux is reduced in the plant on daily average. */
+	double daily_waterFluxReduction;
+	/** collect information on whether water logging happens*/
+	boolean waterLogging = false; 
+	/**transient field to calculate the daily_waterFluxReduction by using an buffer array 
+	and mean calculation */
+	transient int bufferIndex = 0;
+	transient int timeStepCount = 0;
+	transient int bufferSize = 24;
+	transient double[] waterFluxReductionBuffer;
+	
+	// Instance initializer block
+	{
+		// Initialize the buffer after bufferSize is defined
+		waterFluxReductionBuffer = new double[bufferSize];
+		Arrays.fill(waterFluxReductionBuffer, 0.9);
+	}
+	
+
+	
+	/** equilibrium value for shoot-root ratio for newly growned shoot and root 
+	@parameter from QualiTree */
+	//float SReq = 150; //4.55; //qualiTree value
+	/** equilibrium value for C:N ratio 
+	@parameter from QualiTree */
+	float CNeq = 71;
+	
+	/** current value of shoot-root ratio */
+	float SR;
+	/** current value of transpiration and conductance misbalance, 
+	equal to the ratio between maximum root conductance, and weekly maximum transpiration times the transpiration dependent of root conductance
+	  */
+	float Mb;
+	
+	/** factor for adjusting carbon allocation for shoot*/
+	double fMb_shoot = 1.0;
+	
+	/** factor for adjusting carbon allocation for root, 
+	root biomass will be */
+	double fMb_root = 1.0;
+	
+	
+	/** Represents the previous value of the organ age. */
+	double age_pre;
+	double ageGdd_pre;
+	double ageTd_pre;
+	double ageTd;
+	/**for tracking the internode and cordon orders */		
+	int minOrder;
+	int maxOrder;
+	
+		// Branch aggregation (upstream fluxes)
+	/** Intercept of the aggregated branch flux entering this segment (unit: g h⁻¹). */
+	public double branch_flux_a;
+	
+	/** Slope of the aggregated branch flux (unit: g h⁻¹ per cp unit). */
+	public double branch_flux_b;
+	
+	// Carbon potential
+	/** Carbon potential at the bottom of the segment (unit: g² cm⁻⁶). */
+	public double cpb;
+	
+	/** Carbon potential at the top of the segment (unit: g² cm⁻⁶). */
+	public double cpt;
+
+	/** Whether the current PlantBase boundary used a retained potential (unitless; 0 or 1). */
+	public int ctPlantBaseFallbackUsed = 0;
+
+	/** PlantBase boundary outcome code (unitless; 0 accepted, 1--4 fallback causes). */
+	public int ctPlantBaseFallbackReason = 0;
+
+	/** Cumulative number of guarded PlantBase fallbacks for this plant (unitless). */
+	public int ctPlantBaseFallbackCount = 0;
+
+	/** Residual A + B Phi at the accepted or retained PlantBase state (unit: g C h⁻¹). */
+	public double ctPlantBaseResidual = 0.0;
+
+	/** Folded PlantBase B coefficient used by the boundary solve (unit: g C h⁻¹ per Phi). */
+	public double ctPlantBaseDenominator = 0.0;
+
+    // Phloem transport resistance and water potential influence
+	/** Resistance of the segment to phloem carbon flow (unit: (g⋅h⋅cm−8). 
+	r=[g⋅h⋅cm−7]⋅[cm]/[cm2]=[g⋅h⋅cm−8]*/
+	public double r;
+	
+	/** Xylem pull effect based on water potential gradient (unit: MPa). */
+	public double xp;
+	
+	// Transport flow and storage
+	/** Net carbon flux into the sink/source of this segment (unit: g h⁻¹). */
+	public double j;
+	
+  // Function incorporating flux from distal elements (Figure 4)
+  public void Update_Branch_Flux()
+  {
+	float denom = (1.0); 
+	branch_flux_a = (branch_flux_a) / denom;
+	branch_flux_b = branch_flux_b / denom;  
+	//println(branch_flux_a)
+  }
+    
+    public void initializeCarbonTransport() {
+		this.r = 0;
+		this.xp = 0;
+		this.cpb = this.cpt = 0.001;
+		this.ctPlantBaseFallbackUsed = 0;
+		this.ctPlantBaseFallbackReason = 0;
+		this.ctPlantBaseFallbackCount = 0;
+		this.ctPlantBaseResidual = 0.0;
+		this.ctPlantBaseDenominator = 0.0;
+		//float Rs = ( R0 * PhloemResistanceRatio(initial_c0)/(PressureRatio(initial_c0)*R*Tk));   // resistance per unit length (initial case)
+		//this.cpt = SOURCEcp - cpn * length * SOURCEj * Rs;
+		//this.cpb = SOURCEcp - (cpn - 1) * length * SOURCEj * Rs;
+		this.j = j;
+	}
+	
+    public void updateCTRs(double carbonConcentration) {
+		this.r = 0; 
+		this.xp = 0;//(-Jw * h_internode_rs * initial_c0)/(PressureRatio(initial_c0)*R*Tk);  //need to update this term
+	}	
+    
+  
+	public List petioleIDs = new ArrayList(); // List of Long, but no generics in Java 1.5
+
+	// Example for fruit as well:
+	public List fruitIDs = new ArrayList();
+
+
+/**
+ * Initializes the plant with the given parameters.
+ *
+ * @param i The plant number.
+ * @param row The row position of the plant.
+ * @param pos The position of the plant.
+ * @param strip The strip number.
+ */
+	void initiate(int i, int row, int pos, int strip, PlantIdentifier pi)
+	{
+		plantNumber = i;		
+		this.strip = strip;
+		this.row = row;
+		this.pos = pos;
+		
+		this.ageD = PLANT_AGE_DAYS;
+		this.ageTd = this.ageD * (Tmax+Tmin)/2/OPT_TEMP;
+		this.ageGdd = Math.max(this.ageD * ((Tmax + Tmin) / 2 - baseT), ageTd);
+		
+		if (thermalUnit.equals("thermalDay")) {
+			this.age = ageTd;
+		} else if(thermalUnit.equals("growingDegreeDay")) {
+			this.age = ageGdd;
+		} else if (thermalUnit.equals("day")) {
+			this.age = ageD;
+		}
+		//this.pi = pi;
+		this.species = pi.species;
+		println("species: " + this.species);
+		try {
+			io.github.fruitcropxl.config.params.groups.DocumentCategoryNameGroup ppGroup =
+				(io.github.fruitcropxl.config.params.groups.DocumentCategoryNameGroup) CONFIG.getGroup(
+					FILE_NAME_PLANT_PARAMETERS,
+					io.github.fruitcropxl.config.params.groups.DocumentCategoryNameGroup.class);
+			io.github.fruitcropxl.config.params.structures.CategoryStore cfg = ppGroup.getCategoryStore();
+			cfg.setCategoryContext("plant-bud-property");
+			// Compatibility guard: legacy files may not provide meanLeafArea_m2.
+			this.meanLeafAreaTarget_m2 = cfg.getDouble("meanLeafArea_m2");
+		} catch (io.github.fruitcropxl.config.util.exceptions.KeyNotFoundException e) {
+			this.meanLeafAreaTarget_m2 = 0.0;
+		} catch (Exception e) {
+			this.meanLeafAreaTarget_m2 = 0.0;
+		}
+		assignBorder(row,pos,strip);
+		
+	}
+	
+	/**
+ * Adds a root base to the plant, reducing unnecessary searching.
+ *
+ * @param rb The RootBase to add.
+ */
+	void addRootBase(RootBase rb)
+	{
+		this.rbID = rb.getId();
+		if(this.nodeID <= 0) {this.nodeID = this.getId();}
+	}
+	
+
+/**Calculates the age of the plant based on temperature.*/
+void calcAge(){
+
+	age_pre = age;
+	ageGdd_pre = ageGdd;
+	ageTd_pre = ageTd;
+	
+	/** updating the age */
+	ageD = ageD + DT;
+
+	ageGdd = ageGdd_pre + deltaAgeGdd(Ta, baseT, DT);
+
+	ageTd  = ageTd_pre + wangEngelTempFunction(Ta, MIN_TEMP, OPT_TEMP, MAX_TEMP,REFTMP) * DT;
+	
+	//this is needed because of initial age assignment at initiation, like plant age
+	//we also want to keep track of all age calculation for cross validation in future
+	double deltaAge = 0;
+	if (thermalUnit.equals("thermalDay")) {
+		deltaAge = wangEngelTempFunction(Ta, MIN_TEMP, OPT_TEMP, MAX_TEMP,REFTMP) * DT;
+	} else if(thermalUnit.equals("growingDegreeDay")) {
+		deltaAge = Ta > baseT ? (Ta - baseT) * DT : 0;
+	} else if(thermalUnit.equals("day")) {
+		deltaAge = DT;
+	} 
+	
+	// Check for valid deltaAge before updating age
+	if (!Double.isNaN(deltaAge) && Double.isFinite(deltaAge)) {
+		age += deltaAge;
+	} else {
+		// Handle invalid deltaAge value, e.g., log an error or use a default value
+		if (printFlag) { println("Invalid deltaAge encountered: " + deltaAge); }
+	}
+	
+	if(this.nodeID <= 0) {this.nodeID = this.getId();}
+		// Set rbID from parent if not already set
+	if (this.rbID <= 0 && step >= 2) {
+		RootBase r = first((*rt:RootBase, (rt.plantNumber == plantNumber)*));
+		if (r != null) {
+			this.rbID = r.getId();
+		}
+	}
+	
+	if (this.childTrunkID <= 0 && step >= 2) {
+		if(count((*t:Trunk, (t.plantNumber == plantNumber)*))>=1) {
+			int minRank = min((* it:Trunk*)[rank]);
+			Trunk tr = first((*t:Trunk,
+			(t.plantNumber == plantNumber && t.rank == minRank)*));
+			childTrunkID = tr.getId();
+		} else if(count((* in0:Internode, (in0.plantNumber == plantNumber)*))>=1) {
+			int minOrder = min((* it:Internode *)[order]);
+			int minRank = min((* it:Internode, (it.order == minOrder) *)[rank]);
+
+			Internode it = first((*t:Internode,
+			(t.plantNumber == plantNumber &&
+			 t.order == minOrder && t.rank == minRank)*));
+			if (it != null) {
+				childTrunkID = it.getId();
+			}
+		} else if ("fieldRandomCanopy".equals(initiation_method)) {
+			// Statistical leaf clouds have no explicit shoot conduit topology.
+			childTrunkID = -1;
+		}
+	}
+
+	
+	 
+}
+/**
+ * Updates the water flux of the plant based on environmental conditions.
+ * 
+ * This function dynamically calculates the plant's water flux potential and updates water-related variables.
+ * It accounts for different environmental factors such as global radiation, water logging conditions, 
+ * and night transpiration. The function also manages a historical buffer to compute the maximum weekly water flux.
+ * 
+ * @return The updated water flux value.
+ */
+	 transient int bufferSize2 = 120; // 120-hour rolling window for water-flux potential
+	 transient double[] waterFluxPotentialBuffer = new double[bufferSize2];
+	 transient int bufferIndex2 = 0;
+	 transient int waterFluxPotentialBufferCount = 0;
+	double weekly_maxWaterFluxPotential;
+
+	double updateWaterFlux()
+	{
+		return plantHydraulics.updateWaterFlux(this);
+	}
+/**
+ * Calculates the carbon assimilation of the plant based on environmental conditions.
+ *
+ * This method calculates the carbon assimilation of the plant, taking into account the global radiation
+ * and other factors. It updates the assimilated CO2, carbon assimilation, mean net photosynthesis,
+ * and mean potential photosynthesis. The calculations are performed during the daytime when global
+ * radiation is above a certain threshold.
+ *
+ * @return The updated carbon assimilation value.
+ */
+	double updateCarbonAssimilation()
+	{  
+		//calculate the assimilated co2 per hour during daytime 
+		if(globalRadiation > LIGHT_THRESHOLD ) {
+			assimilatedCO2 = sum((* v:PhotosynthateOrgan, (v.plantNumber == plantNumber) *)[assimilatedCO2]);  //umol co2 per hour
+			carbonAssimilation = sum((* v:PhotosynthateOrgan, (v.plantNumber == plantNumber) *)[carbonAssimilation]);  //mg C per hour
+			meanAnet = mean((* v:PhotosynthateOrgan, (v.plantNumber == plantNumber) *)[AlimActual]); 
+			meanPAnet = mean((* v:PhotosynthateOrgan, (v.plantNumber == plantNumber) *)[Alim]);
+		
+		}  
+		else {
+			carbonAssimilation = 0;
+			assimilatedCO2 = 0; 
+			meanAnet = -mean((* v:PhotosynthateOrgan, (v.plantNumber == plantNumber) *)[Rd]);
+			meanPAnet = -mean((* v:PhotosynthateOrgan, (v.plantNumber == plantNumber) *)[Rd]);
+		}  //println("hourOfday" + assimilatedCO2 ); //set assimilatedCO2 to zero when it is night, there is memory for it. 
+		
+	}
+
+	public double safeDouble(double x) {
+		if (Double.isNaN(x) || Double.isInfinite(x)) return 0.0;
+		return x;
+	}
+
+	public void updateDailyCarbonStressAtHour0() {
+		if (hourOfDay != 0) return;
+
+		previousDailyNetCarbonBalance =
+			safeDouble(dailyCarbonAssimilationAccum) +
+			safeDouble(dailyFlowerSelfAssimCAccum) -
+			safeDouble(dailyGrowthCostAccum) -
+			safeDouble(dailyMaintenanceDMAccum);
+
+		if (Double.isNaN(previousDailyNetCarbonBalance) ||
+			Double.isInfinite(previousDailyNetCarbonBalance)) {
+			previousDailyNetCarbonBalance = 0.0;
+		}
+
+		dailyCarbonBalanceNegative = previousDailyNetCarbonBalance < 0.0;
+		plantCarbonStressForSecondaryGrowth =
+			enableDailyCarbonStressControls &&
+			dailyCarbonBalanceNegative;
+		plantCarbonGainForGrowthControl = previousDailyNetCarbonBalance;
+		plantCarbonGainNegative = dailyCarbonBalanceNegative;
+
+		dailyCarbonAssimilationAccum = 0.0;
+		dailyFlowerSelfAssimCAccum = 0.0;
+		dailyGrowthCostAccum = 0.0;
+		dailyMaintenanceDMAccum = 0.0;
+	}
+
+	public void accumulateHourlyDailyCarbonBalance() {
+		dailyCarbonAssimilationAccum += safeDouble(carbonAssimilation);
+		dailyFlowerSelfAssimCAccum += safeDouble(flowerSelfAssimC);
+		dailyGrowthCostAccum += safeDouble(growthCost);
+		dailyMaintenanceDMAccum += safeDouble(maintenanceDM);
+	}
+
+
+
+	double calcShootRootRatio()
+	{  
+		//this accounts for the number of bunches as each bunch is treated as one object
+		biomassLeaf = sum((* g:Leaf, (g.plantNumber == plantNumber) *).biomass);
+		biomassFineRoot = sum((* g:FineRoot, (g.plantNumber == plantNumber) *).biomass);
+		biomassStructuralRoot = sum((* g:StructuralRoot, (g.plantNumber == plantNumber) *).biomass);
+		biomassInternode = sum((* g:Internode, (g.plantNumber == plantNumber) *).biomass);
+	
+	
+	}
+	
+
+	
+/**
+ * Calculate water potential from left to right incorporating Munch counter flow.
+ *
+ * This method performs calculations to determine water potential while incorporating Munch counter flow.
+ * It calculates water flux, Ka, and water potential for various parts of the plant.
+ */
+/** Unfold water potential from low to high order (no task solver). */
+boolean wpInitDone = false;
+
+void updatePlantWaterPotential() {
+	plantHydraulics.updatePlantWaterPotential(this);
+}
+/**
+ * Retrieve and store information about individual leaves' status.
+ *
+ * This method retrieves and stores various attributes of individual leaves, including their area, temperature, GSWpm, absorbed radiation per square meter, potential water flux, and previous water potential.
+ * The information is collected for a range of leaves up to the specified ENDING_LEAF_NUMBER.
+ */
+/* double getLeafStatus() 
+	{
+		Leaf leaf[] = new Leaf[ENDING_LEAF_NUMBER+1];
+		for(int i = 1; i<= ENDING_LEAF_NUMBER; i++)
+		{
+			leaf[i] =  first((* l:Leaf, (l[rank]==i && l[order]==0 && l.plantNumber==plantNumber ) *) );
+		}
+		
+		for(int i = 1; i<= ENDING_LEAF_NUMBER; i++)
+		{
+			singleleafArea[i] = (leaf[i] != null) ? leaf[i].area : 0;
+			leafTem[i] = (leaf[i] != null) ? leaf[i].Tleaf : 0;
+			GSWpm[i] = (leaf[i] != null) ? leaf[i].GSWpm : 0;
+			absm2[i] = (leaf[i] != null) ? leaf[i].absm2 : 0;
+			potentialWaterFlux[i] = (leaf[i] != null) ? leaf[i].waterFluxPotential  : 0;
+			preLeafWaterPotential[i] = (leaf[i] != null) ? leaf[i].waterPotential : -0.1;
+			//println("preLeafWaterPotential " + preLeafWaterPotential[i]); 
+			//if (printFlag) { println(potentialWaterFlux[i]); }
+		 }
+	}  */
+
+/**
+ * Determine whether water flux and photosynthesis calculations should commence.
+ *
+ * This method checks if the plant has enough active leaf source area for the
+ * water-flux solve. Non-fallback runs keep the historical 0.01 m2 threshold;
+ * early fallback runs start as soon as a leaf is present.
+ *
+ * @return `true` if water flux and photosynthesis calculations should start, `false` otherwise.
+ */
+public boolean shouldCalcWaterFlux() 
+	{	
+		
+		if(!isLeafHydraulicBypassTestScenario()) {
+			if (enableLAILeafPhotosynthesisFallback) {
+				boolean hasLeaf = leafArea > 0.0;
+				if (!hasLeaf) {
+					hasLeaf = count((* lf:Leaf, (lf.plantNumber == plantNumber) *)) > 0;
+				}
+				return(globalRadiation > LIGHT_THRESHOLD && hasLeaf);
+			}
+			return(globalRadiation > LIGHT_THRESHOLD && leafArea > 1e-2);
+		} else {
+			return true;
+		} 
+	} 
+
+/**
+ * Compatibility wrapper for the whole-plant hydraulic solver.
+ */
+float calcActualWaterFlux() {
+	return plantHydraulics.calcActualWaterFlux(this);
+}
+
+double broadLower = 1e-6;
+double broadUpper;
+double idealRange;
+int phloemSolverFailureCount = 0;
+int phloemSuspiciousRootRejectCount = 0;
+{
+    Arrays.fill(phloemReliableHistory, Double.NaN);
+}
+
+
+public double calcPhloemSugarConcentration() {
+	return carbonAllocation.calcPhloemSugarConcentration(this);
+}
+
+	/**
+	 * Execute graph-resolved carbon transport for this plant.
+	 */
+	public void updateCarbonTransport() {
+		carbonTransport.updateC_Transport(this);
+	}
+
+
+
+void updateCarbonPartition() {
+	carbonAllocation.updateCarbonPartition(this);
+}
+
+/**
+ * Update the plant biomass, considering various plant organs and growth-related variables.
+ * calculates the ShootRootRatio of the newly growned shoot and root, age is smaller than 365 day
+ * This method calculates and updates the plant's biomass, taking into account growth costs, carbon mobilization costs,
+ * biomass for different plant organs (leaves, fine roots, structural roots, internodes, trunk, cordon, and berries), and
+ * nitrogen content within the common pool. It also tracks the total biomass and the change in biomass over time.
+ */
+ void updateBiomass()
+	{   
+		/** update the biomass of different component */							
+		biomassLeaf = sum((* g:Leaf, (g.plantNumber == plantNumber) *).biomass);
+		biomassFineRoot = sum((* g:FineRoot, (g.plantNumber == plantNumber) *).biomass);
+		biomassStructuralRoot = sum((* g:StructuralRoot, (g.plantNumber == plantNumber) *).biomass);
+		biomassInternode = sum((* g:Internode, (g.plantNumber == plantNumber) *).biomass);
+		biomassTrunk = sum((* g:Trunk, (g.plantNumber == plantNumber) *).biomass);
+		biomassCordon = sum((* g:Cordon, (g.plantNumber == plantNumber) *).biomass);	
+		
+		biomassPerennielWood = biomassTrunk + biomassCordon;
+		
+		double biomassPetiole = sum((* g:Petiole, (g.plantNumber == plantNumber) *).biomass);
+		double biomassNewInternode = sum((* g:Internode, (g.plantNumber == plantNumber && g.ageD < 300)*).biomass);
+		double newShootBiomass = (biomassLeaf + biomassPetiole + biomassNewInternode);
+		
+		//this accounts for the number of bunches as each bunch is treated as one object
+		//for apple and others, berryNumPerBunch needs to be set to 1
+		biomassFruit =  sum((* g:FruitService, (g.plantNumber == plantNumber) *).biomass) * berryNumPerBunch;
+		
+		biomassFlower =  sum((* g:Flower, (g.plantNumber == plantNumber) *).biomass) * berryNumPerBunch;
+		
+		biomass = sum((* g:GrowingOrgan, (g.plantNumber == plantNumber &&
+						!(g instanceof FruitService)) *).biomass) + biomassFruit;
+		
+		if(step > 1) {accBiomass += (biomass - biomassPre);}
+							
+		//if (printFlag) { println( "biomassFruit " + biomassFruit); }
+		double carbon_total_fruit =  sum((* g:FruitService, (g.plantNumber == plantNumber) *)[carbon_total]) * berryNumPerBunch;
+		
+		carbon_total = sum((* g:GrowingOrgan, (g.plantNumber == plantNumber &&
+							!(g instanceof FruitService))*)[carbon_total]) + carbon_total_fruit;
+	
+		freshWeightFruit = sum((* g:FruitService, (g.plantNumber == plantNumber) *).freshWeight)* berryNumPerBunch;		
+		
+		
+		/** update the growth, maintenance and other cost of different component */
+		/**maintenance cost */
+		maintenanceDM = sum((* g:GrowingOrgan, (g.plantNumber == plantNumber)*).maintenanceDM);
+		
+			
+		maintenanceLeaf = sum((* l:Leaf, (l.plantNumber == plantNumber) *).maintenanceDM);
+		maintenanceInternode = sum((* l:Internode, (l.plantNumber == plantNumber)*).maintenanceDM);
+		
+		maintenanceFruit = sum((* g:FruitService, (g.plantNumber == plantNumber) *).maintenanceDM)* berryNumPerBunch;
+		
+		maintenanceFineRoot = sum((* l:FineRoot, (l.plantNumber == plantNumber) *).maintenanceDM);
+		maintenanceStructuralRoot = sum((* l:StructuralRoot,(l.plantNumber == plantNumber)*).maintenanceDM);
+		
+		/**growth cost*/
+		growthCost = sum((* g:GrowingOrgan, (g.plantNumber == plantNumber) *).growthCost);
+		
+		growthCostLeaf = sum((* l:Leaf, (l.plantNumber == plantNumber) *).growthCost);
+		growthCostInternode = sum((* l:Internode, (l.plantNumber == plantNumber)*).growthCost);
+		
+		growthCostFruit = Math.max(0, sum((* g:FruitService, (g.plantNumber == plantNumber) *).growthCost)* berryNumPerBunch);
+		
+		growthCostFineRoot = sum((* l:FineRoot, (l.plantNumber == plantNumber) *).growthCost);
+		growthCostStructuralRoot = sum((* l:StructuralRoot,(l.plantNumber == plantNumber)*).growthCost);
+		
+		carbonMobilizationCost = sum((* g:GrowingOrgan, (g.plantNumber == plantNumber) *).carbonMobilizationCost) + 
+									(totalFruitNum)* mean((* g:FruitService, (g.plantNumber == plantNumber) *).carbonMobilizationCost); 
+		
+			/** update physiological WUE (mg C per mg H2O) with night/near-zero water-loss guards */
+			double waterLossMg = waterFlux_optimized * timeInterval;
+			if (globalRadiation <= LIGHT_THRESHOLD ||
+				waterFlux_optimized <= 1e-6 ||
+				waterLossMg <= 1e-6 ||
+				carbonAssimilation <= 0 ||
+				Double.isNaN(waterFlux_optimized) ||
+				Double.isInfinite(waterFlux_optimized)) {
+				WUE = 0.0;
+			} else {
+				WUE = carbonAssimilation / waterLossMg;
+			}
+		
+		/** update the fraction of fine root and structural root in the total root biomass*/
+			[
+				f:FineRoot::> {
+					if (!useComplexRoot) {
+						f.fiRootProportion = (biomassFineRoot > 0.0) ? f.biomass / biomassFineRoot : 0.0;
+					}
+				}
+			
+			s:StructuralRoot::> {
+				s.stRootProportion = s.biomass/biomassStructuralRoot;			
+			}
+		]
+		
+		
+		/** calc ShootRootRatio, only conducts calculation when new shoots are growing */
+		if(!Double.isNaN(biomassFineRoot) && !Double.isNaN(newShootBiomass)) { 
+			SR = newShootBiomass/biomassFineRoot;
+		}
+		/** use transpiration and root conductance to adjust the carbon allocation. 
+			this is only one factor. */
+		//when there is potential transpiration is reduced because of root biomass and soil water conditions
+		//only starts the calculation after a day
+		if(step > 24 && this.leafArea >= 3.0) { //the leaf area threshold is set to avoid the adjustment at the very early stage when the plant is very small and the water flux is low, which could lead to over adjustment. This threshold can be further tuned based on the specific crop and growth conditions.
+			if( daily_waterFluxReduction < FLUX_REDUCTION_THRESHOLD_RS_ADJUSTMENT &&
+				daily_waterFluxReduction > 0) { 
+				fMb_root = 1.0/daily_waterFluxReduction;
+				fMb_shoot = daily_waterFluxReduction;
+			} else if(daily_waterFluxReduction >= FLUX_REDUCTION_THRESHOLD_RS_ADJUSTMENT
+					 && Mb >= 1 && this.leafArea >= 3.0) {
+			//this is a condition when root conductance is larger than transpiration, thus more leaves could be grow 
+				fMb_shoot = Mb;
+				fMb_root = 1/Mb;
+			} else { //no adjustment needed
+				fMb_root = 1; fMb_shoot = 1;
+			}
+		}
+		
+		if(calcNUptake || step <= 2) updateNPool();
+
+		//double sumFlux;
+		//if (printFlag) { println("pb.biomass" + biomassTrunk ); }
+		//if (printFlag) { println( "sumFlux " + sum((* g:GrowingOrgan, (g.plantNumber == plantNumber) *)[Cflux])/1000); }
+		biomassPre = biomass;
+		
+		//println(" biomassLeaf " + biomassLeaf + " biomassFineRoot " + biomassFineRoot + " biomassStructuralRoot " + biomassStructuralRoot +
+		//" biomassInternode " + biomassInternode + " biomassTrunk " + biomassTrunk + " biomassCordon " + biomassCordon);
+		
+		
+	}
+	
+	
+/**
+ * Update the sum of potential supply and demand of biomass for the organs of this plant.
+ *
+ * This method calculates and updates the total potential biomass demand and supply for the plant's organs.
+ * These values are essential for evaluating the balance of supply and demand within the plant.
+ */
+	void updateSupplyDemand()
+	{
+		int currentPlantNumber = plantNumber;
+		potentialBiomassDemand = sum((* g:GrowingOrgan, (g.plantNumber == currentPlantNumber)*)[biomassDemand]);
+		potentialBiomassSupply = sum((* g:GrowingOrgan, (g.plantNumber == currentPlantNumber)*)[biomassSupply]);
+		potentialSupplyDemandRatio = potentialBiomassSupply/potentialBiomassDemand;
+	}
+/**
+ * Update the Non-Structural Carbon (NSC) content for different plant organs.
+ *
+ * This method calculates and updates the NSC content for various plant organs, including leaves, fine roots,
+ * structural roots, internodes, trunk, and cordons. It also computes the mean soluble sugar content of fruit bunches.
+ */
+	void updateNSC()
+	{   
+		leafNSC = sum((* g:Leaf, (g.plantNumber == plantNumber) *).carbon_nonStructure);
+		fineRootNSC = sum((* g:FineRoot, (g.plantNumber == plantNumber) *).carbon_nonStructure);
+		structuralRootNSC = sum((* g:StructuralRoot, (g.plantNumber == plantNumber) *).carbon_nonStructure);
+		internodeNSC = sum((* g:Internode, (g.plantNumber == plantNumber) *).carbon_nonStructure);
+		trunkNSC = sum((* g:Trunk, (g.plantNumber == plantNumber) *).carbon_nonStructure);
+		cordonNSC = sum((* g:Cordon, (g.plantNumber == plantNumber) *).carbon_nonStructure);
+		//has fruit bunchs in each shoot
+		berrySugar = mean((* g:FruitService, (g.plantNumber == plantNumber) *).solubleSugar);
+		flowerSelfAssimC = sum((* g:Flower, (g.plantNumber == plantNumber) *).flowerSelfAssimC);
+		int currentPlantNumber = plantNumber;
+		int today = (int)Math.floor(this.ageD);
+		int retainedFlowersPlant = 0;
+        int droppedFlowersPlant = 0;
+        int droppedTodayPlant = 0;
+		for (Flower fl : (* Flower *)) {
+			if (fl.plantNumber == currentPlantNumber) {
+				if (fl.dropped) {
+					droppedFlowersPlant++;
+					if (fl.dropDay == today) droppedTodayPlant++;
+				} else {
+					retainedFlowersPlant++;
+				}
+			}
+		}
+
+		
+		if (debug) { 
+			println(" leafNSC " + String.format("%.4f",leafNSC) + "\n" +
+					" leaf fNSC:" + leafNSC/(biomassLeaf*0.42) + "\n" +
+					" internodeNSC " + String.format("%.4f",internodeNSC) +  "\n" +
+					" structuralRootNSC " + String.format("%.4f",structuralRootNSC));
+					}
+	}
+	
+/**
+ * Update the nitrogen pools and content for the plant.
+ *
+ * This method calculates and updates various nitrogen-related parameters, including N degradation, N synthesis,
+ * and N uptake by fine roots. It then updates the common nitrogen pool and mobile nitrogen content.
+ */	
+	void updateNPool() 
+	{		
+		// Initialize baseline plant N if not already set
+		if (totalNitrogen_start < 1.0) {
+			totalNitrogen_start = sum(
+				(* l:GrowingOrgan, (l.plantNumber == plantNumber) *).nitrogen_total
+			);
+		}
+		
+		
+		Ndegradation = sum((* g:GrowingOrgan, (g.plantNumber == plantNumber) *).Ndegradation);
+		Nsynthesis = sum((* g:GrowingOrgan, (g.plantNumber == plantNumber) *).Nsynthesis);
+		Nuptake = sum((* r:FineRoot, (r.plantNumber == plantNumber) *).Nuptake);
+		
+		//nitrogenCommonPool = nitrogenCommonPool + Ndegradation - Nsynthesis + Nuptake;
+	 
+		totalNitrogen = sum((*l:GrowingOrgan, (l.plantNumber == plantNumber)*).nitrogen_total);
+	    //mobileNContent -= Nsynthesis;
+	    
+	    // Current mobile N pool = initial N + cumulative root uptake
+		double totalNuptake = getRootBase().totalNuptake_overTime;
+		
+		totalNitrogen = totalNitrogen_start + totalNuptake;
+		nitrogenCommonPool  =  totalNitrogen * N_CONTENT_MOBILE;
+		
+		mobileNContent = nitrogenCommonPool/this.biomass;
+		NConcentration = totalNitrogen / this.biomass;
+	}
+	
+	
+/**
+ * Computes the nitrogen-to-carbon capacity ratio (N_C_ratio) at the plant level.
+ * <p>
+ * This metric compares the plant’s total mobile nitrogen pool against the
+ * sum of maximum non-structural carbon storage capacities across all organs.
+ * It is used as a proxy for "N fullness" relative to available C storage
+ * potential, inspired by the QualiTree concept of living structural mass,
+ * but here simplified via {@code carbon_nonStructure_max}.
+ * </p>
+ *
+ * <p><b>Formula:</b></p>
+ * <pre>
+ *   NmobilePool = totalNitrogen_start + totalNuptake_overTime
+ *   Ccap_total  = Σ(carbon_nonStructure_max)
+ *   N_C_ratio   = NmobilePool / Ccap_total
+ * </pre>
+ *
+ * <p><b>Details:</b></p>
+ * <ul>
+ *   <li>{@code totalNitrogen_start} is lazily initialized from the sum of
+ *       all organ nitrogen contents at the first call.</li>
+ *   <li>{@code totalNuptake_overTime} is cumulative N uptake from roots.</li>
+ *   <li>If {@code Ccap_total} is very small or zero, the ratio is clamped
+ *       to zero to avoid divide-by-zero.</li>
+ * </ul>
+ *
+ * <p><b>Interpretation:</b></p>
+ * <ul>
+ *   <li>Low values (≈0) → N pool small relative to storage capacity,
+ *       high potential demand, uptake favored.</li>
+ *   <li>High values (≫1) → N pool large relative to capacity,
+ *       uptake increasingly suppressed.</li>
+ * </ul>
+ *
+ * @return N_C_ratio (dimensionless) = mobile nitrogen pool / carbon storage capacity
+ */
+double carbonStorageCapacitySum = -1.0;
+double calcNCRatio() {
+
+    if (carbonStorageCapacitySum <= 1.0 || hourOfDay == 2) {
+        int currentPlantNumber = plantNumber;
+
+        carbonStorageCapacitySum = sum(
+            (* g:GrowingOrgan, (g.plantNumber == currentPlantNumber) *).carbon_nonStructure_max
+        );
+    }
+
+    if (Double.isNaN(carbonStorageCapacitySum) || Double.isInfinite(carbonStorageCapacitySum) || carbonStorageCapacitySum <= 1.0) {
+        N_C_ratio = 1e-6;
+        return N_C_ratio;
+    }
+
+    if (Double.isNaN(nitrogenCommonPool) || Double.isInfinite(nitrogenCommonPool) || nitrogenCommonPool <= 0.0) {
+        N_C_ratio = 1e-6;
+        return N_C_ratio;
+    }
+
+    N_C_ratio = nitrogenCommonPool / carbonStorageCapacitySum;
+
+    if (Double.isNaN(N_C_ratio) || Double.isInfinite(N_C_ratio)) {
+        N_C_ratio = 1e-6;
+    }
+
+    return N_C_ratio;
+}
+
+ 
+ 
+/**
+ * Update the plant's leaf and stem surface area.
+ *
+ * This method calculates and updates the total leaf area and the fraction of sun-exposed leaves. It also determines whether to run the light model
+ * based on the presence of leaf area.
+ */
+	void updateSurfaceArea() {
+		leafArea = sum((* l:Leaf, (l.plantNumber == plantNumber) *)[area]);
+		sunExposedLeafFraction = Math.max(0.1, sum((* l:Leaf, (l.plantNumber == plantNumber & l.fpar >= 0.1) *)[area])/leafArea);
+		//runLightModel = leafArea > 1e-4 ? true : false; 
+		
+	}
+
+/**
+ * Update the plant's height and trunk height.
+ *
+ * This method calculates and updates the total plant height and the mean trunk height.
+ */
+	void updateHeight() {
+
+		if ("fieldRandomCanopy".equals(initiation_method)) {
+			trunkHeight = 0.0;
+			if (count((* l0:Leaf, (l0.plantNumber == plantNumber) *)) >= 1) {
+				plantHeight = max((* l:Leaf, (l.plantNumber == plantNumber) *)[z]);
+				height_low = plantHeight / 3.0;
+				height_mid = 2.0 * plantHeight / 3.0;
+			}
+			return;
+		}
+
+		if(trunkHeight == 0 || trunkHeight <= 0.1 || step <= 2) {
+			trunkHeight = mean((* t:Trunk, (t.plantNumber == plantNumber) *)[length]);
+		}
+		
+		if(useStaticArc == false || step <= 2) {
+			plantHeight = max((* it:Internode, (it.plantNumber == plantNumber) *)[endZ]);
+			height_low = trunkHeight + (plantHeight - trunkHeight)/3.0;
+			height_mid = trunkHeight + 2 * (plantHeight - trunkHeight)/3.0;
+		}
+   		
+	}
+
+/**
+ * Update the internode and cordon orders
+ *
+ * This method updates the min and max order of the internode and cordon and use it to 
+ * control the loop in the update water potential method
+ */
+	void updateOrder() {		   
+		minOrder = min((* it:Internode, (it.plantNumber == plantNumber ) *)[order]);
+		maxOrder = max((* it:Internode, (it.plantNumber == plantNumber ) *)[order]);
+	}
+	
+
+/**
+ * Update the plant's absorbed radiation.
+ *
+ * This method calculates and updates various radiation-related parameters, such as leaf radiation, leaf PAR,
+ * absorbed radiation fractions (fabs and fpar), hourly absorbed radiation, accumulated radiation, and fPAR
+ * fractions at different height levels.
+ */
+	void updateAbsorbedRadiation() {
+		if(globalRadiation > LIGHT_THRESHOLD ) {
+			leafRad = sum((* l:Leaf,(
+				l.plantNumber == this.plantNumber &&
+				l.fieldInstanceId == this.fieldInstanceId
+			)*)[abs]);
+			
+			leafPAR = sum((* l:Leaf,(
+				l.plantNumber == this.plantNumber &&
+				l.fieldInstanceId == this.fieldInstanceId
+			)*)[absPAR]);
+					
+			if (globalRadiation > 10) {
+				fabs = (leafRad * dens) / globalRadiation;
+				fpar = (leafPAR * dens) / (fPAR * globalRadiation);
+			} else {
+				fabs = fpar = 0;
+			}
+
+			
+			//println("leafRad " + leafRad + " globalRadiation " +  globalRadiation + " dens " + dens);
+			
+			
+			hourlyAbsorbedRadiation = 1e-6 * leafRad * timeInterval/WATT_TO_PPFD;  //MJ       //umol/s * S /WATT_TO_PPFD, J	Watt
+			accumulatedRadiation +=  hourlyAbsorbedRadiation;  //MJ
+			
+		
+			
+			/* if (printFlag) {
+				println("leafRad " + leafRad + " fpar " +  fpar); 
+								println( " check " +  mean((* l:Leaf,(l.plantNumber == plantNumber && 
+							 height_low < l.z &&  l.z < height_mid)*)[incPARm2]));
+			} */
+			double lowMean = mean((* l:Leaf,(
+				l.plantNumber == plantNumber &&
+				l.fieldInstanceId == this.fieldInstanceId &&
+				l.layer == LAYER_LOW
+				)*)[incPARm2]);
+			double midMean = mean((* l:Leaf,(
+				l.plantNumber == plantNumber &&
+				l.fieldInstanceId == this.fieldInstanceId &&
+				l.layer == LAYER_MID
+				)*)[incPARm2]);
+			double upMean = mean((* l:Leaf,(
+				l.plantNumber == plantNumber &&
+				l.fieldInstanceId == this.fieldInstanceId &&
+				l.layer == LAYER_UP
+				)*)[incPARm2]);				
+				
+			fPARLow = Double.isNaN(lowMean) ? 0 : lowMean / (fPAR * globalRadiation);
+			fPARMid = Double.isNaN(midMean) ? 0 : midMean / (fPAR * globalRadiation);
+			fPARUp  = Double.isNaN(upMean)  ? 0 : upMean / (fPAR * globalRadiation);			
+		}
+		else {
+			leafRad = 0;
+			leafPAR = 0;
+			fabs = 0;
+			fpar = 0;
+			fPARLow = 0;
+			fPARMid = 0;
+			fPARUp = 0;
+			hourlyAbsorbedRadiation = 0;        //umol/m2/s * S /WATT_TO_PPFD, J	Watt(umol/m2/s)
+			accumulatedRadiation += 0;  //MJ
+		}
+		
+		 /* if (printFlag) { 
+			println(String.format("%-10s %.4f", "pb.leafarea:", leafArea));
+			println(String.format("%-11s %.4f", "plant fabs:", fabs));
+		} */
+	}
+/**
+ * Check if it's time to harvest the plant.
+ *
+ * @return {@code true} if the current day is greater than or equal to the harvest day plus the delay, indicating that it's time to harvest; otherwise, {@code false}.
+ */
+	boolean shouldHarvest() {
+		return daysSinceWinterSolstice >= harvestDAWS;
+	}
+	//Add this minimal, non-recursive version, 
+	@Override
+	public String toString() {
+		return "PlantBase{id=" + getId() + ", plantNumber=" + plantNumber + "}";
+	}
+
+/**
+ * Mark the plant and its associated field as harvested.
+ */
+	void harvest() {
+		harvested = true;
+		
+		FieldBase fb = first((* this (<--)+ FieldBase *));
+		fb.harvested = true;
+		[b:FruitService, (b.plantNumber == plantNumber) ==>> ;]
+	}
+	
+
+
+}==> 
+if (day ==0) 
+	(Sphere(0.01).(setShader(border?RED:YELLOW)))
+; 
+//TextLabel(0.01*Math.round(100*rfr))//.(getColor().set(new RGBColor(1,0,0)))
+//setLayer(border?borderLayer:0)

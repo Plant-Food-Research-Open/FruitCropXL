@@ -1,0 +1,151 @@
+// ##############################################//
+// 	Imports
+// ##############################################//
+
+// Utils
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Arrays;
+import java.util.List;
+import java.util.ArrayList;
+
+// File
+import java.io.File;
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
+
+// Jackson
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
+import com.fasterxml.jackson.dataformat.csv.CsvMapper;
+import com.fasterxml.jackson.databind.MappingIterator;
+import com.fasterxml.jackson.dataformat.csv.CsvSchema;
+import java.util.Iterator;
+// ##############################################//
+// 	Internal Imports
+// ##############################################//
+
+// Parameters
+import static globalParameters.*;
+import static plantParameters.*;
+import static main.*;
+// File
+import static extraTools.*;
+
+// Config Module
+import io.github.fruitcropxl.config.params.groups.*;
+import io.github.fruitcropxl.config.params.structures.*;
+
+// ##############################################//
+// 	Properties
+// ##############################################//
+
+// Modules
+
+// File
+protected static final String sep = File.separator;
+
+// ##############################################//
+// Main
+// ##############################################//
+
+public class DatasetSimulationRunner {
+    // Parameters
+    protected CommandLineArgs commandLineArgs;
+
+    // Data
+    protected CsvMapper csvMapper;
+    protected CsvSchema csvSchema;
+
+    public void runSimulation() {
+
+        String uuid = commandLineArgs.getRawProperty("uuid");
+        String inputData = MAINPATH + sep + commandLineArgs.getRawProperty("inputData");
+        String outputData = MAINPATH + sep + commandLineArgs.getRawProperty("outputData");
+        int outputId = Integer.parseInt(
+                commandLineArgs.getRawProperty("outputId"));
+
+        JsonNode parameters = getMatchedParameters(uuid, inputData);
+        mainInstance.resetGraph();
+        FILE_NAME_MODEL_OPTIONS = parameters.get("factor").asText();
+        mainInstance.init();
+        assignParameters(parameters);
+        derive();
+        mainInstance.runEnd();
+
+        outputChartData(outputData, outputId);
+        if (printFlag) {
+            println("Simulation data written to :" + outputData);
+        }
+    }
+
+    protected void assignParameters(JsonNode parameters) {
+        CategoryStore config = ((DocumentCategoryNameGroup) CONFIG.getGroup(FILE_NAME_PLANT_PARAMETERS,
+                DocumentCategoryNameGroup.class)).getCategoryStore();
+
+        config.setFlattenedAccess(true);
+
+        // Get an iterator for the field names in the JsonNode object
+        Iterator fieldNames = parameters.fieldNames();
+        // Loop through the keys using the iterator
+        while (fieldNames.hasNext()) {
+            Object nextObj = fieldNames.next();
+            if (nextObj instanceof String) {
+                String key = (String) nextObj;
+                // Get the value for each key as Double
+                double value = parameters.get(key).asDouble();
+                // Call the appropriate setter method
+                config.set(key, value);
+            } else {
+                if (printFlag) {
+                    println("Unrecognized key: " + (String) nextObj);
+                }
+                break;
+            }
+        }
+        // IMPORTANT: set false again if you only want to allow flattened access here
+        config.setFlattenedAccess(false);
+
+    }
+
+    protected JsonNode getMatchedParameters(String uuid, String inputData) {
+        MappingIterator dataIter = csvMapper.readerFor(JsonNode.class)
+                .with(csvSchema)
+                .readValues(new File(inputData));
+
+        JsonNode row;
+        boolean matchedUuid = false;
+        while (dataIter.hasNextValue()) {
+            row = (JsonNode) dataIter.nextValue();
+
+            matchedUuid = row
+                    .get("uuid")
+                    .asText()
+                    .equals(uuid);
+
+            if (matchedUuid) {
+                break;
+            }
+        }
+
+        if (!matchedUuid) {
+            if (printFlag) {
+                println("Error: Invalid UUID for Dataset simulation: " + uuid);
+            }
+            System.exit(1);
+        }
+
+        return row;
+    }
+
+    public DatasetSimulationRunner() {
+        csvMapper = new CsvMapper();
+        csvSchema = CsvSchema
+                .emptySchema()
+                .withHeader();
+
+        commandLineArgs = new CommandLineArgs();
+    }
+}

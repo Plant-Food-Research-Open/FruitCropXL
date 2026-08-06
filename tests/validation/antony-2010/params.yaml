@@ -1,0 +1,11 @@
+discrepancy:
+  dataset: plant-level-ANTONY_2010.csv
+  threshold: 0.15
+
+rmse:
+  dataset: Exp_2010_Antony.obs.drying.cycle.csv
+  synthetic-columns:
+    - name: leaf_waterPotential
+      rmse: 0.75
+    - name: waterFlux_optimized
+      rmse: 2.0

@@ -1,0 +1,72 @@
+
+Tips and syntax guidance for GroIMP and XL:
+
+---
+
+# GroIMP and XL Programming Tips
+
+### 1. **Turtle Commands and Graph Directions**
+   - **Node Connections**: The way nodes (modules) connect is defined by the graph topology and the spatial position of each node. When searching for objects, carefully consider the starting point, as it influences search results.
+
+### 2. **For Loops**
+   - **Java Syntax**: Use `{}` for loops in Java-style syntax within GroIMP:
+     ```java
+     for (int a = 1; a < 11; a++) {
+         System.out.println("Count is: " + a);
+         // Square brackets `[]` can be used here to incorporate turtle commands.
+     }
+     ```
+
+   - **Turtle Loop Syntax**: Use `()` for turtle language loops. Turtle commands such as `F(x)` and model-specific identifiers (`pb:plantBase`) integrate naturally:
+     ```groimp
+     for (1 : nrRows) (
+         Translate(plantDistance, 0, 0)  // No semicolon needed
+         for (1 : nrPlants) (
+             [ ]  // Each row is treated as a separate branch
+         )
+     )
+     ```
+
+### 3. **Branching**
+   - After a branching operation (`[ ... ]`), GroIMP returns to the starting point of the branch. This means any operations following a branch will continue from the branch's origin.
+
+### 4. **Graph Search Directions**
+   - Use the following symbols for directional navigation within a graph:
+     - `-->`: Any edge
+     - `>`: Successor
+     - `+>`: Branch
+     - `-+-`: Either direction
+     - `<+>`: Both directions
+     - `( )+`: One or more occurrences
+     - `( )*`: Zero or more occurrences
+     - `()?`: Optional (0 or 1 occurrence)
+   
+   **Example**:
+   ```xl
+   ptm1: PhytomerBase (<--)+ : (ptm2: PhytomerBase, ptm2[hasCollarEmerged] == true)
+   ```
+
+### 5. **Querying and Filtering**
+   - Use operators to filter specific items during a search. This allows you to retrieve elements that meet certain conditions.
+   - The last object in the query is the query target 
+   - Examples:
+     - **Summing an Attribute**:
+       ```xl
+       Double totalCarbon = sum((*b:Blade, (ID == b.ID)*[ci]));
+       ```
+     - **Finding the First Match**:
+       ```xl
+       Meristem M = first((*this (-->)+ m:Meristem, m[kk] == jj*));
+       ```
+     - **Selecting Based on Location**:
+       ```xl
+       gridPoint A = selectWhere((* y:gridPoint*), location(y).z == 0);
+       
+       ```
+
+### Additional Tips
+   - **Access Optimization**: Accessing an attribute using `.` (dot notation) is faster than using square brackets `[]`, especially when the attribute is defined in the module itself rather than inherited.
+   - **Query Result Order**: Although GroIMP provides results without a strict order during queries, some patterns (such as finding successors) may appear ordered because GroIMP processes them sequentially by traversing each successor one by one.
+   - **the autocompletion, it is binded to the keys : CTRL + SPACE. So you need to press that to get the popup.
+   - ** DO NOT ADD DERIVE DURING AXIONM INITIATION, IT SEEMS STOPS THE RULES. I ADDED ONE AFTER ADDING SOIL, AND IT PRODUCES EMPTY GRAPH AFTER AXIOM.
+   - ** Compute in double, store in float (where memory matters)

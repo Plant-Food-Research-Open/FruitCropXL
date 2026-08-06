@@ -1,0 +1,584 @@
+/********************************************************************************
+	IMPORTS
+********************************************************************************/
+
+import java.io.*;
+import de.grogra.vecmath.Math2;
+import de.grogra.xl.lang.*;
+// File Reader
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileReader;
+import java.io.IOException;
+import java.util.Properties;
+import java.util.List;                            
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Map;
+import org.apache.commons.math3.geometry.euclidean.threed.Vector3D;
+import static absOrgan.*;
+import static leaf.*;
+import static shoot.*;
+import static plantBase.*;
+import static main.*;
+import static globalParameters.*;
+import static rootSystem.*;
+import static fruitBase.*;
+import static fineRoot.*;
+import static structuralRoot.*;
+import static budBase.*;
+import static shootBase.*;
+import static modelOptions.*;
+import static initialConditions.*;
+import static extraTools.*;
+import static archReader.*;
+
+/**
+ * Comprehensive Guide for Extending the architecture Reader for New Data Formats
+ * 
+ * This documentation provides a step-by-step guide for extending the architecture Reader to 
+ * handle new data formats while leveraging the existing modular system and components.
+ * 
+ * ### Purpose
+ * The architecture Reader processes hierarchical plant architecture data. This guide describes how 
+ * to integrate a new reader to accommodate new data formats, ensuring compatibility with 
+ * the existing simulation framework.
+ * 
+ * ### Key Steps for Adding a New Data Reader
+ * 
+ * #### 1. Analyze the New Data Format
+ * - Identify fields required in the new format, such as `PlantID`, `OrganID`, `ParentID`, 
+ *   `Diameter`, `Length`, and coordinates `X`, `Y`, `Z`.
+ * - Compare and map fields from the new format to the existing structure.
+ * - Ensure all relevant fields and relationships are properly defined.
+ 
+ 
+ * 
+ * #### 2. Create/extend a New Row Class
+ * - Extend the `RowBase` class to parse and represent rows from the new format.
+ * - Implement:
+ *   - `toRow()` for mapping raw data to structured fields.
+ *   - `createRow(Map, String, String)` for instantiating row objects.
+ * 
+ * 
+ * #### 3. Update Node Mapping Logic
+ * - Extend `NodeMap` to handle new relationships and hierarchy structures.
+ * - Adjust apex node detection and initialization as needed.
+ *
+ * #### 4. for simplicity you can just change the XNodeRow and 
+ * create a new XNode to store the new data, see the code below
+ * 
+ * #### 5. Conduct Testing
+ * - Write unit tests for new row and reader classes.
+ * - Conduct integration tests for the full data-processing pipeline.
+ * 
+ * ### Best Practices
+ * - **Reuse Existing Code:** Use `ReconstructionDataReader`, `RowBase`, and `NodeMap` for efficiency.
+ * - **Focus on Differences:** Override methods only where format differences occur.
+ * - **Maintain Modularity:** Ensure readers are self-contained and replaceable.
+ */
+ 
+ 
+ 
+
+/**
+ *
+ * This structured process ensures smooth integration of new data formats into the existing system.
+ ```java
+/**
+ * Aggregated Root Data (Grid × Layer) — File Format
+ *
+ * <p>Purpose:
+ * Describes a discretized soil domain where root properties are aggregated per
+ * grid cell and vertical layer. Each CSV row defines one soil cell (plus an optional
+ * domain header row) with geometry, root mass/length statistics, and soil
+ * hydraulic/nutrient parameters used by FruitCropXL’s root–soil modules.
+ * </p>
+ *
+ * <h3>Schema (columns → meaning [unit / constraints])</h3>
+ * <dl>
+ *   <dt>id</dt>
+ *   <dd>Unique soil-cell ID (int). Must be &gt; 0 for real cells. Rows with id==0 must be dropped.</dd>
+ *
+ *   <dt>plant_id</dt>
+ *   <dd>Plant identifier (int) to support multi-plant runs.</dd>
+ *
+ *   <dt>parent</dt>
+ *   <dd>Vertical parent ID (int). For layer L&gt;0, this should reference the cell id at the same (x,y) and layer L-1.
+ *       Use -1 only for the optional domain/header row.</dd>
+ *
+ *   <dt>vertical_layer</dt>
+ *   <dd>Zero-based layer index (int). 0 at the surface, increasing with depth.
+ *      //this is THE important rule that separate different columns of soil DURING INITIATION
+		if(r2.N.vLayer == 0 && r2.N.order > 0) (
+			RV(10000)Translate(r2.N.start.x-location(r2).x+tx,
+					  r2.N.start.y-location(r2).y+ty, 
+					  location(r2).z)
+		)
+ *       the final root layer is not assigned as it requires two points to constructured one layer
+ * 		 That's also why we need to clean the soil and root id indexes after initialization. 
+ 
+		// Removes null entries and resizes arrays after initialization
+		rb.filterAndResizeArrays();
+ * 
+ </dd>
+ *
+ *   <dt>order</dt>
+ *   <dd>Aggregated root order in this cell (int; e.g., 1=primary, 2=lateral). Use 0 for the optional header row.</dd>
+ *
+ *   <dt>organ_type</dt>
+ *   <dd>String tag for the cell type; use "Grid" for aggregated cells.</dd>
+ *
+ *   <dt>x, y, z</dt>
+ *   <dd>Cell-center coordinates (double). z is negative downward. Units must match the model setup (default: cm).</dd>
+ *
+ *   <dt>gridSize</dt>
+ *   <dd>Horizontal cell edge length (double; default unit: cm).</dd>
+ *
+ *   <dt>soildepth</dt>
+ *   <dd>Layer thickness (double; default unit: cm).</dd>
+ *
+ *   <dt>length</dt>
+ *   <dd>Total root length aggregated in this cell for the given order (double; default unit: cm).</dd>
+ *
+ *   <dt>diameter</dt>
+ *   <dd>Representative/mean aggregated root diameter (double; default unit: cm).</dd>
+ *
+ *   <dt>fineRootDM</dt>
+ *   <dd>Fine-root dry mass aggregated in this cell (double; g).</dd>
+ *
+ *   <dt>structuralRootDM</dt>
+ *   <dd>Structural-root dry mass aggregated in this cell (double; g).</dd>
+ *
+ *   <dt>totalFineRoot</dt>
+ *   <dd>Plant-level total fine-root dry mass for normalization (double; g).</dd>
+ *
+ *   <dt>totalStructuralRoot</dt>
+ *   <dd>Plant-level total structural-root dry mass for normalization (double; g).</dd>
+ *
+ *   <dt>fFineRoot</dt>
+ *   <dd>Fractional contribution of this cell to plant fine-root mass (double; unitless).
+ *       Ideally sums to ~1 per plant across all fine-root cells. If absent, compute as
+ *       fineRootDM / totalFineRoot.</dd>
+ *
+ *   <dt>fStructuralRoot</dt>
+ *   <dd>Fractional contribution of this cell to plant structural-root mass (double; unitless).
+ *       Ideally sums to ~1 per plant across all structural-root cells. If absent, compute as
+ *       structuralRootDM / totalStructuralRoot.</dd>
+ *
+ *   <dt>waterPotential</dt>
+ *   <dd>Soil water potential (double; MPa; typically negative).</dd>
+ *
+ *   <dt>waterSaturation</dt>
+ *   <dd>Volumetric water content at current state (double; m³ m⁻³).</dd>
+ *
+ *   <dt>thetaR</dt>
+ *   <dd>Residual water content (double; m³ m⁻³).</dd>
+ *
+ *   <dt>bulkDensity</dt>
+ *   <dd>Soil bulk density (double; g cm⁻³).</dd>
+ *
+ *   <dt>poreSizeCoef</dt>
+ *   <dd>Soil pore-size parameter (double; unitless), e.g., van Genuchten n.</dd>
+ *
+ *   <dt>airEntryCoef</dt>
+ *   <dd>Air-entry parameter (double; typically 1/cm), e.g., van Genuchten α.</dd>
+ *
+ *   <dt>saturatedConductivity</dt>
+ *   <dd>Saturated hydraulic conductivity (double; e.g., cm h⁻¹).</dd>
+ *
+ *   <dt>tortuosityCoef</dt>
+ *   <dd>Tortuosity/Mualem parameter (double; unitless), often denoted l.</dd>
+ *
+ *   <dt>Ncontent</dt>
+ *   <dd>Mineral nitrogen content available in the cell (double; unit per N module, e.g., mg kg⁻¹ or g m⁻²).</dd>
+ *
+ *   <dt>fraction_NH4, fraction_NO3</dt>
+ *   <dd>Partitioning of mineral N as NH₄⁺ and NO₃⁻ (double; unitless fractions). Should sum to ~1.</dd>
+ * </dl>
+ */
+ public class XNodeRow extends RowBase implements Serializable {	
+	
+
+	//Identifier of the Axis 2, the cordon identification of an organ grows on
+	// the node position of a organ on a cordon
+	
+	int axis2ID, axis3ID, axis4ID, axis5ID, axis6ID, axis7ID, axis8ID, axis9ID;
+	int order;
+	String organType;
+	int segment = 0;		
+	double age;
+	
+	double x;
+	double y;
+	double z;
+	double diameter;
+	
+	// In XNodeRow
+	int gridX, gridY; // integer grid indices at layer 0 cell centers
+	
+	Vector3D coord;
+	/**depth/height of the soil layer, length and width is defined by soil grid size */
+	double soildepth = 0;
+	double length = 0;
+	
+	// Horizontal soil cell sizes (model units; typically cm)
+	double soilGridSize = 0.0;   // dx (along row)      ← from CSV 'gridSize'
+	double soilGridWidth = 0.0; // dy (across row)     ← from CSV 'gridWidth' (optional)
+
+	
+	//for the aggregated root node    
+	int vLayer;
+	double fineRootDM;
+    double structuralRootDM;
+    double fractionOfFineroot;
+    double fractionOfStructuralRoot;
+    /** Soil water potential in MPa */
+	float waterPotential;    
+    /** N content in soil in g m-3 */
+	float Ncontent;
+	/** Fraction of NH4 nitrogen in soil */
+	double FRACTION_NH4;
+	/** Fraction of NO3 nitrogen in soil */
+	double FRACTION_NO3;
+	/** Max soil water content in volumetic %, m³/m³, mm/mm*/
+	double waterSaturation;
+	/** Minimum soil water content in volumetic %, m³/m³, mm/mm*/
+	double thetaR;
+	/** bulkDensity of the soil g/cm3*/
+	double bulkDensity;
+	/**eq4_n unit-less, Empirical parameter n used in equation 4 and 5 in Tardieu's model (jxb 2015)  */
+	double poreSizeCoef;
+	/**eq4_alpha, unit 1/MPa, Empirical parameter alpha used in equation 4 and 5 in Tardieu's model (jxb 2015) */
+	double airEntryCoef;
+	/** maximum Soil hydraulic conductance used in equation 5 */
+	/** it was converted from hydraulic conductivity mm/h in the soil input parameter to m2/s/MPa */
+	double saturatedConductivity;
+	/** Parameter p used in equation 5 eq5_p  */
+	double tortuosityCoef;
+	
+	// Constructor
+	public XNodeRow() {}
+
+	public XNodeRow(Map headerMap, String row, String sep) {
+		super(headerMap, row, sep);
+	}
+	
+    // Utility method to check if a header exists
+    private boolean hasHeader(String name) {
+        return headerMap.containsKey(name);
+    }
+    
+	
+	/**
+	 * get the information from a row
+	 * We use lower case for the headers in the assignment to reduce confusions 
+	 * see setHeaders()
+	*/	  
+	@Override
+	public RowBase toRow() {
+		// Common fields
+		if(hasHeader("id"))          id = getInt("id");
+		if(hasHeader("plant_id"))    plantID = getInt("plant_id");
+		if(hasHeader("parent"))      pid = getInt("parent");
+		if(hasHeader("organID")) 	 organID = getInt("organ_id");  // or the correct header name you use
+		if(hasHeader("order"))       order = getInt("order");
+		if(hasHeader("organ_type"))  organType = getString("organ_type");
+		
+
+		//extra identifiers and age		
+		if(hasHeader("segment_rank"))segment = getInt("segment_rank");
+		if(hasHeader("axis2id"))     axis2ID = getInt("axis2id");
+		if(hasHeader("axis3id"))     axis3ID = getInt("axis3id");
+		if(hasHeader("axis4id"))     axis4ID = getInt("axis4id");
+		if(hasHeader("axis5id"))     axis5ID = getInt("axis5id");
+		if(hasHeader("axis6id"))     axis6ID = getInt("axis6id");
+		if(hasHeader("axis7id"))     axis7ID = getInt("axis7id");
+		if(hasHeader("axis8id"))     axis8ID = getInt("axis8id");
+		if(hasHeader("axis9id"))     axis9ID = getInt("axis9id");
+		if(hasHeader("age"))         age = getDouble("age");
+		
+		// Coordinates and length
+		if(hasHeader("x"))           x = getDouble("x")* coordinateScale;
+		if(hasHeader("y"))           y = getDouble("y")* coordinateScale;
+		if(hasHeader("z"))           z = getDouble("z")* coordinateScale;
+		
+		if(hasHeader("length"))      length = getDouble("length")* coordinateScale;
+		if(hasHeader("diameter"))    diameter = getDouble("diameter")* coordinateScale;
+		if(hasHeader("gridsize"))    {
+				soilGridSize = getDouble("gridsize")* coordinateScale;
+				//println("gridsize " + soilGridSize);
+		}
+		//set the global parameter soilGridSize and width for easy access
+		modelOptions.soilGridSize = this.soilGridSize;
+		// NEW: optional dy; back‑compat if absent
+		if (hasHeader("gridwidth"))  soilGridWidth = getDouble("gridwidth") * coordinateScale;
+		if (soilGridWidth <= 0.0 || Double.isNaN(soilGridWidth)) soilGridWidth = soilGridSize;
+		
+		modelOptions.soilGridWidth = this.soilGridWidth;
+		// (unchanged) dz from file
+		if (hasHeader("soildepth"))   soildepth = getDouble("soildepth") * coordinateScale;
+		
+		//println("soilGridSize: " + soilGridSize + " soilGridWidth " + soilGridWidth);
+		// Root-specific fields
+		if(hasHeader("vertical_layer"))    vLayer = getInt("vertical_layer");
+		if(hasHeader("finerootdm"))        fineRootDM = getDouble("finerootdm");
+		if(hasHeader("structuralrootdm"))  structuralRootDM = getDouble("structuralrootdm");
+		if(hasHeader("ffineroot")) 		   fractionOfFineroot = getDouble("ffineroot");
+		if(hasHeader("fstructuralroot"))   fractionOfStructuralRoot = getDouble("fstructuralroot");
+	
+		
+		// Soil-specific fields
+		// water
+		if (hasHeader("waterpotential"))      waterPotential = (float) getDouble("waterpotential");		
+		if (hasHeader("watersaturation"))     waterSaturation = getDouble("watersaturation");
+		if (hasHeader("thetar"))              thetaR = getDouble("thetar");
+		if (hasHeader("bulkdensity"))         bulkDensity = getDouble("bulkdensity");
+		if (hasHeader("poresizecoef"))        poreSizeCoef = getDouble("poresizecoef");
+		if (hasHeader("airentrycoef"))        airEntryCoef = getDouble("airentrycoef");
+		if (hasHeader("saturatedconductivity")) saturatedConductivity = getDouble("saturatedconductivity");
+		if (hasHeader("tortuositycoef"))      tortuosityCoef = getDouble("tortuositycoef");
+
+		// nitrogen
+		if (hasHeader("ncontent"))            Ncontent = (float) getDouble("ncontent");
+		if (hasHeader("fraction_nh4"))        FRACTION_NH4 = getDouble("fraction_nh4");
+		if (hasHeader("fraction_no3"))        FRACTION_NO3 = getDouble("fraction_no3");
+		
+
+		// If pid == 1, you might want to set global tx, ty, tz as before
+	
+				
+		// Compute integer grid indices. Prefer explicit CSV indices when present;
+		// legacy root-grid CSVs omit them, so derive indices from scaled cell centres.
+		if (hasHeader("gridx")) gridX = (int) Math.round(getDouble("gridx"));
+		else gridX = toGridIndex(x, soilGridSize);    // dx
+		
+		if (hasHeader("gridy")) gridY = (int) Math.round(getDouble("gridy"));
+		else gridY = toGridIndex(y, soilGridWidth);  // dy
+
+		//println("Headers: " + headerMap.keySet());
+
+		return this;
+	}
+	
+	 // Decide whether this row corresponds to root data
+    public boolean isAggregatedRootData() {
+        String ot = (organType == null) ? "" : organType.toLowerCase();
+        return (ot.indexOf("grid") >= 0 || vLayer > 0 || fineRootDM > 0 || structuralRootDM > 0);
+    }
+
+    /**
+     * Convert this row into a node object.
+     * Return type is XNode because XRootNode will extend XNode.
+     */
+    public XNode toXNode() {
+        if(isAggregatedRootData()) {
+            XRootNode rootNode = new XRootNode();
+            rootNode.fromRow(this);
+            return rootNode; // upcast to XNode
+        } else {
+            XNode node = new XNode();
+            node.fromRow(this);
+            return node;
+        }
+    }
+
+	
+   @Override
+    public RowBase createRow(Map headerMap, String row, String sep) {
+        // Create a temporary XNodeRow to parse data and check if root data
+        XNodeRow temp = (XNodeRow) new XNodeRow(headerMap, row, sep).toRow();
+        if(temp.isAggregatedRootData()) {
+            // Return a XRootNodeRow for root data
+            XRootNodeRow rootRow = new XRootNodeRow(headerMap, row, sep);
+            rootRow.toRow();
+            return rootRow;
+        } else {
+            // Return a XNodeRow for non-root data
+            return temp;
+        }
+    }
+}
+
+
+// helper: index from coord (origin 0; adjust if you use an origin)
+// REPLACEMENT: centers → index
+private static int toGridIndex(double coord, double cell) {
+    if (cell <= 0.0) return 0;
+    double t = coord / cell;
+    double eps = 1e-9;
+    if (t >= 0) t += eps; else t -= eps;   // robust near boundaries
+    return (int) Math.floor(t);
+}
+
+/***********************************************
+   XRootNodeRow 
+   Specializes XNodeRow for root data
+************************************************/
+public class XRootNodeRow extends XNodeRow implements Serializable {
+    public XRootNodeRow() {}
+
+    public XRootNodeRow(Map headerMap, String row, String sep) {
+        super(headerMap, row, sep);
+    }
+
+    @Override
+    public XNode toXNode() {
+        // Directly return a XRootNode since we know it's root data
+        XRootNode rootNode = new XRootNode();
+        rootNode.fromRow(this);
+        return rootNode;
+    }
+}
+
+
+//Auxiliary classes
+/**
+ * base element for the xegReader construction method
+ * based on the original xegReader method
+*/	
+
+class XNode implements Serializable {
+    ArrayList childs = new ArrayList();
+    int id;
+    int pid;
+    int plantID;
+    int organID;
+    int axis2ID;			
+    int axis3ID;			
+    int axis4ID;		
+    int axis5ID;
+    int axis6ID;
+    int axis7ID;
+    int axis8ID;
+    int axis9ID;
+    double age;
+    int apChild = 0;  //branching childs
+    int order;
+    String organType;
+    int segment;
+    Point3d start;
+    double diameter;
+    float length;
+    double soildepth;
+    boolean isApex = false;
+    boolean initialised = false;
+    XNodeRow row;
+
+    public XNode() {
+        // No-arg constructor
+    }
+
+    // Add fromRow method
+    public void fromRow(XNodeRow r) {
+        this.id = r.id;
+        this.pid = r.pid;
+        this.plantID = r.plantID;
+        this.organID = r.organID;
+        this.order = r.order;
+        this.organType = r.organType;
+        this.segment = r.segment;
+        this.axis2ID = r.axis2ID;
+        this.axis3ID = r.axis3ID;
+        this.axis4ID = r.axis4ID;
+        this.axis5ID = r.axis5ID;
+        this.axis6ID = r.axis6ID;
+        this.axis7ID = r.axis7ID;
+        this.axis8ID = r.axis8ID;
+        this.axis9ID = r.axis9ID;
+        this.age = r.age;
+        this.diameter = r.diameter;
+        this.length = (float) r.length;
+        this.start = new Point3d(r.x, r.y, r.z);
+        this.row = r;
+    }
+
+    public void addChild(int idx) {
+        childs.add(idx);
+    }
+}
+
+
+
+/**
+ * XRootNode 
+ * Adjust fields and logic as needed for your scenario.
+ * 
+ */
+class XRootNode extends XNode {
+	
+    int vLayer;
+    //x, y, indexes for the location
+    int gridX, gridY;
+    double cellDX; // = r.soilGridSize
+	double cellDY; // = r.soilGridWidth (or soilGridSize if missing)
+	double cellDZ; // = r.soildepth
+
+    double fineRootDM;
+    double structuralRootDM;
+
+    
+    double fractionOfFineroot;
+    double fractionOfStructuralRoot;
+    /** Soil water potential in MPa */
+	float waterPotential;    
+	/** Max soil water content in volumetic %, m³/m³, mm/mm*/
+	double waterSaturation;
+	/** Minimum soil water content in volumetic %, m³/m³, mm/mm*/
+	double thetaR;
+	/** bulkDensity of the soil g/cm3*/
+	double bulkDensity;
+	/**eq4_n unit-less, Empirical parameter n used in equation 4 and 5 in Tardieu's model (jxb 2015)  */
+	double poreSizeCoef;
+	/**eq4_alpha, unit 1/MPa, Empirical parameter alpha used in equation 4 and 5 in Tardieu's model (jxb 2015) */
+	double airEntryCoef;
+	/** maximum Soil hydraulic conductance used in equation 5 */
+	/** it was converted from hydraulic conductivity mm/h in the soil input parameter to m2/s/MPa */
+	double saturatedConductivity;
+	/** Parameter p used in equation 5 eq5_p  */
+	double tortuosityCoef;
+	
+	/** N content in soil in g m-3 */
+	float Ncontent;
+	/** Fraction of NH4 nitrogen in soil */
+	double FRACTION_NH4;
+	/** Fraction of NO3 nitrogen in soil */
+	double FRACTION_NO3;
+	
+    public XRootNode() {
+        super();
+    }
+
+    @Override
+    public void fromRow(XNodeRow r) {
+        super.fromRow(r);
+        this.vLayer = r.vLayer;
+        this.gridX = r.gridX;
+        this.gridY = r.gridY;
+        this.cellDX = r.soilGridSize;
+		this.cellDY = (r.soilGridWidth > 0.0) ? r.soilGridWidth : r.soilGridSize;
+		this.cellDZ = r.soildepth;  // dz
+
+        this.soildepth = r.soildepth;
+        this.fineRootDM = r.fineRootDM;
+        this.structuralRootDM = r.structuralRootDM;
+        this.fractionOfFineroot = r.fractionOfFineroot;
+        this.fractionOfStructuralRoot = r.fractionOfStructuralRoot;
+        
+        // Assigning soil-related fields
+		this.waterPotential = (float) r.waterPotential;
+		this.waterSaturation = r.waterSaturation;
+		this.thetaR = r.thetaR;
+		this.bulkDensity = r.bulkDensity;
+		this.poreSizeCoef = r.poreSizeCoef;
+		this.airEntryCoef = r.airEntryCoef;
+		this.saturatedConductivity = r.saturatedConductivity;
+		this.tortuosityCoef = r.tortuosityCoef;
+		
+		this.Ncontent = (float) r.Ncontent;
+		this.FRACTION_NH4 = r.FRACTION_NH4;
+		this.FRACTION_NO3 = r.FRACTION_NO3;     
+    }
+}
+
+ 

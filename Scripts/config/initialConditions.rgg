@@ -1,0 +1,293 @@
+import static globalParameters.*;
+import static modelOptions.*;
+import static extraTools.*;
+import de.grogra.pf.io.PropertyFileReader;
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileReader;
+import java.io.FileNotFoundException;
+import java.io.StringWriter;
+import java.io.PrintWriter;
+import java.util.StringTokenizer;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Vector;
+import java.util.Arrays;
+import static photosynthesisAndTranspiration.*;
+
+import io.github.fruitcropxl.config.params.groups.*;
+import io.github.fruitcropxl.config.params.structures.*;
+
+//*********************************Parameter definitions ********************************************************/
+/* Parameters will be read and values will be overwritten in the loadInitialConditions function */
+//******************************************************************************************/
+
+//********************************* initial_condition_organ_age *********************************/
+/** Plant age at the start of model simulation, for fruit cutting, this should be the time after budburst. */
+global double PLANT_AGE_DAYS;
+/** Plant thermal-day age after budburst at simulation start (thermal day). */
+global double PLANT_AGE_TD_AFTER_BUDBURST = 0;
+/** 26 optimal days from budburst to flowering + 6 optimal days from flowering to fruit set. */
+global double thermalDay_BB_FS = 32;
+/** Fruit set to veraison took 36 optimal days for Savignon blanc. */
+global double thermalDay_FS_VR = 33;
+
+/** Fruit age calculated from fruit set to verasion for calculating color. 
+Further utilized to calculate many fruit attributes based on age, like vessel conditions*/
+global int FRUIT_AGE_AFTER_FULLBLOOM;
+/** Number of days that the grape will reach veraison, some variables are related to this. */
+global int BERRY_AGE_AT_VERASION;
+
+/** Input for specific leaf nitrogen content, g/m2, if a specific value is desired. */
+global float leafNContent_input;
+
+//********************************* initial_condition_biomass *********************************/
+/** Total biomass of each component in grams. */
+global Double BIOMASS_LEAF;
+
+/** Biomass of internodes. */
+global float BIOMASS_INTERNODE;
+/** Biomass of roots. */
+global float BIOMASS_ROOT;
+/** Percentage of fine root in total root biomass
+	It was set to 20% based on bates et al, for filed grown three-year young vine,
+	for old vines it was estimated 2 to 5% based on Lakso 2008, holzapfel 2009.
+	However, Stewart's whole vine exvaction trial shows about 30% for a 10-year old vine */
+global float PERCENT_FINE_ROOT = 0.2;
+
+/** Ratio for estimating the carbon demand of the structural root, important for maintaining a stable trunk to structural root ratio. 
+	This value is quite important for estimating the carbon demand of the structural root when structural root is consider as one group
+	it is very hard to have a good estimation of mean root diameter which needs to be weighted by their ratio and carbon demand in the overall root system
+	using the StrRootToTrunk ratio to estimate the mean diameter we can maintain a relatively stable trunk to structural root ratio
+	when StrRootToTrunk > 1, the pesedu diameter of the structural root is smaller, and thus have a long length, when calculating 
+	the carbon demand using secondaryGrowthRate(radius), a longer length will have a big demand
+*/
+global float StrRootToTrunk = 1;
+/** Root biomass initialization mode.
+ *  Preferred source is model.options (module_configuration); legacy initial.conditions
+ *  files may still provide this key under structuralRoot.
+ *  Supported values: LEGACY_THRESHOLD_AUTO, EXPLICIT_TOTAL, RATIO_TO_WOOD_REF.
+ */
+global String rootBiomassInitMode = "LEGACY_THRESHOLD_AUTO";
+/** True when rootBiomassInitMode was explicitly provided in model.options. */
+global boolean rootBiomassInitModeSetByModelOptions = false;
+
+/** Biomass of wood, now calculated from volume, set to 10000 as a placeholder value. */
+global double BIOMASS_WOOD = 10000;
+/** Biomass of cordon, calculated from volume. */
+global Double BIOMASS_CORDON;
+
+/** Wood density in mg/cm3, important for volume to mass conversions. */
+global double WOOD_DENSITY = 400;
+/** Length of the wood, fixed to 1 m. */
+global double WOOD_LENGTH = 1;
+/** Diameter of the wood, assumed to be 8 cm. */
+global double WOOD_DIAMETER = 0.08;
+
+/** Biomass of berries. */
+global Double BIOMASS_FRUIT;
+
+/** Model inputs for fruit characteristics. */
+global float FRUIT_DRY_WEIGHT; //450 mg for apple at 30 days after full bloom, = 70-120; mg, mean fruit dry weight at veraison, WITH SEED DRY MASS.
+global float FRUIT_FRESH_WEIGHT; //3000 mg for apple at 30 days after full bloom, = 600-800; mg, mean fruit FRESH weight at veraison, WITH SEED FRESH MASS.
+/** Coefficient of Variation (CV) is the standard deviation as a percentage of the mean */
+global float CV_FRUIT; //0.1;  
+
+global float CONENTRATION_SOLUBLE_SUGAR; // = 0.05-0.15; gSolubleSugar/gH20, sugar concentration at veraison.
+global float SEED_FRESH_MASS; // = 55; mg, fresh mass of the seed.
+global float CONENTRATION_MALIC_INITIAL; // Initial malic concentration.
+global float CONENTRATION_TARTARIC_INITIAL; // Initial tartaric concentration.
+
+/** Fruit and bunch numbers per shoot/vine for crop load management. */
+global int berryNumPerBunch; // = 90; Number of berries per bunch.
+global int bunchNumPerShoot; // = 2; Number of bunches per shoot.
+global Integer bunchNumPerVine; // = 50; Used during reconstruction for matching the bunch number.
+global int totalFruitNum;
+
+
+/** Leaf Mass per Area (LMA, g m⁻²) per canopy layer.
+ *  Reciprocal of SLA. Used to compute Na = Nm × LMA.
+ *  - Grapevine typical: 50–80 g m⁻²
+ *  - Apple typical:    90–150 g m⁻²
+ */
+global double LMA_lower  = 55;
+global double LMA_middle = 58;
+global double LMA_upper  = 60;
+
+/** Specific Leaf Area (SLA, m² mg⁻¹) per canopy layer (FIXED mode).
+ *  SLA = 1 / (1000 × LMA). Reciprocal of LMA.
+ *  Unit: m² mg⁻¹ (note: 1 g = 1000 mg).
+ */
+global double SLA_lower  = 0.015 * 1e-3;
+global double SLA_middle = 0.0165 * 1e-3;
+global double SLA_upper  = 0.018 * 1e-3;
+
+/** Initial Nmass (fraction g N g⁻¹ DM) at TT₀ in Prieto dynamic mode.
+ *  Values represent 2.7–2.9% N (0.027–0.029).
+ *  Layer-specific intercepts for thermal-time decline.
+ */
+global double Nmass0_lower  = 0.027;  // 2.7%
+global double Nmass0_middle = 0.028;  // 2.8%
+global double Nmass0_upper  = 0.029;  // 2.9%
+
+/** Fixed leaf N per area (Narea, g N m⁻²) for each canopy layer (FIXED mode).
+ *  Calculated as Na = Nm × LMA.
+ *  Typical range: 1.5–2.5 g N m⁻² in grapevine and apple.
+ */
+global double Narea_lower  = 1.7;
+global double Narea_middle = 1.9;
+global double Narea_upper  = 2.1;
+
+
+
+  
+/******************************************************************************
+ * Help functions to load all parameters
+ ******************************************************************************/
+public static boolean loadInitialConditions(String file_name) {
+	boolean error = false;
+	error = error || loadPropertyFile(file_name);
+	if (error == true) if (printFlag) { println("Error during reading of parameter file(s)!"); }
+	return error;
+}
+
+////////////////////////////////////////////////////////////////////////////////////
+// load the major Property file that contains model settings
+private static boolean loadPropertyFile(String file_name) {
+	ConfigLoader loader = new ConfigLoader(new LoadInitialConditionsCommand());
+
+	// groupName: file_path, path: PATH_SCENARIOS + file_path
+	return loader.load(file_name, PATH_SCENARIOS + file_name);
+}
+
+private class LoadInitialConditionsCommand implements LoadCommand {
+	public void execute(String file_name) {
+		loadProperties(file_name);
+	}
+}
+
+
+
+
+
+//replace = NANANA.*  to remove all na and the duplicate names after it
+private static void loadProperties(String file_name) {
+
+	CategoryStore config = ((DocumentCategoryNameGroup) CONFIG.getGroup(file_name, 
+        DocumentCategoryNameGroup.class)).getCategoryStore();
+
+    config.setCategoryContext("organ_age");
+    PLANT_AGE_DAYS = config.getDouble("PLANT_AGE_DAYS");
+    try {
+    	PLANT_AGE_TD_AFTER_BUDBURST = config.getDouble("PLANT_AGE_TD_AFTER_BUDBURST", PLANT_AGE_TD_AFTER_BUDBURST);
+    } catch (RuntimeException e) {
+    	PLANT_AGE_TD_AFTER_BUDBURST = 0;
+    }
+    if (printFlag) { println("PLANT_AGE_DAYS:" + PLANT_AGE_DAYS); }
+    FRUIT_AGE_AFTER_FULLBLOOM = config.getInteger("FRUIT_AGE_AFTER_FULLBLOOM", 10);
+    
+    //MAINLY FOR GRAPE
+    BERRY_AGE_AT_VERASION = config.getInteger("BERRY_AGE_AT_VERASION", 65);
+    thermalDay_BB_FS = config.getDouble("thermalDay_BB_FS", 32);
+    thermalDay_FS_VR = config.getDouble("thermalDay_FS_VR", 33);    
+    
+    
+    config.setCategoryContext("leaf");
+    //@FIXME add leaf nitrogen content for different height
+    //leafNContent_input = config.getDouble("leafNContent_input", 2.1);
+    	/*-----------------------------------------------------------------------------
+	 * leaf nitrogen trait parameters by height
+	 * Reads values from config file (category: leaf-nitrogen).
+	 * Nm values are stored as fractions (0.03 = 3% N).
+	 *---------------------------------------------------------------------------*/
+	/** Leaf Mass per Area (g m⁻²) per canopy layer. */
+	LMA_lower  = config.getDouble("LMA_lower",  55.0);
+	LMA_middle = config.getDouble("LMA_middle", 58.0);
+	LMA_upper  = config.getDouble("LMA_upper",  60.0);
+	
+	/** Specific Leaf Area (m² mg⁻¹) per canopy layer in FIXED mode. */
+	SLA_lower  = 1/LMA_lower/1000;
+	SLA_middle = 1/LMA_middle/1000;
+	SLA_upper  = 1/LMA_upper/1000;
+	
+	/** Initial Nm (fraction g N g⁻¹ DM) at TT₀ in Prieto mode. */
+	Nmass0_lower  = config.getDouble("Nmass0_lower",  0.027);
+	Nmass0_middle = config.getDouble("Nmass0_middle", 0.028);
+	Nmass0_upper  = config.getDouble("Nmass0_upper",  0.029);
+	
+	/** Fixed Narea (g N m⁻²) for each canopy layer in FIXED mode. */
+	Narea_lower  = config.getDouble("Narea_lower",  1.7);
+	Narea_middle = config.getDouble("Narea_middle", 1.9);
+	Narea_upper  = config.getDouble("Narea_upper",  2.1);
+	
+	
+  	
+	config.setCategoryContext("wood");
+    woodBiomassCalcMethod = config.getInteger("woodBiomassCalcMethod");
+    WOOD_LENGTH = config.getDouble("WOOD_LENGTH", WOOD_LENGTH);
+    WOOD_DIAMETER = config.getDouble("WOOD_DIAMETER", WOOD_DIAMETER);
+    BIOMASS_WOOD = config.getDouble("BIOMASS_WOOD", BIOMASS_WOOD); // Use value assigned at declaration if null in CONFIG
+    BIOMASS_CORDON = config.getDouble("BIOMASS_CORDON",0);
+    
+    config.setCategoryContext("internode");
+    BIOMASS_INTERNODE = config.getDouble("BIOMASS_INTERNODE",0);
+    //can change the diameter assignment for shoot.
+    INTERNODE_0 = config.getDouble("INTERNODE_0",0);
+    
+    //this is here because of the mututal dependecy in the biomass initiation in woodBiomassCalcMethod
+    //sometimes, root biomass was calculated by trunk biomass, and the structural root to trun
+    //the total biomass of the roots, and then percentage of fine root is calculated. 
+    // Furthermore, root biomass is further divided by laryers and fractions, passing from root sytem
+    // Due to the complication
+    //I leave this initiation here rather than inside the root object 
+	    config.setCategoryContext("structuralRoot");
+	    StrRootToTrunk= config.getDouble("StrRootToTrunk",1);
+	    BIOMASS_ROOT = config.getDouble("BIOMASS_ALL_ROOTS", 1);  
+	    PERCENT_FINE_ROOT = config.getDouble("PERCENT_FINE_ROOT",0.2);
+	    try {
+	    	// New preferred location is initial.conditions.structuralRoot for wood-reference policy knobs.
+	    	rootWoodRefMode = config.getInteger("rootWoodRefMode", rootWoodRefMode);
+	    } catch (Exception e) {
+	    	// Keep model.options/default fallback for backward compatibility.
+	    }
+	    try {
+	    	defaultStrRootToWood = config.getDouble("defaultStrRootToWood", defaultStrRootToWood);
+	    } catch (Exception e) {
+	    	// Keep model.options/default fallback for backward compatibility.
+	    }
+	    try {
+	    	rootBiomassAutoInitThreshold = config.getDouble("rootBiomassAutoInitThreshold", rootBiomassAutoInitThreshold);
+	    } catch (Exception e) {
+	    	// Keep model.options/default fallback for backward compatibility.
+	    }
+	    if (!rootBiomassInitModeSetByModelOptions) {
+		    try {
+		    	// Compatibility fallback: older refactor branch stored this key in initial.conditions.
+		    	rootBiomassInitMode = config.getString("rootBiomassInitMode", rootBiomassInitMode);
+		    } catch (io.github.fruitcropxl.config.util.exceptions.KeyNotFoundException e) {
+		    	rootBiomassInitMode = "LEGACY_THRESHOLD_AUTO";
+		    } catch (Exception e) {
+		    	rootBiomassInitMode = "LEGACY_THRESHOLD_AUTO";
+		    }
+	    }
+	    
+	    
+	    config.setCategoryContext("fruit");
+    FRUIT_FRESH_WEIGHT = config.getDouble("FRUIT_FRESH_WEIGHT", 100);
+    FRUIT_DRY_WEIGHT = config.getDouble("FRUIT_DRY_WEIGHT", 10);
+    CV_FRUIT= config.getDouble("CV_FRUIT", 0.1);
+    
+    CONENTRATION_SOLUBLE_SUGAR = config.getDouble("CONENTRATION_SOLUBLE_SUGAR",0.1);
+    
+    CONENTRATION_MALIC_INITIAL = config.getDouble("CONENTRATION_MALIC_INITIAL",0.1);
+    
+    CONENTRATION_TARTARIC_INITIAL = config.getDouble("CONENTRATION_TARTARIC_INITIAL",0.1);
+        
+    berryNumPerBunch = config.getInteger("berryNumPerBunch",1);
+    bunchNumPerShoot = config.getInteger("bunchNumPerShoot",1);
+    bunchNumPerVine = config.getInteger("bunchNumPerVine", 1); // TODO: check if this is an appropriate default value
+    SEED_FRESH_MASS = config.getDouble("SEED_FRESH_MASS",0);
+	
+	
+	
+}

@@ -1,0 +1,548 @@
+import static java.lang.Math.*;
+import static plantBase.*;
+import static absOrgan.*;
+import static leaf.*;
+import static shoot.*;
+import static globalParameters.*;
+import static plantParameters.*;
+import static modelOptions.*;
+import static initialConditions.*;
+import static environment.*;
+import static extraTools.*;
+import static soil.*;
+import static berryYield.*;
+import static rootSystem.*;
+import static interfaces.*;
+import static budBase.*;
+import static shootBase.*;
+import java.util.Arrays;
+
+import io.github.fruitcropxl.config.params.groups.*;
+import io.github.fruitcropxl.config.params.structures.*;
+
+public module BudGrapevineService extends BudService {
+	
+	public void loadParameters() {
+			
+		/** Set the context for file name parameters*/
+		CategoryStore config = ((DocumentCategoryNameGroup) CONFIG.getGroup(FILE_NAME_PLANT_PARAMETERS, 
+			DocumentCategoryNameGroup.class)).getCategoryStore();
+		
+		/** Configuration context for carbon-related parameters */
+		config.setCategoryContext("bud-general");
+		//common parameters
+		stDormancyStage      = config.getInteger("stDormancyStage", 4);
+	}
+	 
+	
+    // bud initiation for shoot growing
+	// used in the XEG reader, more information can be added in the tree factory if needed
+	public BudService initiate_pi(PlantIdentifier pi, String budShootType)
+	{ 
+		loadParameters();
+		plantNumber = pi.plantNumber;
+		border = pi.border;
+		age = plastochron;
+		dormant = true;
+		length = 1e-4;
+				
+		String[] splitValues = budShootType.split("[_\\.]");
+		if (splitValues.length > 1) {
+			shootType = splitValues[1];
+			// Check if the second value contains 'V'
+			if (shootType.contains("V")) {
+				budType = 1;
+			}
+			// Check if the second value contains 'F'
+			if (shootType.contains("F")) {
+				budType = 2;
+			}
+		} else if (splitValues.length == 1) {
+			shootType = "";
+			budType = 2;
+		}
+		
+		syllepticOrder = 0;
+		dormancyStage = stDormancyStage;
+		accumulatedChill = 0;
+		accumulatedHeat = 0;
+		heatTarget = Double.POSITIVE_INFINITY;
+		diameter = 1e-3;
+		// Init variables for branching
+		ageGdd = phyllochron * rank;
+		gcCounter = rank;
+		probBudBreak = rank <= 1 ? 0 : 1;
+		this.gcDuration = gcDurationGlobal; 
+		int bunchPosition = budType == 2? random_int(2,6) : 0;
+		bunchPositions = new int[] {bunchPosition};
+		//println("bunchPositions " + Arrays.toString(bunchPositions));		
+		return this;
+	}	
+		
+	// bud initiation for shoot growing
+	// used in the normal initiation for setting the initial condition from the start
+	// or development rules
+	public void initiate(Internode itn, float FBUD_FLORAL)
+	{ 
+		loadParameters();
+		//general identifers
+		plantNumber = itn.plantNumber;
+		cordonNumber = itn.cordonNumber;
+		nodeNumber = itn.nodeNumber;
+		this.ID = itn.nodeID;
+		this.order = itn.order + 1; 
+		this.rank = 0;
+		this.axis2ID = itn.axis2ID; 
+		this.axis3ID = itn.axis3ID;
+		this.axis4ID = itn.axis4ID;
+		this.axis5ID = itn.axis5ID;
+		this.axis6ID = itn.axis6ID;
+		this.axis7ID = itn.axis7ID;
+		this.axis8ID = itn.axis8ID;
+		this.axis9ID = itn.axis9ID;
+		this.cpn = axis2ID + axis3ID + axis4ID + axis5ID + axis6ID + axis7ID + axis8ID + axis9ID + rank;	
+		
+		if(itn.rank == 0 || itn instanceof Cordon) { 
+			this.syllepticOrder = 0; 
+			dormant = true;
+		} else { 
+			this.syllepticOrder = itn.syllepticOrder + 1;
+			dormant = false;
+		} 
+		
+		//information for the bud
+		this.budType = budTypeDraw(FBUD_FLORAL);
+		
+		age = plastochron;
+		
+		length = 1e-4;
+				
+		//used in phenology module
+		dormancyStage = stDormancyStage;
+		accumulatedChill = 0;
+		accumulatedHeat = 0;
+		heatTarget = Double.POSITIVE_INFINITY;
+		// Init variables for branching
+		ageGdd = phyllochron * rank;
+		gcCounter = rank;
+		
+		if(useTrophicCompetition == true) {
+			this.gcDuration = gcDurationGlobal;
+		}	
+		gcDegreeDays = 0;
+		//probBudBreak = rank <= 1 ? 0 : 1;
+		
+		//position for visualization, 
+		//for convience in dynamic growth add 
+		//one bunch per shoot as it is hard to deal with decimals
+		int bunchPosition = budType == 2? random_int(2,6) : 0;
+		bunchPositions = new int[] {bunchPosition};
+		
+		//if (printFlag) { println("bunchPositions " + Arrays.toString(bunchPositions)); }
+		
+		
+	}
+
+	
+
+	
+	// Determine when bud should produce secondary shoot based on thermal time and soil water potential
+	public void updateOrganogenesisParams()
+	{
+		shouldBreak = false;
+		gcDegreeDays += wangEngelTempFunction(Ta, MIN_TEMP, OPT_TEMP, MAX_TEMP,REFTMP)*DT;	// Add thermal time to duration of current growth cycle
+		
+		if (budType == 1 && syllepticOrder == 1 && gcDegreeDays > gcDuration) {
+			
+			// Calculate duration in thermal time of next growth cycle using soil water potential
+			gcCounter++;
+			this.gcDuration = gcDurationGlobal;
+			gcDegreeDays = 0;
+			
+			// Determine whether bud should break in this growth cycle
+			float p = Math.random();
+			if (p < probBudBreak) {
+				shouldBreak = true;
+			}
+		}
+	}
+	
+	// conditions for germinations
+	public boolean shouldBreak() {
+		if (useTrophicCompetition == true) {
+			return shouldBreak;
+		} else {
+			//if(dormant == true && syllepticOrder ==0 && useStaticArc == false && dormancyStage == phenology.POST_ECODORMANCY) return age > this.germinationDelay;
+			//if(dormant == true && syllepticOrder == 0 && useStaticArc == false &&  age <2) return Math.random() >0.2; //control bud break of primary shoot
+			if(this.dormant == true && this.dormancyStage == phenology.POST_ECODORMANCY && 
+			   this.syllepticOrder == 0 && useStaticArc == false &&  this.age > budBurstDelay)  
+		   {	
+				this.dormant = false;
+				if (printFlag) { println("bud burst happens" + "this.syllepticOrder " + this.syllepticOrder); }
+				return true;
+			} else 
+				return false;
+		}
+	}
+
+	public ApexService createApex() {
+		return new ApexGrapevine();
+	}
+
+	
+} ==> if(budType == 1) (
+	Sphere(this.length).(setShader(GREEN))
+) else if(budType == 2) (
+	Sphere(this.length).(setShader(RED))
+	//for (int j=1; j<=5; j++) ([RU(j*360/5) RL(20) Cylinder(1e-2, 0.1e-2) Parallelogram(10e-2,5e-2).(setColor(0xFF00FF))])
+);
+//} ==> Sphere(this.length).(setShader(GREEN));
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+public module ApexGrapevine extends ApexService
+{
+	public void loadParameters() {
+			
+		/** Set the context for file name parameters*/
+		CategoryStore config = ((DocumentCategoryNameGroup) CONFIG.getGroup(FILE_NAME_PLANT_PARAMETERS, 
+			DocumentCategoryNameGroup.class)).getCategoryStore();
+		
+		/** Configuration context for carbon-related parameters */
+		config.setCategoryContext("bud-general");
+	
+	
+		}
+	
+	// initiation of main apex
+	public void initiate_pb(PlantBase pb, int i, int k, int l)
+	{ 
+		loadParameters();
+		plantNumber = pb.plantNumber;
+		border = pb.border;
+		rank = i+1;
+		nodeNumber = k; 
+		cordonNumber = l;
+		cpn = rank;
+		syllepticOrder = 0;
+		phenologyStage = 1;
+		age = this.rank * plastochron;
+		length = 1e-4;
+		bunchPositions = new int[] {0};
+		initOrganogenesisParamsPrimary();
+		
+	}
+	
+	public void initiate(BudService b)
+	{ 
+		loadParameters();
+		plantNumber = b.plantNumber;
+		border = b.border;
+		rank = b.rank+1;
+		cpn = b.cpn;
+		syllepticOrder = b.syllepticOrder;
+		phenologyStage = 1;
+		nodeNumber = b.nodeNumber; 
+		cordonNumber = b.cordonNumber;
+		age = 0;
+		ageGdd = 0;
+		length = 1e-4;
+		
+		this.ID = b.nodeID;
+		this.order = b.order; 
+		this.rank = b.rank;
+		this.axis2ID = b.axis2ID; 
+		this.axis3ID = b.axis3ID;
+		this.axis4ID = b.axis4ID;
+		this.axis5ID = b.axis5ID;
+		this.axis6ID = b.axis6ID;
+		this.axis7ID = b.axis7ID;
+		this.axis8ID = b.axis8ID;
+		this.axis9ID = b.axis9ID;
+		this.cpn = axis2ID + axis3ID + axis4ID + axis5ID + axis6ID + axis7ID + axis8ID + axis9ID + rank;
+		
+		if (usePhenology == true && b.budType == 2) {
+			if (useYieldEst == true) {
+				bunchesPerShoot = getBunchesPerShoot(b);
+			}
+			tmaxBEN_bud = b.accumulatedTmaxBEN / b.tmaxDaysBEN;
+			carbonBEN_bud = b.accumulatedCarbonBEN / b.carbonHoursBEN;
+			bunchPositions = b.bunchPositions;
+		} else {
+			int bunchPosition = b.budType == 2? random_int(2,6) : 0;
+			bunchPositions = new int[] {bunchPosition};
+		}
+		
+		//if (printFlag) { println(" bunchPositions " + bunchPositions[0]); }
+		
+		initOrganogenesisParamsSecondary();
+	}
+	
+	public void initiate(ApexService a);
+	// Initiate parameters for calculating organogenesis probabilities for primary axis
+	void initOrganogenesisParamsPrimary()
+	{
+		gcCounter = 0;
+		gcDuration = phyllochron;
+		gcDegreeDays = 0;
+		insertionRank = 0;
+		
+		phytomerProductionLag = 0;
+		potentialBiomassDemandSum = 0;
+		potentialBiomassSupplySum = 0;
+		this.gcDuration = gcDurationGlobal;
+	}
+	
+	// Initiate parameters for calculating organogenesis probabilities for secondary axis
+	void initOrganogenesisParamsSecondary()
+	{
+		gcCounter = 0;
+		sb = first((* s:ShootBase, (s.isBaseOf(this))*));
+		
+		this.gcDuration = gcDurationGlobal;
+		gcDegreeDays = 0;
+		
+		insertionRank = rank-1;
+		
+		// Determine type of secondary axis - 2 if it was produced from a P0 phytomer, 3 if it was produced from P1-P2 phytomer
+		
+		if (sb == null || sb.getPhytomerType(insertionRank) == 0 ) {
+			shootType = "P0";
+		} else {
+			shootType = "P1";
+		}
+		
+		if (insertionRank < 5) {
+			phytomerProductionLag = 8;
+		} else {
+			phytomerProductionLag = 6;
+		}
+		
+		potentialBiomassDemandSum = 0;
+		potentialBiomassSupplySum = 0; 
+	}
+	
+	// Add the potential biomass demand, potential biomass supply and degree days from the current step to the total
+	// Check if a new growth cycle should start, and if set shouldTerminate and shouldProducePhytomer
+	void updateOrganogenesisParams()
+	{
+		if(pb == null) {
+			pb = first((* p:PlantBase, (p.plantNumber == this.plantNumber)*));
+			
+		}
+		if(sb == null) {
+			sb = first((* s:ShootBase, (s.isBaseOf(this))*));
+		}		
+		potentialBiomassDemandSum += pb.potentialBiomassDemand;
+		potentialBiomassSupplySum += pb.potentialBiomassSupply;
+		
+		gcDegreeDays += wangEngelTempFunction(Ta, MIN_TEMP, OPT_TEMP, MAX_TEMP,REFTMP)*DT;
+		
+		shouldProducePhytomer = false;
+		shouldTerminate = false;
+		
+		if (gcDegreeDays > gcDuration) {
+			
+			newGrowthCycle();
+			
+			if (syllepticOrder == 0) {
+				shouldProducePhytomer = true;
+			} 
+			
+			if (syllepticOrder == 1) {
+				setShouldTerminateSecondary();
+				setShouldProducePhytomerSecondary();
+			}
+		}
+	}
+	
+	// Calculate the duration and supply demand ratio for the new organogenesis growth cycle
+	// Reset the growth cycle duration and biomass supply and demand sums to zero 
+	void newGrowthCycle()
+	{
+		gcCounter++;
+		
+		this.gcDuration = gcDurationGlobal;
+		gcDegreeDays = 0;
+			
+		supplyDemandRatio = sum(potentialBiomassSupplySum) / sum(potentialBiomassDemandSum);
+		potentialBiomassSupplySum = 0;
+		potentialBiomassDemandSum = 0;
+	}
+	
+	// Calculate the probability that this apex will be terminated in the current growth cycle
+	// This needs to be calculated each growth cycle as it depends on the number of phytomers on the given shoot
+	void calcTerminationProportion()
+	{
+		float terminationConstA;
+		float terminationConstB = 0.050;
+		
+		if (shootType.equals("P0")) {
+			if (rank - 1 - insertionRank <= 5) {
+				terminationConstA = 0.091;
+			} else {
+				terminationConstA = 0.012;
+			}
+		} else {
+			if (rank - 1 - insertionRank <= 5) {
+				terminationConstA = 0.143;
+			} else {
+				terminationConstA = 0.102;
+			}
+		}
+		
+		proportionTerminated = 1 - (1 / (1 + Math.exp((-supplyDemandRatio + terminationConstA) / terminationConstB)));
+	}
+	
+	// Determine whether the apex should die in this cycle based on proportion of apexes terminated
+	void setShouldTerminateSecondary()
+	{
+		calcTerminationProportion();
+		float p = Math.random();
+		if (p < proportionTerminated) {
+			shouldTerminate = true;
+		}
+	}
+	
+	// Calculate the probability that this apex will produce a phytomer at each growth cycle
+	// This only needs to be calculated once, when the apex becomes active
+	void calcProbPhytomer()
+	{
+		if (gcCounter == phytomerProductionLag) {
+			
+			float awII = 1.73;
+			float bwII = -7.51;
+			float cwII = -0.28;
+		
+			float phytomerProductionConstA;
+			float phytomerProductionConstB;
+			
+			if (shootType.equals("P0")) {
+				phytomerProductionConstA = 3.0;
+			} else {
+				phytomerProductionConstA = 1.4;
+			}
+			CategoryStore config = ((DocumentCategoryNameGroup) CONFIG.getGroup(FILE_NAME_MODEL_OPTIONS, 
+				DocumentCategoryNameGroup.class)).getCategoryStore();
+			
+			config.setCategoryContext("environment_soil_water");
+			double poreSizeCoef = config.getDoubleArray("poreSizeCoef")[0];
+			double airEntryCoef = config.getDoubleArray("airEntryCoef")[0];
+		
+		 	float m = 1.0- 1.0/poreSizeCoef;
+			//airEntryCoef is 1/Kpa
+			float a = Math.pow(-inputWaterPotential * 1000 * airEntryCoef, poreSizeCoef);
+			phytomerProductionConstB = 1 / (1 + 
+				(awII * Math.exp(bwII * ((1/Math.pow(a+1,m)) + cwII))));
+			
+			probPhytomerProduction = phytomerProductionConstA * phytomerProductionConstB * supplyDemandRatio;
+			probPhytomerProduction = min(probPhytomerProduction, 1);
+			probPhytomerProduction = max(probPhytomerProduction, 0); 
+		}
+	}
+	
+	// Determine whether a phytomer should be produced based on phytomer production probability
+	void setShouldProducePhytomerSecondary()
+	{
+		// Determine whether this apex should produce a phytomer
+		calcProbPhytomer();
+		if (gcCounter > phytomerProductionLag && shouldTerminate == false) {
+			float q = Math.random();
+			if (q < probPhytomerProduction) {
+				shouldProducePhytomer = true;
+			}
+		}
+	}
+	
+	// conditions fot reproductive terminal phytomer production
+	boolean shouldProducePhytomer()
+	{
+		if (useTrophicCompetition == true) {
+			return shouldProducePhytomer;
+		} else {
+			if ((this.age >= this.rank * plastochron) && this.rank <= MAX_PHYTOMER_NUM)
+				
+			return true;
+		}
+	}
+	
+	// produce a fruit at certain rank
+	boolean shouldProduceBunch()
+	{
+		//if (printFlag) { println("bunchPositions " + bunchPositions); }
+		for (int pos : bunchPositions) {
+			
+			if (pos == this.rank) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	// Return true if apex should be terminated
+	boolean shouldTerminate()
+	{
+		if (useTrophicCompetition == true) {
+			return shouldTerminate;
+		} else {
+			return false;
+		}
+	}
+	
+	// get branching angle
+	public double getAngle()
+	{
+		// this needs to be coupled to branchType
+		return 70;
+	}
+	
+	// increase in IDENTIFIERS after phytomer creation
+	public void increment()
+	{
+		rank = this.rank +1;
+		cpn = this.cpn + 1;
+	}
+	// conditions fot reproductive terminal phytomer production
+	boolean shouldTerminateGeneratively()
+	{
+		return true;
+	}
+	/**
+	 * Updates the water potential of the apex.
+	 */
+	public void updateWaterPotential()
+	{
+		if(parent[0] == null) { 
+			this.parent[0] = first((*this (<--)+ Internode*));
+			parentID = parent[0].nodeID;
+		}
+		
+		if(parent[0] == null) {
+			this.waterPotential = inputWaterPotential;
+		} else {
+			this.waterPotential = parent[0].waterPotential;
+			this.order = parent[0].order;
+		}
+	}
+	
+} ==> Sphere(this.length).(setShader(RED));

@@ -1,0 +1,594 @@
+import static initiationStandard.*;
+import static initiationVirtualFruit.*;
+import static initiationArchReader.*;
+import static initiationStructuralVariation.*;
+import static initiationSingleRoot.*;
+import static initiationSingleLeaf.*;
+import static initiationOptimalCanopyArchitecture.*;
+import static initiationBerryPopulation.*;
+import static initiationArchReaderGPU.*;
+import static initiationStandardGridClone.*;
+import static initiationFieldRandomCanopy.*;
+
+import static main.*;
+import static plantBase.*;
+import static rootSystem.*;
+import static soil.*;
+import static leaf.*;
+import static globalParameters.*;
+import static modelOptions.*;
+import static plantParameters.*;
+import static initialConditions.*;
+import static fineRoot.*;
+import static structuralRoot.*;
+import static fruitBase.*;
+import static budBase.*;
+import static shoot.*;
+import static absOrgan.*;
+import static fieldBase.*;
+
+import io.github.fruitcropxl.config.params.groups.*;
+import io.github.fruitcropxl.config.params.structures.*;
+import java.io.Serializable;
+
+
+public class InitiationServiceFactory implements Serializable {
+	public static InitiationService getService(String initiation_method) {
+
+		if ("ArchReader".equals(initiation_method)) 
+		{
+			return new InitiationArchReader();
+		}
+		else if ("ArchReaderGPU".equals(initiation_method)) {
+			return new InitiationArchReaderGPU();
+		} 
+		else if ("virtualFruit".equals(initiation_method)) 
+		{
+			return new InitiationVirtualFruit();
+		}
+		else if ("structuralVariation".equals(initiation_method)) {
+			return new InitiationStructuralVariation();	
+		}
+		else if ("singleRoot".equals(initiation_method)) {
+			return new InitiationSingleRoot();	
+		}
+		else if ("singleLeaf".equals(initiation_method)) {
+			return new InitiationSingleLeaf();	
+		}
+		else if ("optimal_canopy_architecture".equals(initiation_method)) {
+			return new InitiationOptimalCanopyArchitecture();	
+		}
+		else if ("berry_population".equals(initiation_method)) {
+			return new InitiationBerryPopulation();	
+		}
+		else if ("standard".equals(initiation_method)) {
+			return new InitiationStandard();
+		}
+		else if ("standardGridClone".equals(initiation_method)) {
+			return new InitiationStandardGridClone();
+		}
+		else if ("fieldRandomCanopy".equals(initiation_method)) {
+			return new InitiationFieldRandomCanopy();
+		}
+		else
+		{
+			return new InitiationArchReader(); // Default case
+		}
+	}
+}
+
+public abstract class InitiationService implements Serializable {
+	public abstract void initiate();
+	public static void initializeReportableFieldMetadata() {
+	[ f:FieldBase ::> {
+		f.isReportable = true;
+		f.fieldInstanceId = 0;
+	} ]
+	[ t:Tile ::> {
+		t.isReportable = true;
+		t.fieldInstanceId = 0;
+	} ]
+	[ p:PlantIdentifier ::> {
+		p.isReportable = true;
+		p.fieldInstanceId = 0;
+	} ]
+	[ o:Organ ::> {
+		o.isReportable = true;
+		o.fieldInstanceId = 0;
+		o.nodeID = o.getId();
+	} ]
+	[ s:Soil ::> {
+		s.isReportable = true;
+		s.fieldInstanceId = 0;
+	} ]
+}
+
+public static long getMaxFieldBaseId() {
+	long maxId = 1L;
+	[ f:FieldBase ::> {
+		if (f.getId() > maxId) maxId = f.getId();
+	} ]
+	return maxId;
+}
+
+public static void finalizeCloneFieldCopies(long fieldIdCutoff) {
+	final java.util.ArrayList newFields = new java.util.ArrayList();
+	[ f:FieldBase, (f.getId() > fieldIdCutoff) ::> {
+		newFields.add(f);
+	} ]
+	if (newFields.isEmpty()) return;
+
+	java.util.Collections.sort(newFields, new java.util.Comparator() {
+		public int compare(Object a, Object b) {
+			long idA = ((FieldBase) a).getId();
+			long idB = ((FieldBase) b).getId();
+			if (idA < idB) return -1;
+			if (idA > idB) return 1;
+			return 0;
+		}
+	});
+
+	int originalPlantCount = Math.max(1, (int) totalPlants);
+	int nextFieldInstanceId = 1;
+	for (FieldBase existing : (* f:FieldBase *)) {
+		nextFieldInstanceId = Math.max(nextFieldInstanceId, existing.fieldInstanceId + 1);
+	}
+
+	int i;
+	for (i = 0; i < newFields.size(); i++) {
+		FieldBase fb = (FieldBase) newFields.get(i);
+		finalizeClonedField(fb, nextFieldInstanceId++, originalPlantCount);
+	}
+}
+
+private static void finalizeClonedField(FieldBase fb, int fieldInstanceId, int originalPlantCount) {
+	java.util.HashMap plantNumberMap = new java.util.HashMap();
+	fb.isReportable = false;
+	fb.fieldInstanceId = fieldInstanceId;
+
+	for (PlantIdentifier pi : (* fb (-->)+ p:PlantIdentifier *)) {
+		Integer oldPlant = Integer.valueOf(pi.plantNumber);
+		Integer newPlant = (Integer) plantNumberMap.get(oldPlant);
+		if (newPlant == null) {
+			newPlant = Integer.valueOf(fieldInstanceId * originalPlantCount + pi.plantNumber);
+			plantNumberMap.put(oldPlant, newPlant);
+		}
+		pi.plantNumber = newPlant.intValue();
+		pi.isReportable = false;
+		pi.fieldInstanceId = fieldInstanceId;
+
+		if (pi instanceof PlantBase) {
+			PlantBase pb = (PlantBase) pi;
+			pb.nodeID = pb.getId();
+			pb.rbID = 0L;
+			pb.childTrunkID = 0L;
+			pb.childStructuralRootID = 0L;
+		}
+	}
+
+	for (Organ org : (* fb (-->)+ orgQuery:Organ *)) {
+		Integer newPlant = (Integer) plantNumberMap.get(Integer.valueOf(org.plantNumber));
+		if (newPlant != null) org.plantNumber = newPlant.intValue();
+		org.isReportable = false;
+		org.fieldInstanceId = fieldInstanceId;
+		org.nodeID = org.getId();
+		org.plantBaseID = 0L;
+		org.parentID = 0L;
+
+		if (org instanceof RootBase) {
+			RootBase rb = (RootBase) org;
+			rb.plantBaseID = 0L;
+			rb.parentID = 0L;
+			if (rb.frIDs != null) java.util.Arrays.fill(rb.frIDs, 0L);
+			if (rb.srIDs != null) java.util.Arrays.fill(rb.srIDs, 0L);
+			if (rb.slIDs != null) java.util.Arrays.fill(rb.slIDs, 0L);
+		} else if (org instanceof FineRoot) {
+			FineRoot fr = (FineRoot) org;
+			fr.rbID = 0L;
+			fr.slID = 0L;
+		} else if (org instanceof StructuralRoot) {
+			StructuralRoot sr = (StructuralRoot) org;
+			sr.frID = 0L;
+			sr.verticalParentID = 0L;
+		}
+	}
+
+	for (Soil soilNode : (* fb (-->)+ soilQuery:Soil *)) {
+		Integer newPlant = (Integer) plantNumberMap.get(Integer.valueOf(soilNode.plantNumber));
+		if (newPlant != null) soilNode.plantNumber = newPlant.intValue();
+		soilNode.isReportable = false;
+		soilNode.fieldInstanceId = fieldInstanceId;
+	}
+
+	for (Tile tileNode : (* fb (-->)+ tileQuery:Tile *)) {
+		Integer newPlant = (Integer) plantNumberMap.get(Integer.valueOf(tileNode.plantNumber));
+		if (newPlant != null) tileNode.plantNumber = newPlant.intValue();
+		tileNode.isReportable = false;
+		tileNode.fieldInstanceId = fieldInstanceId;
+	}
+
+	for (PlantBase pb : (* fb (-->)+ p:PlantBase *)) {
+		pb.nodeID = pb.getId();
+		pb.isReportable = false;
+		pb.fieldInstanceId = fieldInstanceId;
+
+		Trunk tr = first((* pb (-->)+ trunkQuery:Trunk *));
+		if (tr != null) {
+			pb.childTrunkID = tr.getId();
+		} else {
+			Internode it = first((* pb (-->)+ internodeQuery:Internode *));
+			if (it != null) pb.childTrunkID = it.getId();
+		}
+
+		StructuralRoot sr = first((* pb (-->)+ srt:StructuralRoot, (srt.layer == 0) *));
+		if (sr != null) pb.childStructuralRootID = sr.getId();
+
+		RootBase rb = first((* pb (-->)+ rbq:RootBase *));
+		if (rb != null) {
+			rb.nodeID = rb.getId();
+			rb.parentID = pb.getId();
+			rb.plantBaseID = pb.getId();
+			pb.addRootBase(rb);
+			rebuildRootCloneIds(pb, rb);
+			pb.initializeCarbonTransport();
+		}
+	}
+
+	for (Organ org : (* fb (-->)+ orgParentQuery:Organ *)) {
+		PlantBase pb = first((* org (<--)+ parentPlantQuery:PlantBase *));
+		Organ parent = first((* org (<--)+ parentOrganQuery:Organ *));
+		if (pb != null) org.plantBaseID = pb.getId();
+		org.parentID = (parent != null) ? parent.getId() : ((pb != null) ? pb.getId() : 0L);
+	}
+
+	for (GrowingOrgan growOrg : (* fb (-->)+ growOrgQuery:GrowingOrgan *)) {
+		growOrg.initializeCarbonTransport();
+	}
+}
+
+private static void rebuildRootCloneIds(PlantBase pb, RootBase rb) {
+	int layers = Math.max(1, numofSoilLayers);
+	if (rb.frIDs == null || rb.frIDs.length != layers) rb.frIDs = new long[layers];
+	if (rb.srIDs == null || rb.srIDs.length != layers) rb.srIDs = new long[layers];
+	if (rb.slIDs == null || rb.slIDs.length != layers) rb.slIDs = new long[layers];
+
+	java.util.Arrays.fill(rb.frIDs, 0L);
+	java.util.Arrays.fill(rb.srIDs, 0L);
+	java.util.Arrays.fill(rb.slIDs, 0L);
+
+	int layer;
+	for (layer = 0; layer < layers; layer++) {
+		Soil s = first((* sl:Soil, (sl.plantNumber == pb.plantNumber && sl.fieldInstanceId == pb.fieldInstanceId && sl.layer == layer) *));
+		FineRoot fr = first((* fr1:FineRoot, (fr1.plantNumber == pb.plantNumber && fr1.fieldInstanceId == pb.fieldInstanceId && fr1.layer == layer) *));
+		StructuralRoot sr = first((* sr1:StructuralRoot, (sr1.plantNumber == pb.plantNumber && sr1.fieldInstanceId == pb.fieldInstanceId && sr1.layer == layer) *));
+
+		if (s != null) rb.slIDs[layer] = s.getId();
+		if (fr != null) {
+			rb.frIDs[layer] = fr.getId();
+			fr.rbID = rb.getId();
+			fr.plantBaseID = pb.getId();
+			if (s != null) fr.slID = s.getId();
+		}
+		if (sr != null) {
+			rb.srIDs[layer] = sr.getId();
+			sr.plantBaseID = pb.getId();
+			if (fr != null) sr.frID = fr.getId();
+		}
+	}
+
+	rb.filterAndResizeArrays();
+}
+
+	/**
+	 * Initialize the architecture if applicable by extending this class and overriding this method.
+	 */
+	public void initArchitecture();
+}
+
+
+/**
+ * Abstract class for initiation methods.
+ */
+public abstract class InitArch implements Serializable {
+
+    /**
+     * Flag to indicate if roots have been initialized.
+     */
+    public static boolean rootsInitialised = false;
+
+    /**
+     * Flag to indicate if shoots have been initiated.
+     */
+    public static boolean shootsInitiated = false;
+
+    /**
+     * Counter for the number of bunches.
+     */
+    public static int bunchCount = 0;
+    
+    // 1. Validate soil parameters only
+	static boolean validateSoilParams() {
+		try {
+			totalSoilDepth = sum((* s:Soil, (s[plantNumber] == 1) *)[length]);
+			int layers = (int) count((* s:Soil, (s[plantNumber] == 1) *));
+			if (layers != 0 && layers != numofSoilLayers && !useComplexRoot) {
+				println("Validation error: Mismatch between numofSoilLayers and computed layers value");
+				return false;
+			}
+			return true;
+		} catch (Exception e) {
+			println("Unexpected error during soil validation: " + e.getMessage());
+			return false;
+		}
+	}
+	
+	// 2. Validate root proportions only
+	static boolean validateRootProportions() {
+		try {
+			float frootProportion = sum((* f:FineRoot, (f[plantNumber] == 1) *)[fiRootProportion]);
+			float srootProportion = sum((* f:StructuralRoot, (f[plantNumber] == 1) *)[stRootProportion]);
+			if (frootProportion > 1 || srootProportion > 1 || (frootProportion + srootProportion) > 2.1) {
+				println("Validation error: The sum of frootProportion and srootProportion needs to be 1");
+				return false;
+			}
+			return true;
+		} catch (Exception e) {
+			println("Unexpected error during root proportion validation: " + e.getMessage());
+			return false;
+		}
+	}
+	
+	// 3. Validate leaf area and crop load
+	static void checkLeafAreaAndCropLoad() {
+		/* try {
+			if (desiredLeafArea_postPrune > 1) {
+				double totalLeafArea = sum((* l:Leaf, (l.plantNumber == 1) *)[area]);
+				double odd = desiredLeafArea_postPrune / totalLeafArea;
+				double ratio = odd >= 1 ? 0 : odd;
+				if (printFlag) println("--------leaf thinning-----------");
+				println("Desired Leaf Area: " + desiredLeafArea_postPrune + "\nTotal Leaf Area: " + totalLeafArea + "\nRemoval Ratio: " + ratio);
+				[
+					p:Petiole (-->)+ Leaf, (p.shouldRemove(odd)) ==>> ;
+				]
+			}
+		} catch (io.github.fruitcropxl.config.util.exceptions.KeyNotFoundException e) {
+			if (printFlag) println("Warning: Key 'desiredLeafArea_postPrune' not found. Default value will be used.");
+		}
+	
+		try {
+			if (desiredFruitNumber_postPrune > 10) {
+				double totalFruit = count((* b:FruitService *));
+				double odd = desiredFruitNumber_postPrune / (1e-2 + totalFruit);
+				double ratio = odd >= 1 ? 0 : odd;
+				if (printFlag) println("--------crop thinning-----------");
+				println("Desired Crop Load per plant: " + desiredFruitNumber_postPrune + "\nTotal Fruit: " + totalFruit + "\nRemoval Ratio: " + ratio);
+	
+				if (totalFruit >= desiredFruitNumber_postPrune) {
+					[
+						b:FruitService, (b.shouldRemove(odd)) ==>> ;
+					]
+				}
+			}
+		} catch (io.github.fruitcropxl.config.util.exceptions.KeyNotFoundException e) {
+			if (printFlag) println("Warning: Key 'desiredFruitNumber_postPrune' not found. Default value will be used.");
+		} */
+	
+		totalFruitNum = "grapevine".equals(species)
+			? (int) (berryNumPerBunch * (int) count((* b:FruitService *)))
+			: (int) count((* b:FruitService *));
+	}
+	
+	// Wrapper method to orchestrate all checks
+	public static void checkSoilParams() {
+		boolean validSoil = validateSoilParams();
+		if (!validSoil) {
+			println("Soil validation failed. Resetting and re-initializing model.");
+			mainInstance.reCompile();
+			mainInstance.init();
+			mainInstance.initiationService.initArchitecture();
+			derive();
+	
+			validSoil = validateSoilParams();
+			if (!validSoil) {
+				println("Soil validation failed after re-initialization. Please check model setup.");
+				return;  // early exit if soil validation fails again
+			}
+		}
+	}
+	
+	public static void checkRootParams() {
+		boolean validRoot = validateRootProportions();
+		if (!validRoot) {
+			println("Root proportion validation failed. Resetting and re-initializing model.");
+			//resetting does not make it work well
+			/* mainInstance.reCompile();
+			mainInstance.init();
+			mainInstance.initiationService.initArchitecture();
+			derive();
+	
+			validRoot = validateRootProportions();
+			if (!validRoot) {
+				println("Root validation failed after re-initialization. Please check model setup.");
+				return;  // early exit if root validation fails again
+			} */
+		}
+	}
+public static void finalizeIDReference() {
+
+    // Prefer totalPlants if set; otherwise count PlantBase by scanning
+    int nPlants = (int) totalPlants;
+    if (nPlants <= 0) {
+        int nPlantsCount = 0;
+        [ pscan:PlantBase ::> { nPlantsCount++; } ]
+        nPlants = nPlantsCount;
+    }
+
+    for (int i = 1; i <= nPlants; i++) {
+        // Use unique selector names to avoid "Duplicate declaration of local variable p"
+        PlantBase pb = first((* pbq:PlantBase, (pbq.plantNumber == i) *));
+        RootBase  rb = first((* rbq:RootBase,  (rbq.plantNumber == i) *));
+        
+        if (pb == null && rb == null) {
+            // Nothing to do for this plantNumber
+            continue;
+        }
+
+        if (pb != null) {
+            // getId() is long; cast to int to fix "long not assignable to int"
+            if (pb.nodeID <= 0) { pb.nodeID = (int) pb.getId(); }
+
+            if (rb != null) {
+                if (rb.nodeID <= 0) { rb.nodeID = (int) rb.getId(); }
+                pb.addRootBase(rb);
+            } else {
+                println("⚠️ No RootBase found for plantNumber = " + i + " (skipping root linkage)");
+            }
+
+            // Only call if your implementation requires roots; otherwise guard it
+            if (rb != null) {
+                pb.initializeCarbonTransport();
+            }
+
+            // Link all organs for this plant to the PlantBase
+            [
+                o:Organ, (o.plantNumber == i && o.plantBaseID <= 0) ::> {
+                    if (o.nodeID <= 0) { o.nodeID = (int) o.getId(); }
+                    o.plantBaseID = pb.nodeID;
+                }
+            ]
+        } else {
+            println("⚠️ No PlantBase found for plantNumber = " + i);
+        }
+
+        if (rb != null) {
+            rb.finalizeSoilRootIDs();
+            rb.filterAndResizeArrays();
+            initiationArchReader.InitArchReader.debugRootBaseCounts("[RootSoilGrid:linked]", rb);
+            println("new soil grid number: " + rb.frIDs.length);
+        }
+    }
+}
+
+
+public static void setStructuralRootParentID()
+{
+  for (int i = 1; i <= totalPlants; i++) {
+
+    PlantBase pb = first((* p:PlantBase, (p.plantNumber == i) *));
+    int maxL = max((* r:StructuralRoot, (r.plantNumber==i) *)[layer]);
+    println("maxL: " + maxL);
+
+    // ---------- L >= 1 : link diagonally toward origin to the NEXT UPPER layer (L-1)
+    for (int L = maxL; L >= 1; L--) {
+      [
+        r:StructuralRoot, (r.plantNumber==i & r.layer==L) ::> {
+          int sx = (r.gridX > 0 ? 1 : (r.gridX < 0 ? -1 : 0));
+          int sy = (r.gridY > 0 ? 1 : (r.gridY < 0 ? -1 : 0));
+          int tx = r.gridX - sx;
+          int ty = r.gridY - sy;
+
+          StructuralRoot parent =
+            first((* p:StructuralRoot,
+                    (p.plantNumber==i & p.layer==L-1 &
+                     p.gridX==tx & p.gridY==ty) *));
+          if (parent == null && sx != 0)
+            parent = first((* p:StructuralRoot,
+                             (p.plantNumber==i & p.layer==L-1 &
+                              p.gridX==tx & p.gridY==r.gridY) *));
+          if (parent == null && sy != 0)
+            parent = first((* p:StructuralRoot,
+                             (p.plantNumber==i & p.layer==L-1 &
+                              p.gridX==r.gridX & p.gridY==ty) *));
+          if (parent == null)
+            parent = first((* p:StructuralRoot,
+                             (p.plantNumber==i & p.layer==L-1 &
+                              p.gridX==0 & p.gridY==0) *));
+
+          if (parent != null) {
+            r.storeParentAndBacklink(parent);
+           /*  println("Diag Z L" + L + ": " + r.getId() + " ("+r.gridX+","+r.gridY+") -> "
+                    + parent.getId() + " ("+parent.gridX+","+parent.gridY+")"); */
+          }
+        }
+      ]
+    }
+
+    // ---------- L == 0 : link diagonally toward origin within the SAME layer (0)
+    [
+      r0:StructuralRoot, (r0.plantNumber==i & r0.layer==0 &
+                          !(r0.gridX==0 & r0.gridY==0)) ::> {
+        int sx0 = (r0.gridX > 0 ? 1 : (r0.gridX < 0 ? -1 : 0));
+        int sy0 = (r0.gridY > 0 ? 1 : (r0.gridY < 0 ? -1 : 0));
+        int tx0 = r0.gridX - sx0;
+        int ty0 = r0.gridY - sy0;
+
+        StructuralRoot parent0 =
+          first((* p:StructuralRoot,
+                  (p.plantNumber==i & p.layer==0 &
+                   p.gridX==tx0 & p.gridY==ty0) *));
+        if (parent0 == null && sx0 != 0)
+          parent0 = first((* p:StructuralRoot,
+                           (p.plantNumber==i & p.layer==0 &
+                            p.gridX==tx0 & p.gridY==r0.gridY) *));
+        if (parent0 == null && sy0 != 0)
+          parent0 = first((* p:StructuralRoot,
+                           (p.plantNumber==i & p.layer==0 &
+                            p.gridX==r0.gridX & p.gridY==ty0) *));
+        if (parent0 == null)
+          parent0 = first((* p:StructuralRoot,
+                           (p.plantNumber==i & p.layer==0 &
+                            p.gridX==0 & p.gridY==0) *));
+
+        if (parent0 != null) {
+          r0.storeParentAndBacklink(parent0);
+          println("Diag XY L0: " + r0.getId() + " ("+r0.gridX+","+r0.gridY+") -> "
+                  + parent0.getId() + " ("+parent0.gridX+","+parent0.gridY+")");
+        }
+      }
+    ]
+
+    // ---------- Anchor the hub (0,0,0) to PlantBase
+    [
+      base:StructuralRoot,
+      ( base.plantNumber==i & base.layer==0 & base.gridX==0 & base.gridY==0 ) ::> {
+        base.storeParentId(pb);
+        pb.childStructuralRootID = base.getId();
+        //println("Anchor: " + base.getId() + " -> PlantBase");
+      }
+    ]
+  }
+}
+
+
+
+
+	
+
+    
+	public static void checkStatus()
+    {
+    	[
+    		g:GrowingOrgan ::> {
+    			g.initializeCarbonTransport();
+    			g.update();
+		}
+		]
+    	derive();
+    	
+    	totalBudNum = count((*b:BudService*)); 
+		if (printFlag) println(" \n totalBudNum is: " + totalBudNum);
+		
+		long RosetteLeaf = count((* l:Leaf, (l.organType.contains("Rosette"))*));
+		long otherLeaf = count((* l:Leaf, (!l.organType.contains("Rosette"))*));
+		double leafArea = sum((* l:Leaf *).area);
+		println( " \n RosetteLeaf : " + RosetteLeaf + "other: " + otherLeaf +
+				" total leaf area: " + String.format("%.4f",leafArea));
+		//handled by leaf planner now
+				 
+	}
+
+	/**
+     * Initializes the architecture.     
+     */
+    public abstract void initArchitecture();
+}

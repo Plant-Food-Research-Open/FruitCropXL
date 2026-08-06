@@ -1,0 +1,362 @@
+import static absOrgan.*;
+import static plantBase.*;
+import static fruitBase.*;
+import static shoot.*;
+import static budBase.*;
+import static globalParameters.*;
+import static plantParameters.*;
+import static modelOptions.*;
+import static initialConditions.*;
+import static extraTools.*;
+import static carbonTransport.*;
+
+import java.io.Serializable;
+import java.util.ArrayList;
+import org.inra.psh.jfruit2.config.ParametersFactory;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import interfaces.*;
+import io.github.fruitcropxl.config.params.groups.*;
+import io.github.fruitcropxl.config.params.structures.*;
+
+/**
+ * Demand-only fruit service.
+ *
+ * Potential fruit dry-matter demand is published through the shared
+ * GrowingOrgan carbon-sink fields. Common-pool allocation or CTRAM constrains
+ * realised carbon supply, and updateCarbonStatus owns the resulting structural
+ * carbon and dry-matter update.
+ *
+ * Water, fresh mass, sugar, acid, osmotic, turgor, and JFruit2 calculations are
+ * intentionally inactive.
+ */
+public module BerrySimple extends FruitService implements Configurable, Serializable
+{
+	private static final long serialVersionUID = 1L;
+
+	@Override
+	void updateCarbonAllocation(double sugarConcentration) {
+		calcPTCTRAM(sugarConcentration);
+		calcLoading(sugarConcentration);
+		calcLeakage(sugarConcentration);
+		calcUnloading(sugarConcentration);
+	}
+
+	/** Legacy simple-fruit asymptotic dry mass (mg DM fruit-1). */
+	static final double SIMPLE_MAX_DRY_MASS_MG = 60250.0;
+	/** Legacy simple-fruit logistic coefficient (h-1). */
+	static final double SIMPLE_RELATIVE_GROWTH_RATE_H = 0.004242;
+
+	String outputFilePath;
+
+	public BerrySimple(String fruitParams, int delta) {}
+	public BerrySimple(ParametersFactory parametersFactory, int delta) {}
+
+	@Override
+	public void loadParameters() {
+		CategoryStore config = ((DocumentCategoryNameGroup) CONFIG.getGroup(
+			FILE_NAME_PLANT_PARAMETERS, DocumentCategoryNameGroup.class)).getCategoryStore();
+		config.setCategoryContext("fruit");
+
+		FRUIT_BEGIN = FRUIT_AGE_AFTER_FULLBLOOM;
+		maintenanceCoff = 0.0;
+		growthCoff = config.getDouble("GROWTHRQ", 1.0);
+		km_pri = config.getDouble("KM_PRI", 0.072);
+		km_sec = km_pri;
+		C_content = CARBON_FRACTION_GLUCOSE;
+		maxRes = 0.0;
+		fNSC = 0.0;
+		structure_C = 1.0;
+
+		CategoryStore configInit = ((DocumentCategoryNameGroup) CONFIG.getGroup(
+			FILE_NAME_INITIAL_CONDITIONS, DocumentCategoryNameGroup.class)).getCategoryStore();
+		configInit.setCategoryContext("fruit");
+		Nm = configInit.getDouble("Nm", 0.020);
+		Nm_min = config.getDouble("Nm_min", 0.0025);
+		Nm_max = config.getDouble("Nm_max", 0.015);
+	}
+
+	boolean finiteNonNegative(double value) {
+		return !Double.isNaN(value) && !Double.isInfinite(value) && value >= 0.0;
+	}
+
+	void initializeDryMatterState(double initialDryMass_mg) {
+		double dryMass = finiteNonNegative(initialDryMass_mg) ? initialDryMass_mg : 0.0;
+		biomass = dryMass;
+		biomass_pre = dryMass;
+		carbon_total = dryMass * C_content;
+		carbon_structure = carbon_total;
+		carbon_nonStructure = 0.0;
+		carbon_nonStructure_max = 0.0;
+		fNSC = 0.0;
+		fNSCtoSC = 0.0;
+		nitrogen_total = biomass * Nm;
+		nitrogen_structure = biomass * Nm_min;
+		nitrogen_nonStructure = Math.max(0.0, nitrogen_total - nitrogen_structure);
+		nitrogen_mobile = nitrogen_total * N_CONTENT_MOBILE;
+
+		// Neutral state; shared output writers mark unsupported values unavailable.
+		freshWeight = 0.0;
+		waterContent = 0.0;
+		berryNum = 1;
+		organType = "Fruit";
+		initialized = true;
+	}
+
+	void initializeClock(double ageDays) {
+		ageD = finiteNonNegative(ageDays) ? ageDays : 0.0;
+		ageHour = (int) (ageD * 24.0);
+		ageMin = ageHour * 60;
+		ageGdd = ageD * Math.max(0.0, REFTMP - baseT);
+		age = ageD * 0.6;
+	}
+
+	@Override
+	void initData() {
+		// No external or virtual-fruit backend exists for this service.
+	}
+
+	@Override
+	FruitService initiate_pi(PlantIdentifier pi, float length_, float diameter_) {
+		loadParameters();
+		plantNumber = pi.plantNumber;
+		border = pi.border;
+		length = length_ > 0.0 ? length_ : 0.005;
+		diameter = diameter_ > 0.0 ? diameter_ : 0.005;
+		initializeClock(FRUIT_AGE_AFTER_FULLBLOOM);
+		initializeDryMatterState(FRUIT_DRY_WEIGHT);
+		initOutputFilePath();
+		initOutputHeaders();
+		return this;
+	}
+
+	@Override
+	void initiate_pb(PlantBase pb, Internode parentInternode) {
+		loadParameters();
+		plantBaseID = pb.nodeID;
+		plantNumber = pb.plantNumber;
+		border = pb.border;
+		if (parentInternode != null) {
+			ID = parentInternode.ID;
+			order = parentInternode.order;
+			rank = parentInternode.rank;
+			nodeNumber = parentInternode.nodeNumber;
+			cordonNumber = parentInternode.cordonNumber;
+			axis2ID = parentInternode.axis2ID;
+			axis3ID = parentInternode.axis3ID;
+			axis4ID = parentInternode.axis4ID;
+			axis5ID = parentInternode.axis5ID;
+			axis6ID = parentInternode.axis6ID;
+			cpn = axis2ID + axis3ID + axis4ID + axis5ID + axis6ID + rank;
+		}
+		length = 0.005;
+		diameter = 0.005;
+		initializeClock(FRUIT_AGE_AFTER_FULLBLOOM);
+		initializeDryMatterState(FRUIT_DRY_WEIGHT);
+		initOutputFilePath();
+		initOutputHeaders();
+	}
+
+	@Override
+	void initiate_pb(PlantBase pb, int rank_, int nodeNumber_, int cordonNumber_) {
+		loadParameters();
+		plantBaseID = pb.nodeID;
+		plantNumber = pb.plantNumber;
+		rank = rank_;
+		cpn = rank;
+		nodeNumber = nodeNumber_;
+		cordonNumber = cordonNumber_;
+		border = pb.border;
+		length = 0.005;
+		diameter = 0.005;
+		initializeClock(FRUIT_BEGIN);
+		initializeDryMatterState(FRUIT_DRY_WEIGHT);
+		initOutputFilePath();
+		initOutputHeaders();
+	}
+
+	@Override
+	void initiate_pb_fruitset(PlantBase pb, int rank_, int nodeNumber_, int cordonNumber_) {
+		initiate_pb(pb, rank_, nodeNumber_, cordonNumber_);
+		initializeClock(7.0);
+	}
+
+	@Override
+	void initiate_apex(ApexService apex) {
+		loadParameters();
+		plantNumber = apex.plantNumber;
+		border = apex.border;
+		rank = apex.rank;
+		nodeNumber = apex.nodeNumber;
+		cordonNumber = apex.cordonNumber;
+		cpn = apex.cpn + 1;
+		order = apex.order;
+		length = 0.005;
+		diameter = 0.005;
+		initializeClock(0.0);
+		age = -thermalDay_BB_FS;
+		initializeDryMatterState(Math.max(0.0, FRUIT_DRY_WEIGHT));
+		initOutputFilePath();
+		initOutputHeaders();
+	}
+
+	/** Potential fruit dry-matter increment (mg DM fruit-1 h-1). */
+	double calcPotentialDryMatterDemand() {
+		if (!calcCarbonAllocation || age <= 0.0
+			|| daysSinceWinterSolstice >= harvestDAWS
+			|| !finiteNonNegative(biomass)
+			|| biomass >= SIMPLE_MAX_DRY_MASS_MG) {
+			return 0.0;
+		}
+
+		double remaining = SIMPLE_MAX_DRY_MASS_MG - biomass;
+		double demand = SIMPLE_RELATIVE_GROWTH_RATE_H * biomass
+			* Math.max(0.0, 1.0 - biomass / SIMPLE_MAX_DRY_MASS_MG);
+		if (!finiteNonNegative(demand)) return 0.0;
+		return Math.min(demand, remaining);
+	}
+
+	@Override
+	void calcPTCTRAM(double sugarConcentration_phloem) {
+		double dryMatterDemand = calcPotentialDryMatterDemand();
+		structureDM_PRI_PT = dryMatterDemand * C_content * growthCoff;
+		if (!finiteNonNegative(structureDM_PRI_PT)) structureDM_PRI_PT = 0.0;
+		structureDM_SEC_PT = 0.0;
+		maintenanceDM_PT = 0.0;
+		reserveDM_PT = 0.0;
+		loading_PT = 0.0;
+
+		if (organGrowthMethod.equals("TempLimited")) {
+			structureDM_PRI = structureDM_PRI_PT;
+			structureDM_SEC = 0.0;
+			structureDM = structureDM_PRI;
+			unloadingPerFruit = structureDM;
+			unloading = structureDM;
+		}
+	}
+
+	@Override
+	void calcUnloading(double sugarConcentration_phloem) {
+		double carbonLimiter = sinkUnloading(sugarConcentration_phloem, km_pri);
+		if (Double.isNaN(carbonLimiter) || Double.isInfinite(carbonLimiter)) carbonLimiter = 0.0;
+		if (carbonLimiter < 0.0) carbonLimiter = 0.0;
+		if (carbonLimiter > 1.0) carbonLimiter = 1.0;
+		if (shouldUsePreT1PotentialGrowth()) carbonLimiter = 1.0;
+
+		structureDM_PRI = structureDM_PRI_PT * carbonLimiter;
+		structureDM_SEC = 0.0;
+		structureDM = structureDM_PRI;
+		maintenanceDM = 0.0;
+		reserveDM = 0.0;
+		unloadingPerFruit = structureDM;
+		unloading = structureDM;
+	}
+
+	@Override
+	void calcLoading(double sugarConcentration_phloem) {
+		loading = 0.0;
+	}
+
+	@Override
+	void calcLeakage(double sugarConcentration_phloem) {
+		leakage = 0.0;
+	}
+
+	@Override
+	boolean shouldUpdateFreshWeightFromWaterContent() {
+		return false;
+	}
+
+	@Override
+	public boolean hasDetailedFruitPhysiologyOutputs() {
+		return false;
+	}
+
+	@Override
+	public void initializeCarbonTransport() {
+		r = 0.0;
+		xp = 0.0;
+		cpb = cpt = SOURCEcp;
+	}
+
+	@Override
+	public void updateCTRs(double carbonConcentration) {
+		r = 0.0;
+		xp = 0.0;
+	}
+
+	@Override
+	void update() {
+		super.update();
+		if (plantBaseID <= 0) {
+			PlantBase pb = first((* p:PlantBase, (p.plantNumber == this.plantNumber) *));
+			if (pb != null) plantBaseID = pb.nodeID;
+		}
+		if (parentID <= 0) {
+			GrowingOrgan parentOrgan = (GrowingOrgan) first((* this (<--)+ Internode *));
+			if (parentOrgan != null) {
+				parentID = parentOrgan.nodeID;
+				parentOrgan.addChildFruitId(nodeID);
+			}
+		}
+
+		if (age > 0.0) {
+			delta_str = Math.max(0.0, structureDM - growthCost);
+			delta_NSC = 0.0;
+			updateCarbonStatus(delta_str, delta_NSC);
+			freshWeight = 0.0;
+			nitrogen_total = biomass * Nm;
+			nitrogen_structure = biomass * Nm_min;
+			nitrogen_nonStructure = Math.max(0.0, nitrogen_total - nitrogen_structure);
+			nitrogen_mobile = nitrogen_total * N_CONTENT_MOBILE;
+		}
+
+		if (printFlag && step <= 2) {
+			println("[SimpleFruit] potentialDemand=" + calcPotentialDryMatterDemand()
+				+ " mgDM/h potentialCarbon=" + structureDM_PRI_PT
+				+ " mgC/h realisedCarbon=" + structureDM
+				+ " mgC/h dryMass=" + biomass + " mgDM");
+		}
+	}
+
+	@Override
+	void initOutputFilePath() {
+		if (outputIndividualFruit) {
+			outputFilePath = PATH_OUTPUT + "P_" + plantNumber + "_F_" + ID + ".output.csv";
+			initializeOutputFile(outputFilePath);
+		}
+	}
+
+	@Override
+	void initOutputHeaders() {
+		outputHeader = new ArrayList();
+	}
+
+	@Override
+	public ObjectNode getJsonValues() {
+		ObjectNode node = super.getJsonValues();
+		node.put("fruitDryMatter_mg", biomass);
+		node.put("potentialFruitDryMatterDemand_mgDM_h", calcPotentialDryMatterDemand());
+		node.put("potentialFruitCarbonDemand_mgC_h", structureDM_PRI_PT);
+		node.put("realisedFruitCarbonGrowth_mgC_h", structureDM);
+		return node;
+	}
+
+	@Override
+	public void syncOutputs(ObjectNode node) {
+		node.put("fruitDryMatter_mg", biomass);
+		node.put("potentialFruitDryMatterDemand_mgDM_h", calcPotentialDryMatterDemand());
+		node.put("potentialFruitCarbonDemand_mgC_h", structureDM_PRI_PT);
+		node.put("realisedFruitCarbonGrowth_mgC_h", structureDM);
+	}
+
+	@Override
+	void calcYield() {
+		// Yield-quality calculations are outside the demand-only contract.
+	}
+
+	@Override
+	boolean shouldDrop() {
+		return shouldDrop;
+	}
+}
+==> Sphere(this.length).(setShader(GREEN));

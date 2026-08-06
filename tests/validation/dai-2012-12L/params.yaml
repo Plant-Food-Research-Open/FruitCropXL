@@ -1,0 +1,21 @@
+discrepancy:
+  threshold: 0.15
+  # single-file (old)
+  # dataset: "validation-plant.csv"
+
+  # or multi-file (merged column-wise)
+  dataset:
+  - "mean-fruit-DAI_2012_12L.csv"
+  - "plant-level-DAI_2012_12L.csv"
+
+#Quotes are only needed if the value has special YAML characters (e.g., :, #, leading/trailing spaces). Your filename is safe unquoted.
+rmse:
+  dataset:
+  - "Exp2012_Dai_Bordeaux_berryProfileSubset_12L_mean.csv"
+  synthetic-columns:
+    - name: meanFruitFW
+      rmse: 107.0
+    - name: meanFruitDW
+      rmse: 11.0
+    - name: meanFruitSc
+      rmse: 0.016

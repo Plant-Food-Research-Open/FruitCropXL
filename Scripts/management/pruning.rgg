@@ -1,0 +1,218 @@
+import static absOrgan.*;
+import static leaf.*;
+import static shoot.*;
+import static carbonTransport.*;
+import static plantBase.*;
+import static globalParameters.*;
+import static modelOptions.*;
+import static initialConditions.*;
+import static budBase.*;
+import static shootBase.*;
+import java.util.Arrays;
+
+public static boolean hasBeenPruned = false;	// Will be set to true after prune() is called
+public static int pruningDOY = 130;				// Day of year on which pruning will take place
+private static Integer[] pruningTrainingSystems = { 1, 2, 7 };
+private static int pruningStage = 0;
+
+
+// Carry out the pruning process by removing existing shoots and reseting the cordon
+public static void prune() {
+	if (pruningStage == 0) {
+		setupCordonSegments();
+		pruningStage++;
+	} else if (pruningStage == 1) {
+		if (! Arrays.asList(pruningTrainingSystems).contains(trainingSystem) ) {
+			throw new RuntimeException(String.format("Pruing not supported for training system %d", trainingSystem));	
+		}
+		resetCordonParameters();
+		removeOldShoots();
+		initNewShoots();
+		hasBeenPruned = true;	
+		pruningStage = 0;
+	}
+}
+
+// Give each cordon the correct number of segments so that when attribute values are transfered from internode to
+// cordon, there is a cordon segment corresponding to each internode segment
+private static void setupCordonSegments() {
+	int totalCordons = max((* Cordon *)[cordonNumber]);
+	for (int cordonNum = 1; cordonNum <= totalCordons; cordonNum++) {
+		int maxInternodeRank = max((* itn:Internode, (itn.cordonNumber == cordonNum)*)[rank]);
+		int oldCordonSegmentNum = max((* c:Cordon, (c.cordonNumber == cordonNum)*)[nodeNumber]);
+		int newCordonSegmentNum = Math.min(maxInternodeRank, 13);
+		if (oldCordonSegmentNum < newCordonSegmentNum) {
+			// Extend each cordon by the necessary number of segments
+			[
+				(* c1:Cordon *), (c1.nodeNumber == oldCordonSegmentNum && c1.cordonNumber == cordonNum) ==> 
+				
+				{int i = c1.nodeNumber;
+				PlantBase pb = first((* p:PlantBase, (p.plantNumber == c1.plantNumber)*));}
+				while (i  < newCordonSegmentNum) (
+					{i++;}
+					c2:Cordon
+					{c2.initiate_pb(pb, i, c1.cordonNumber); }					
+				);
+			]
+		}
+		if (oldCordonSegmentNum > newCordonSegmentNum) {
+			// Remove cordons where there are more than the necessary number of segments
+			[
+				c:Cordon, (c.nodeNumber > newCordonSegmentNum && c.cordonNumber == cordonNum) ==> 
+				;
+			]
+		}
+	}
+}
+
+// Reset the parameters of each cordon to their initial values
+private static void resetCordonParameters() [
+	itn:Internode, (itn.nodeNumber == 1 && itn.rank <= 12) ::> {
+		Cordon cor = first((* c:Cordon, (c.plantNumber == itn.plantNumber && c.cordonNumber == itn.cordonNumber && c.nodeNumber == itn.rank + 1) *));
+		
+		if (cor != null) {
+			cor.length = itn.length;
+			cor.diameter = itn.diameter;
+			
+			cor.age = itn.age;
+			cor.ageD = itn.ageD;
+			cor.ageGdd = itn.ageGdd;
+			cor.age_pre = itn.age_pre;		
+			cor.ageGdd_pre = itn.ageGdd_pre;
+		
+			cor.biomass = itn.biomass;
+			cor.density = itn.density; 
+			cor.waterContent = itn.waterContent;
+			cor.freshWeight = itn.freshWeight;
+			cor.area = itn.area;
+	
+			cor.carbon_total = itn.carbon_total;
+			cor.carbon_structure = itn.carbon_structure;
+			cor.carbon_nonStructure = itn.carbon_nonStructure;
+		
+			cor.fNSCtoSC = itn.fNSCtoSC;
+			cor.km_pri = itn.km_pri;
+			cor.km_sec = itn.km_sec;
+			cor.km_res = itn.km_res;
+			cor.maxLength = itn.maxLength;
+			cor.tm = itn.tm;	
+			cor.te = itn.te;
+			cor.maintenanceCoff = itn.maintenanceCoff;
+			
+			cor.Kmax = itn.Kmax;
+			cor.Ka = itn.Ka;
+			cor.waterPotential_b = itn.waterPotential_b;
+			cor.waterPotential = itn.waterPotential;
+			cor.waterFlux = itn.waterFlux;
+		
+			cor.structureDM_PRI_PT = itn.structureDM_PRI_PT;
+			cor.structureDM_SEC_PT = itn.structureDM_SEC_PT;
+			cor.maintenanceDM_PT = itn.maintenanceDM_PT;
+			cor.reserveDM_PT = itn.reserveDM_PT; 
+			cor.loading_PT = itn.loading_PT;
+			cor.deltalength_PT = itn.deltalength_PT;
+		
+			cor.structureDM = itn.structureDM;
+			cor.structureDM_PRI = itn.structureDM_PRI;
+			cor.structureDM_SEC = itn.structureDM_PRI;
+			cor.maintenanceDM = itn.maintenanceDM;
+			cor.reserveDM = itn.reserveDM; 
+			cor.synRate = itn.synRate;
+			cor.hydRate = itn.hydRate;
+			cor.maxRes = itn.maxRes;
+		
+			cor.growthCoff = itn.growthCoff;
+			cor.growthCost = itn.growthCost;
+			cor.carbonMobilizationCost = itn.carbonMobilizationCost; 
+		
+			cor.loading = itn.loading;
+			cor.leakage = itn.leakage;
+			cor.unloading = itn.unloading;
+			cor.Cflux = itn.Cflux; 
+			cor.deltalength = itn.deltalength;
+		
+			cor.nitrogen_total = itn.nitrogen_total;
+			cor.nitrogen_structure = itn.nitrogen_structure;
+			cor.nitrogen_nonStructure = itn.nitrogen_nonStructure;
+			cor.nitrogen_mobile = itn.nitrogen_mobile;
+			cor.Ndegradation = itn.Ndegradation;
+			cor.Nsynthesis = itn.Nsynthesis;
+			cor.waterPotential_pre = itn.waterPotential_pre;
+		
+			cor.biomassSupply = itn.biomassSupply;
+			cor.biomassDemand = itn.biomassDemand;
+		}
+	}
+]
+
+// Remove all graph nodes which branch off from a cordon (i.e. all shoot nodes)
+private static void removeOldShoots() [
+	n:Node, (* Cordon +> (-->)* n *) ==> ;
+]
+
+// Construct and initialize the organs of the new shoots
+// Currently only works for training system 1, 2, 3, 6 and 7
+private static void initNewShoots() [
+	
+	s:Cordon  ==> s 
+	{
+		BudService bud = new BudCreator(species).createBud();
+	}
+	/* ############################# CANE PRUNNING SYSTEM ################################*/
+	if (trainingSystem == 1) (
+
+	[
+		sb:ShootBase 
+		RU(Math.pow(-1,s.nodeNumber) * -random(85,92)) 
+		RL(Math.pow(-1,s.cordonNumber) *  random(1,30))
+		b:bud
+	]
+	
+	{
+		sb.initiate(s.plantNumber, s.cordonNumber, s.nodeNumber);
+		PlantBase pb = first((* p:PlantBase, (p.plantNumber == s.plantNumber)*));
+		b.initiate(s, 1);
+	}
+	
+	)
+	
+	/* ############################# SCOTT HENRY SYSTEM ################################*/
+	if (trainingSystem == 2) (
+
+	[
+		sb:ShootBase 
+		b:bud
+	]
+	
+	{
+		sb.initiate(s.plantNumber, s.cordonNumber, s.nodeNumber);
+		PlantBase pb = first((* p:PlantBase, (p.plantNumber == s.plantNumber)*));
+		b.initiate(s, 1);
+	}
+	
+	)
+	
+	/* #############################Bush potted vines ############################*/
+	if (trainingSystem == 7 && s.nodeNumber == SHOOT_NUM + 1) (
+
+	[
+		sb:ShootBase 
+		RU(Math.pow(-1, s.cordonNumber) * -90) 
+		RL(Math.pow(-1, s.nodeNumber) *  random(1,10)) 
+		b:bud
+	]
+	
+	{
+		sb.initiate(s.plantNumber, s.cordonNumber, s.nodeNumber);
+		PlantBase pb = first((* p:PlantBase, (p.plantNumber == s.plantNumber)*));
+		b.initiate(s, 1);
+	}
+	)
+	;
+]
+
+
+
+
+
+	

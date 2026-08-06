@@ -1,0 +1,1321 @@
+import static absOrgan.*;
+import static leaf.*;
+import static shoot.*;
+import static plantBase.*;
+import static charts.*;
+import static outputTables.*;
+import static environment.*;
+import static globalParameters.*;
+import static plantParameters.*;
+import static modelOptions.*;
+import static initialConditions.*;
+import static carbonTransport.*;
+import static shootPositioning.*;
+import static structuralVariation.*;
+import static pruning.*;
+import static extraTools.*;
+import static archReader.*;
+import static flowerBase.*;
+import static phenology.*;
+import static developBase.*;
+import static fruitBase.*;
+import static budBase.*;
+import static budApple.*;
+import static fieldBase.*;
+import static shootBase.*;
+import static diagnosticTables.*;
+import java.util.ArrayList;
+
+/**
+ * Apple dynamic-growth rewrite stage.
+ *
+ * <p>This file owns the <em>topology-changing</em> half of apple growth. It
+ * consumes the bud-side plans created in {@code budApple.rgg}, converts buds to
+ * apices, advances vegetative and floral apexes one phytomer at a time, and
+ * spawns any planned lateral or bourse child axes when the current rank reaches
+ * the attached plan slot.</p>
+ *
+ * <p>The file is deliberately split between rules that only update state
+ * ({@code increment()}, water potential, fruit bookkeeping) and rules that
+ * create or delete topology (bud burst, phytomer emission, child-axis creation,
+ * cleanup). The comments below document that distinction explicitly because it is
+ * easy to lose once XL rewrite blocks become long.</p>
+ *
+ * <h2>Dynamic-growth chain</h2>
+ * <ol>
+ *   <li>Bud burst: a dormant bud passes phenology and idempotency checks.</li>
+ *   <li>Apex initiation: the bud plan is copied into a new apex.</li>
+ *   <li>Phytomer emission: the apex decides whether the next rank is due.</li>
+ *   <li>Topology rewrite: the develop rule creates internodes, joints, leaves,
+ *       flowers, and any planned lateral or bourse child buds/apices.</li>
+ *   <li>Cleanup and termination: duplicate candidates are pruned conservatively
+ *       and terminal apices are removed when their life cycle ends.</li>
+ * </ol>
+ */
+public class DevelopApple extends DevelopService {
+	/** Keep deserialization compatibility with previously saved graphs. */
+	private static final long serialVersionUID = -1849543602051133894L;
+
+
+
+
+	/** Main apple develop pass; see class-level workflow summary for stage ordering. */
+	public void develop() {
+		boolean newShootAppeared = false;
+		resetLateralAttachClaimCacheIfNeeded();
+		reportAppleIdempotencyStatsIfDebug();
+		[
+		/**
+		 * Bud-burst rewrite.
+		 *
+		 * <p>Biological role: convert a dormant bud into a growing apex once the
+		 * bud-side phenology and idempotency guards allow it.</p>
+		 *
+		 * <p>Structural effect: delete the bud node and create an apex in its place,
+		 * preserving the bud's axis identity, shoot type, and declination orientation.</p>
+		 *
+		 * <p>State updates: the new apex is initiated from the source bud, and the
+		 * debug block reports the source bud/site relationship for duplicate tracing.</p>
+		 */
+		{//start a java block inside the Lsystem [] block
+			if (initiation_method.contains("ArchReader") && globalParameters.addBuds == false) 
+			{ //java if statement
+				[ //XL replacement rules
+				
+					ShootMeristem b:BudService, (b.shouldBreak()) ==>
+						{ApexService apex = b.createApex();} 
+						//RV(-1 * random(-0.3, 0.3)) 
+						RL(b.declinationAngleDeg) a:apex
+						{		
+							a.initiate(b);
+							if (printFlag || debug) {
+								Internode parentInternode = resolveBudParentInternode(b);
+								int budCountOnSite = countBudsOnInternodeSite(parentInternode);
+								println("[bud-burst] step=" + step
+									+ " budId=" + b.getId()
+									+ " budType=" + b.budType
+								+ " shootType=" + b.shootType
+								+ " parentInternodeId=" + ((parentInternode != null) ? parentInternode.getId() : 0L)
+								+ " budCountOnSite=" + budCountOnSite
+								+ " apexId=" + a.getId());
+						}
+					}
+					; //end of the replacement rule
+				]
+			} else {
+				[ //XL replacement rules
+				
+					b:BudService, (b.shouldBreak()) ==>
+						{ApexService apex = b.createApex();} 
+						//RV(-1 * random(-0.3, 0.3)) 
+						RL(b.declinationAngleDeg) a:apex
+						{		
+							a.initiate(b);
+							if (printFlag || debug) {
+								Internode parentInternode = resolveBudParentInternode(b);
+								int budCountOnSite = countBudsOnInternodeSite(parentInternode);
+								println("[bud-burst] step=" + step
+									+ " budId=" + b.getId()
+									+ " budType=" + b.budType
+								+ " shootType=" + b.shootType
+								+ " parentInternodeId=" + ((parentInternode != null) ? parentInternode.getId() : 0L)
+								+ " budCountOnSite=" + budCountOnSite
+								+ " apexId=" + a.getId());
+						}
+					}
+					; //end of the replacement rule
+				]
+			
+			} // end of the java if statement
+			
+		} //end of the java block
+		 
+		/**
+		 * Mixed-bud floral apex rewrite.
+		 *
+		 * <p>Biological role: advance the rosette leaf sequence on a mixed bud, emit
+		 * the flower cluster on the final rosette event, and spawn any planned bourse
+		 * child axes at the attach ranks stored on the bud-side spur plan.</p>
+		 *
+		 * <p>Structural effect: create one rosette phytomer per activation, optionally
+		 * create a flower cluster, and instantiate child apexes for any scheduled
+		 * bourse shoots. The rule leaves the rosette axis branch-free except for the
+		 * planned bourse children.</p>
+		 *
+		 * <p>State updates: consumes {@code spurAttachPlan} / {@code bourseShootPlans},
+		 * marks the mixed-bud flower appearance, and advances the rosette-rank cursor.</p>
+		 */
+		a:ApexService, (useStaticArc == false &&
+						a.shouldProduceFlower == true &&
+						a.shouldProducePhytomer() == true &&
+						a.rank <= ((a instanceof ApexApple) ? ((ApexApple)a).floralRosetteLeafCount : 5)) ==>
+			{
+				ShootBase sb1 = first((* s:ShootBase, (s.isBaseOf(a)) *));
+				// Keep raw collections here; RGG action blocks do not parse generic declarations reliably.
+				ArrayList bourseApexes = new ArrayList();
+				ArrayList boursePlans = new ArrayList();
+				ArrayList boursePlanIndices = new ArrayList();
+				boolean flowerAppearanceNow = false;
+				int attachRank = Math.max(1, a.rank);
+				FlowerCreator flowerCreator = null;
+				Flower flower = null;
+				int flowerCount = 0;
+				int flowerColor = 1;
+				float flowerRL = 0;
+				if (a instanceof ApexApple) {
+					ApexApple aa = (ApexApple)a;
+					int childPlanIndex = aa.popPlannedBoursePlanIndexAtRosetteRank(attachRank);
+					while (childPlanIndex >= 0) {
+						AppleShootPlan childShootPlan = aa.getBourseShootPlan(childPlanIndex);
+						if (childShootPlan == null && printFlag) {
+							println("[mixed-bud][bourse] missing child plan parentApex=" + a.getId()
+								+ " attachRank=" + attachRank
+								+ " childPlanIdx=" + childPlanIndex);
+						}
+						if (childShootPlan != null && aa.bourseShootCountSpawned < aa.bourseShootCountTarget) {
+							BudService bud = new BudCreator(species).createBud();
+							ApexService apex1 = bud.createApex();
+							aa.bourseShootCountSpawned = aa.bourseShootCountSpawned + 1;
+							bourseApexes.add(apex1);
+							boursePlans.add(childShootPlan);
+							boursePlanIndices.add(childPlanIndex);
+							if (printFlag) {
+								println("[mixed-bud][bourse] spawned parentApex=" + a.getId()
+									+ " attachRank=" + attachRank
+									+ " childPlanIdx=" + childPlanIndex
+									+ " childTotalNodes=" + childShootPlan.totalNodes
+									+ " childMainNodes=" + childShootPlan.mainNodesPlanned
+									+ " childBranches=" + childShootPlan.nBranches
+									+ " spawnedCount=" + aa.bourseShootCountSpawned
+									+ "/" + aa.bourseShootCountTarget);
+							}
+						} else if (childShootPlan != null && printFlag) {
+							println("[mixed-bud][bourse] skipped parentApex=" + a.getId()
+								+ " attachRank=" + attachRank
+								+ " childPlanIdx=" + childPlanIndex
+								+ " childTotalNodes=" + childShootPlan.totalNodes
+								+ " reason=targetAlreadyReached");
+						}
+						childPlanIndex = aa.popPlannedBoursePlanIndexAtRosetteRank(attachRank);
+					}
+					flowerAppearanceNow = aa.shouldCreateFlowerAtCurrentRosetteRank(attachRank);
+					if (flowerAppearanceNow) {
+						// Mixed-bud flower appearance coincides with the final rosette leaf event.
+						aa.markMixedBudFlowerAppearance(attachRank);
+						flowerCreator = new FlowerCreator(species);
+						
+						flowerColor = irandom(1,99);
+						flowerRL = irandom(10,35);
+						int flowerMaxConfigured = Math.max(1, FLOWERS_PER_FLORAL);
+						flowerCount = a.flowerNumber;
+						if (flowerCount <= 0) flowerCount = flowerMaxConfigured;
+						flowerCount = Math.min(flowerMaxConfigured, flowerCount);
+					}
+				}
+			}
+			if (sb1 == null) (
+				sb2:ShootBase
+				{
+					sb2.initiate(a);
+					if (printFlag || debug) {
+						println("[apple][shootbase-new] step=" + step
+							+ " apexId=" + a.getId()
+							+ " order=" + a.order
+							+ " rank=" + a.rank
+							+ " shootType=" + a.shootType
+							+ " shootNumber=-1"
+							+ " syllepticOrder=" + a.syllepticOrder
+							+ " axis2=" + a.axis2ID
+							+ " axis3=" + a.axis3ID
+							+ " axis4=" + a.axis4ID
+							+ " axis5=" + a.axis5ID
+							+ " axis6=" + a.axis6ID
+							+ " axis7=" + a.axis7ID
+							+ " axis8=" + a.axis8ID
+							+ " axis9=" + a.axis9ID
+							+ " cpn=" + a.cpn);
+					}
+				}
+			)
+			if (bourseApexes != null && bourseApexes.size() > 0) (
+				for (int bourseIdx = 0; bourseIdx < bourseApexes.size(); bourseIdx++) (
+					{
+						ApexService apexPlanned = (ApexService) bourseApexes.get(bourseIdx);
+						AppleShootPlan childShootPlan = (AppleShootPlan) boursePlans.get(bourseIdx);
+						int childPlanIndex = ((Integer) boursePlanIndices.get(bourseIdx)).intValue();
+						float childAzimuth = (float) (137.5 * (bourseIdx + 1) + random(-15, 15));
+						float childDecl = (float) random(35, 60);
+						float childRoll = (float) random(-0.3, 0.3);
+					}
+					[ RH(childAzimuth) RL(childDecl) RV(childRoll) a1:apexPlanned {
+						if (a1 instanceof ApexApple) {
+							((ApexApple)a1).initiateBourseFromParent(a, childShootPlan, childPlanIndex, attachRank);
+						} else {
+							a1.phytomerNumber = (childShootPlan != null) ? childShootPlan.mainNodesPlanned : 1;
+							a1.initiate(a);
+						}
+					} ]
+				)
+			)
+			[
+				{
+					int rosetteRankIndex0 = Math.max(0, a.rank - 1);
+					int profileIndex0 = rosetteRankIndex0;
+					int leafRank = profileIndex0 + 1;
+					int nRosetteLeaf = (a instanceof ApexApple) ? ((ApexApple)a).floralRosetteLeafCount : 5;
+					double actualArea_m2 = Double.NaN;
+					double potentialArea_m2 = Double.NaN;
+					double actualLeafLength_m = Double.NaN;
+					double actualLeafWidth_m = Double.NaN;
+					double potentialLeafLength_m = Double.NaN;
+					double potentialLeafWidth_m = Double.NaN;
+					double actualRosetteAxis_m = Double.NaN;
+					double potentialRosetteAxis_m = Double.NaN;
+					double actualRosettePetiole_m = Double.NaN;
+					double potentialRosettePetiole_m = Double.NaN;
+					if (hasOrganSizeInput() && rosetteLeafProfile != null) {
+						actualArea_m2 = Organ.profileValueAtRank(rosetteLeafProfile, profileIndex0 + 1);
+						if (rosetteLeafLengthProfile != null) {
+							actualLeafLength_m = Organ.profileValueAtRank(rosetteLeafLengthProfile, profileIndex0 + 1);
+							potentialLeafLength_m = Organ.actualToPotentialSize(actualLeafLength_m);
+						}
+						if (rosetteLeafWidthProfile != null) {
+							actualLeafWidth_m = Organ.profileValueAtRank(rosetteLeafWidthProfile, profileIndex0 + 1);
+							potentialLeafWidth_m = Organ.actualToPotentialSize(actualLeafWidth_m);
+						}
+						potentialArea_m2 = Organ.actualToPotentialSize(actualArea_m2);
+						if (rosetteInternodeProfile != null) {
+							actualRosetteAxis_m = Organ.profileValueAtRank(rosetteInternodeProfile, profileIndex0 + 1);
+							potentialRosetteAxis_m = Organ.actualToPotentialSize(actualRosetteAxis_m);
+						}
+						if (rosettePetioleProfile != null) {
+							actualRosettePetiole_m = Organ.profileValueAtRank(rosettePetioleProfile, profileIndex0 + 1);
+							potentialRosettePetiole_m = Organ.actualToPotentialSize(actualRosettePetiole_m);
+						}
+					}
+					float rH = irandom(69,85);
+					float rL = irandom(60,85);
+					float rosettePetDecl = JMidrib.samplePetioleDeclDeg();
+					float rosetteRollDeg = JMidrib.sampleLeafRollDeg();
+				}
+				// keep the original rosette placement style, but emit one rosette leaf per phytomer event
+				RH(rosetteRankIndex0 * rH) RL(rL) pt:Petiole
+				{
+					pt.initiate_apex(a);
+					pt.rank = leafRank;
+					double rosetteShortAxisTarget_m = resolvePotentialPetioleLength(rosettePetioleProfile, profileIndex0 + 1, potentialLeafLength_m, pt.fpetio);
+					if (!(Double.isNaN(rosetteShortAxisTarget_m) || rosetteShortAxisTarget_m <= 0.0)) {
+						Organ.applyPetioleTargetLengthAtInit(pt, rosetteShortAxisTarget_m);
+					}
+				}
+				jm:JMidrib(0.0)
+				for (int m = 0; m < leafShape.polyleaf[0].length; m++) (
+					[lf:Leaf]
+					{
+						lf.initiate_apex(a);
+							lf.fid = m;
+							lf.organType = "rosetteLeaf";
+							lf.markFastEarlyExpansionLeaf("rosette");
+							lf.rank = leafRank;
+							lf.rosetteRankIndex = profileIndex0;
+							lf.rosetteLeafCount = nRosetteLeaf;
+						if (hasOrganSizeInput() && rosetteLeafProfile != null) {
+							lf.rosetteRankScale = Organ.actualToPotentialSize(1.0);
+						}
+						lf.expansionHalfTimePotential = lf.te;
+						lf.expansionHalfTimeRealized = lf.te;
+						if (hasOrganSizeInput() && rosetteLeafProfile != null) {
+							double realizedLeafArea_m2 = leafAreaFromGeometry(actualLeafLength_m, actualLeafWidth_m, m, actualArea_m2);
+							double targetLeafArea_m2 = leafAreaFromGeometry(potentialLeafLength_m, potentialLeafWidth_m, m, potentialArea_m2);
+							lf.potentialFinalSize = targetLeafArea_m2;
+							lf.realizedFinalSize = realizedLeafArea_m2;
+							lf.realizationRatio = safeRealizationRatio(lf.realizedFinalSize, lf.potentialFinalSize);
+							lf.profileFinalSizeLocked = true;
+							if (hasLeafGeometry(potentialLeafLength_m, potentialLeafWidth_m)) {
+								// Apple profile files define final target geometry; current area remains separate.
+								Organ.applyLeafTargetGeometryAtInit(lf, potentialLeafLength_m, potentialLeafWidth_m);
+							} else {
+								Organ.applyLeafTargetAreaAtInit(lf, Math.max(1.0e-8, targetLeafArea_m2));
+							}
+						}
+						lf.area = leafShape.calcLeafPolygonArea(lf.length, lf.width, lf.fid);
+						if (lf.potentialFinalSize > 0.0 && !(hasOrganSizeInput() && rosetteLeafProfile != null)) {
+							lf.realizedFinalSize = lf.area;
+							lf.realizationRatio = safeRealizationRatio(lf.realizedFinalSize, lf.potentialFinalSize);
+						}
+						jm.initiateWithAngles(lf, rosettePetDecl, rosetteRollDeg);
+						if (outputAppleDevelopmentDiagnostics) {
+							appendMixedBudDebug(lf, a, "mixed", nRosetteLeaf,
+								((a instanceof ApexApple) ? ((ApexApple) a).bourseShootCountTarget : 0),
+								"spur", lf.rank, lf.potentialFinalSize, lf.realizedFinalSize,
+								safeStress(a), dafbApprox(a), "rosette", dafbApprox(a) >= 0.0);
+						}
+					}
+				)
+			]
+			{
+				if (outputAppleDevelopmentDiagnostics || debug) {
+					logAppleLeafInitiation(a, "rosetteLeaf", rosetteRankIndex0 + 1, resolveApexParentInternodeId(a));
+				}
+			}
+			if (flowerAppearanceNow && flowerCreator != null) (
+				for (int i = 0; i < flowerCount; i++) (
+					{flower = flowerCreator.createFlower();}
+					[ f:flower {
+						f.initiate(a, flowerColor, i*irandom(69,85), flowerRL);
+						configureMixedBudFlowerFromApex(f, a, i == 0);
+						if (outputAppleDevelopmentDiagnostics) {
+							appendFlowerTimingDebug("appearance", f, (a instanceof ApexApple) ? (ApexApple)a : null);
+						}
+					} ]
+				)
+			)
+			if (!flowerAppearanceNow) (
+			a
+			{
+				if (a instanceof ApexApple) {
+					// Block same-step recursive derive() from letting one apex emit twice in one external pass.
+					((ApexApple) a).markPhytomerProducedThisStep();
+				}
+				a.increment();
+				derive();
+				newShootAppeared = true;
+			}
+			)
+			{
+				if (flowerAppearanceNow) {
+					// Final mixed-bud rosette event must still advance the apex rank; otherwise the same
+					// floral apex remains eligible on later steps and can emit a duplicate leaf at this rank.
+					if (a instanceof ApexApple) {
+						// Block same-step recursive derive() from letting one apex emit twice in one external pass.
+						((ApexApple) a).markPhytomerProducedThisStep();
+					}
+					a.increment();
+					derive();
+					newShootAppeared = true;
+				}
+			}
+		; // end dynamic floral rosette rule
+
+			 
+		/**
+		 * Compatibility bud-germination wrapper.
+		 *
+		 * <p>This file now performs bud burst through the explicit bud-burst rule
+		 * above, but this marker remains so older code paths and comments still point
+		 * to the same biological event.</p>
+		 */
+		
+		/**
+		 * Update apex water potential without changing topology.
+		 */
+		a:ApexService ::> 
+		{
+			a.updateWaterPotential();
+		}
+		/**
+		 * Vegetative phytomer rewrite.
+		 *
+		 * <p>Biological role: extend an active vegetative shoot by one main-axis
+		 * phytomer and, if the plan says so, emit one lateral bud from the newly
+		 * formed internode.</p>
+		 *
+		 * <p>Structural effect: create the internode/joint/leaf set, consult the
+		 * apex-side branch cursor for the current rank, and then advance the apex.</p>
+		 *
+		 * <p>State updates: {@code popPlannedBranchLenAtCurrentNode()} consumes the
+		 * bud-side plan, and {@code a.increment()} happens only after the new topology
+		 * has been created.</p>
+		 */
+		a:ApexService, (useStaticArc == false && 
+						a.shouldProducePhytomer() == true && 
+						a.shouldProduceFlower == false) ==>
+		{	
+			ShootBase sb1 = first((* s:ShootBase, (s.isBaseOf(a)) *));			
+		}
+			if (sb1 == null) (
+				sb2:ShootBase
+				{
+					sb2.initiate(a);
+					if (printFlag || debug) {
+						println("[apple][shootbase-new] step=" + step
+							+ " apexId=" + a.getId()
+							+ " order=" + a.order
+							+ " rank=" + a.rank
+							+ " shootType=" + a.shootType
+							+ " shootNumber=-1"
+							+ " syllepticOrder=" + a.syllepticOrder
+							+ " axis2=" + a.axis2ID
+							+ " axis3=" + a.axis3ID
+							+ " axis4=" + a.axis4ID
+							+ " axis5=" + a.axis5ID
+							+ " axis6=" + a.axis6ID
+							+ " axis7=" + a.axis7ID
+							+ " axis8=" + a.axis8ID
+							+ " axis9=" + a.axis9ID
+							+ " cpn=" + a.cpn);
+					}
+				}
+			) 	
+			RH(phyllotaxis) 
+			i:Internode jt:Joint {
+			if (printFlag || debug) println("new internode");
+			i.initiate_apex(a);
+		if (hasOrganSizeInput() && "bourseShoot".equals(a.shootType) && bourseInternodeProfile != null) {
+			double actualI = Organ.profileValueAtRank(bourseInternodeProfile, a.rank);
+			double potI = Organ.actualToPotentialSize(actualI);
+			double gI = safeStress(a);
+			double realI = actualI;
+				i.potentialFinalSize = potI;
+				i.realizedFinalSize = realI;
+				i.realizationRatio = safeRealizationRatio(i.realizedFinalSize, i.potentialFinalSize);
+				Organ.applyInternodeTargetLengthAtInit(i, Math.max(0.001, potI));
+			} else if (hasOrganSizeInput() && !"bourseShoot".equals(a.shootType) && vegShootInternodeProfile != null) {
+			double actualIveg = Organ.profileValueAtRank(vegShootInternodeProfile, a.rank);
+			double potIveg = Organ.actualToPotentialSize(actualIveg);
+				i.potentialFinalSize = potIveg;
+				i.realizedFinalSize = actualIveg;
+				i.realizationRatio = safeRealizationRatio(i.realizedFinalSize, i.potentialFinalSize);
+				Organ.applyInternodeTargetLengthAtInit(i, Math.max(0.001, potIveg));
+			}
+		jt.initiate(i); jt.setTropism(a);}
+		
+		{
+			// Ask the apex if a branch is planned for THIS node (1-based = a.rank)
+			int plannedLen = 0;
+			int existingBudCountOnNode = 0;
+			long existingBudId = 0L;
+			boolean skipExistingLateral = false;
+			if (a instanceof ApexApple) {
+				plannedLen = ((ApexApple) a).popPlannedBranchLenAtCurrentNode();
+				if (plannedLen > 0) {
+					existingBudCountOnNode = countBudsOnInternodeSite(i);
+					BudService existingBud = firstBudOnInternodeSite(i);
+					skipExistingLateral = (existingBud != null);
+					existingBudId = skipExistingLateral ? existingBud.getId() : 0L;
+					if (skipExistingLateral == false && !reserveLateralBudSite(i)) {
+						skipExistingLateral = true;
+						existingBudId = -1L;
+					}
+					if (printFlag || debug) {
+						String axisLabel = "bourseShoot".equals(a.shootType) ? "[mixed-bud][child-lateral]" : "[vegetative][lateral]";
+						println(axisLabel + " parentApex=" + a.getId()
+							+ " nodeRank=" + a.rank
+							+ " internodeId=" + i.getId()
+							+ " plannedBranchLen=" + plannedLen
+							+ " existingBudCountOnSite=" + existingBudCountOnNode
+							+ " existingBudId=" + existingBudId);
+					}
+				}
+			}
+		
+			// If a lateral is planned, create a Bud now and initialize with preplanned nodes
+		}
+		if (plannedLen > 0 && skipExistingLateral == false) (
+			[
+				{BudService bud = new BudCreator(species).createBud(); }
+					bd:bud {
+						if (bd instanceof BudAppleService) {
+							((BudAppleService) bd).initiatePreplanned(i, plannedLen);
+							((BudAppleService) bd).setParentAxisApexId(a.getId());
+						} else {
+							// Fallback for non-apple (keeps pipeline robust)
+							bd.initiate(i, 0);
+					}
+					bd.storeParentId(i);
+					if (printFlag || debug) {
+						println("[lat-create] step=" + step
+							+ " parentApexId=" + a.getId()
+							+ " nodeRank=" + a.rank
+							+ " internodeId=" + i.getId()
+							+ " plannedLen=" + plannedLen
+							+ " budId=" + bd.getId()
+							+ " budOrder=" + bd.order
+							+ " existingBudCountOnSite=" + existingBudCountOnNode);
+					}
+				}
+			]
+		)
+		if (plannedLen > 0 && skipExistingLateral == true) (
+			{
+				if (printFlag || debug) {
+					println("[lat-skip-existing] step=" + step
+						+ " parentApexId=" + a.getId()
+						+ " nodeRank=" + a.rank
+						+ " internodeId=" + i.getId()
+						+ " plannedLen=" + plannedLen
+						+ " existingBudCountOnSite=" + existingBudCountOnNode
+						+ " existingBudId=" + existingBudId
+						+ " reason=" + ((existingBudId == -1L) ? "siteAlreadyClaimedThisStep" : "existingBudOnSite"));
+				}
+			}
+		)
+
+		{
+			boolean emitLeafBranch = true;
+			int existingPetiolesOnInternode = 0;
+			if ("apple".equals(species)) {
+				existingPetiolesOnInternode = countDirectPetiolesOnInternode(i);
+				emitLeafBranch = shouldEmitLeafBranchOnInternode(i);
+			}
+			if (!emitLeafBranch && (printFlag || debug)) {
+				println("[dup-petiole-skip] step=" + step
+					+ " apex=" + a.getId()
+					+ " internode=" + i.getId()
+					+ " rank=" + a.rank
+					+ " existingPetiolesOnInternode=" + existingPetiolesOnInternode);
+			}
+		}
+		if (emitLeafBranch) (
+		[ //start of leaf initiation
+			{ float petDecl = JMidrib.samplePetioleDeclDeg();
+			  float rollDeg = JMidrib.sampleLeafRollDeg();
+			  double potentialLeafLength_m = Double.NaN;
+			  double[][] petioleProfile = null;
+			  if (hasOrganSizeInput() && "bourseShoot".equals(a.shootType)) {
+				petioleProfile = boursePetioleProfile;
+			  	if (bourseLeafLengthProfile != null) {
+			  		double actualLeafLength_m = Organ.profileValueAtRank(bourseLeafLengthProfile, a.rank);
+			  		potentialLeafLength_m = Organ.actualToPotentialSize(actualLeafLength_m);
+			  	}
+			  } else if (hasOrganSizeInput() && !"bourseShoot".equals(a.shootType)) {
+				petioleProfile = vegShootPetioleProfile;
+			  	if (vegShootLeafLengthProfile != null) {
+			  		double actualLeafLength_m = Organ.profileValueAtRank(vegShootLeafLengthProfile, a.rank);
+			  		potentialLeafLength_m = Organ.actualToPotentialSize(actualLeafLength_m);
+			  	}
+			  }
+			}
+		RU(-petDecl) AdjustLU pt:Petiole
+		//AdjustLU make the rotated local x-axis (the turtle's left axis) is horizontal
+		{
+			pt.initiate_apex(a);
+			pt.rank = a.rank;
+			double potentialPetioleLength_m = resolvePotentialPetioleLength(petioleProfile, a.rank, potentialLeafLength_m, pt.fpetio);
+			if (!(Double.isNaN(potentialPetioleLength_m) || Double.isInfinite(potentialPetioleLength_m) || potentialPetioleLength_m <= 0.0)) {
+				Organ.applyPetioleTargetLengthAtInit(pt, potentialPetioleLength_m);
+			}
+		}
+		RH(180)
+		//can add petio to leaf blade angle here
+		RH(rollDeg)
+		jm:JMidrib(JMidrib.calcLeafDeclination(pt.rank, pt.order, 0.1))
+		
+		for (int m = 0; m < leafShape.polyleaf[0].length; m++) (
+				[lf:Leaf]
+					{
+						if (printFlag || debug) println("new leaf");
+							lf.initiate_apex(a);
+						lf.fid = m;
+						lf.rank = pt.rank;
+							if ("bourseShoot".equals(a.shootType)) {
+								lf.organType = "bourseLeaf";
+							} else {
+								lf.organType = "vegetativeLeaf";
+							}
+							if (a.rank <= earlyVegetativeLeafCount) {
+								lf.markFastEarlyExpansionLeaf("earlyVegetative");
+							}
+							if (hasOrganSizeInput() && "bourseShoot".equals(a.shootType) && bourseLeafProfile != null) {
+							double actualA = Organ.profileValueAtRank(bourseLeafProfile, a.rank);
+							double actualL = Double.NaN;
+							double actualW = Double.NaN;
+							double potL = Double.NaN;
+							double potW = Double.NaN;
+							if (bourseLeafLengthProfile != null) {
+								actualL = Organ.profileValueAtRank(bourseLeafLengthProfile, a.rank);
+								potL = Organ.actualToPotentialSize(actualL);
+							}
+							if (bourseLeafWidthProfile != null) {
+								actualW = Organ.profileValueAtRank(bourseLeafWidthProfile, a.rank);
+								potW = Organ.actualToPotentialSize(actualW);
+							}
+							double potA = leafAreaFromGeometry(potL, potW, m, Organ.actualToPotentialSize(actualA));
+							double realA = leafAreaFromGeometry(actualL, actualW, m, actualA);
+							lf.potentialFinalSize = potA;
+							lf.realizedFinalSize = realA;
+							lf.realizationRatio = safeRealizationRatio(lf.realizedFinalSize, lf.potentialFinalSize);
+							lf.profileFinalSizeLocked = true;
+							if (hasLeafGeometry(potL, potW)) {
+								Organ.applyLeafTargetGeometryAtInit(lf, potL, potW);
+							} else {
+								Organ.applyLeafTargetAreaAtInit(lf, Math.max(1.0e-8, potA));
+							}
+						} else if (hasOrganSizeInput() && !"bourseShoot".equals(a.shootType) && vegShootLeafProfile != null) {
+							double actualVegA = Organ.profileValueAtRank(vegShootLeafProfile, a.rank);
+							double actualVegL = Double.NaN;
+							double actualVegW = Double.NaN;
+							double potVegL = Double.NaN;
+							double potVegW = Double.NaN;
+							if (vegShootLeafLengthProfile != null) {
+								actualVegL = Organ.profileValueAtRank(vegShootLeafLengthProfile, a.rank);
+								potVegL = Organ.actualToPotentialSize(actualVegL);
+							}
+							if (vegShootLeafWidthProfile != null) {
+								actualVegW = Organ.profileValueAtRank(vegShootLeafWidthProfile, a.rank);
+								potVegW = Organ.actualToPotentialSize(actualVegW);
+							}
+							double potVegA = leafAreaFromGeometry(potVegL, potVegW, m, Organ.actualToPotentialSize(actualVegA));
+							double realVegA = leafAreaFromGeometry(actualVegL, actualVegW, m, actualVegA);
+							lf.potentialFinalSize = potVegA;
+							lf.realizedFinalSize = realVegA;
+							lf.realizationRatio = safeRealizationRatio(lf.realizedFinalSize, lf.potentialFinalSize);
+							lf.profileFinalSizeLocked = true;
+							if (hasLeafGeometry(potVegL, potVegW)) {
+								Organ.applyLeafTargetGeometryAtInit(lf, potVegL, potVegW);
+							} else {
+								Organ.applyLeafTargetAreaAtInit(lf, Math.max(1.0e-8, potVegA));
+							}
+						}
+						lf.area = leafShape.calcLeafPolygonArea(lf.length, lf.width, lf.fid);
+						if (lf.potentialFinalSize > 0.0 &&
+							!(hasOrganSizeInput() &&
+								(("bourseShoot".equals(a.shootType) && bourseLeafProfile != null) ||
+								 (!"bourseShoot".equals(a.shootType) && vegShootLeafProfile != null)))) {
+							lf.realizedFinalSize = lf.area;
+							lf.realizationRatio = safeRealizationRatio(lf.realizedFinalSize, lf.potentialFinalSize);
+						}
+						if (outputAppleDevelopmentDiagnostics && hasOrganSizeInput() && "bourseShoot".equals(a.shootType) && bourseLeafProfile != null) {
+							appendMixedBudDebug(lf, a, "mixed", 0, 0, "bourse", a.rank,
+								lf.potentialFinalSize, lf.realizedFinalSize, safeStress(a),
+								dafbApprox(a), "bourse", dafbApprox(a) >= 0.0);
+						} else if (outputAppleDevelopmentDiagnostics && hasOrganSizeInput() && !"bourseShoot".equals(a.shootType) && vegShootLeafProfile != null) {
+							appendMixedBudDebug(lf, a, "vegetative", 0, 0, "vegetative", a.rank,
+								lf.potentialFinalSize, lf.realizedFinalSize, safeStress(a),
+								dafbApprox(a), "vegetative", dafbApprox(a) >= 0.0);
+						}
+						jm.initiateWithAngles(lf, petDecl, rollDeg);
+						//if (printFlag) { println(" leaf legnth: " + lf.length + " leaf width: " + lf.width + " leaf area: " + lf.area); }
+					}
+				)
+		]  //end of leaf initiation
+		{
+			if (outputAppleDevelopmentDiagnostics || debug) {
+				logAppleLeafInitiation(a, "dynamicLeaf", a.rank, i.getId());
+			}
+		}
+		)
+ 		
+		a 
+		{
+			if (a instanceof ApexApple) {
+				// Block same-step recursive derive() from letting one apex emit twice in one external pass.
+				((ApexApple) a).markPhytomerProducedThisStep();
+			}
+			a.increment();
+			//if (printFlag) { println("New Phytomer"); }
+			derive();
+			newShootAppeared = true;
+			
+		}
+		;
+		
+		
+		f:Flower::> {
+			updateMixedBudFlowerTimingFromSourceApex(f);
+			boolean floweredNow = f.shouldFlower();
+			if (floweredNow && outputAppleDevelopmentDiagnostics) {
+				appendFlowerTimingDebug("bloom", f, resolveMixedBudFlowerSourceApex(f));
+			}
+		}
+		
+		
+		f:Flower,(f.shouldProduceFruit()) ==> 
+					[	
+								{
+									if (outputAppleDevelopmentDiagnostics) {
+										appendFlowerTimingDebug("fruitConversion", f, resolveMixedBudFlowerSourceApex(f));
+									}
+									if (printFlag || debug) {
+										println("[flower-to-fruit] rewrite start"
+											+ " flowerId=" + f.getId()
+											+ " plant=" + f.plantNumber
+											+ " ageD=" + f.ageD
+											+ " ageDAtFlowering=" + f.ageDAtFlowering
+											+ " daysAfterBloom=" + (f.ageD - f.ageDAtFlowering)
+											+ " threshold=" + f.fruitingDaysAfterBloom
+											+ " biomass=" + f.biomass
+											+ " freshWeight=" + f.freshWeight);
+									}
+									PlantBase pb = first((* p:PlantBase, (p.plantNumber == f.plantNumber)*));	
+								Internode itn = first((*f (<--)+ i:Internode, (i.ID > 1)*));
+									if ((pb == null || itn == null) && (printFlag || debug)) {
+										println("[flower-to-fruit] skipped"
+											+ " flowerId=" + f.getId()
+											+ " plant=" + f.plantNumber
+											+ " pbNull=" + (pb == null)
+											+ " internodeNull=" + (itn == null));
+									}
+								
+							}
+							//adding fruit to the graph
+							if(pb != null && itn != null) (
+								[ 
+									b:main.FRUIT_CREATOR.createFruit(FruitService.originalParametersFactory, FruitService.DELTA)
+									{
+										b.initiate_pb(pb, itn); 
+										if (outputAppleDevelopmentDiagnostics) {
+											appendFlowerToFruitDebug(f, b, pb, itn);
+										}
+									}
+								]
+							)
+					]//closing adding fruits
+				;
+		
+	 
+		/**
+		 * Conservative duplicate-apex cleanup.
+		 *
+		 * <p>Biological role: none. This is a graph-integrity safety net.</p>
+		 *
+		 * <p>Structural effect: remove only clearly duplicate apple apex candidates
+		 * that share the same axis tuple and lineage hint.</p>
+		 */
+		dupApex:ApexService,
+			(useStaticArc == false &&
+			 "apple".equals(species) &&
+			 isDuplicateIdentityApex(dupApex)) ==>>
+		{
+			ApexService keepApex = canonicalApexAmongIdentityDuplicates(dupApex);
+			if (printFlag || debug) {
+				println("[dup-apex-prune] step=" + step
+					+ " phase=postdevelop"
+					+ " plantId=" + dupApex.plantNumber
+					+ " fieldInstanceId=" + dupApex.fieldInstanceId
+					+ " keepApexId=" + ((keepApex != null) ? keepApex.getId() : 0L)
+					+ " removeApexId=" + dupApex.getId()
+					+ " order=" + dupApex.order
+					+ " rank=" + dupApex.rank
+					+ " syllepticOrder=" + dupApex.syllepticOrder
+					+ " shootType=" + dupApex.shootType
+					+ " shouldProduceFlower=" + dupApex.shouldProduceFlower
+					+ " cpn=" + dupApex.cpn
+					+ " axis1=" + dupApex.axis1ID
+					+ " axis2=" + dupApex.axis2ID
+					+ " axis3=" + dupApex.axis3ID
+					+ " axis4=" + dupApex.axis4ID
+					+ " axis5=" + dupApex.axis5ID
+					+ " axis6=" + dupApex.axis6ID
+					+ " axis7=" + dupApex.axis7ID
+					+ " axis8=" + dupApex.axis8ID
+					+ " axis9=" + dupApex.axis9ID
+					+ " keepParentInternodeId=" + ((keepApex != null) ? resolveApexParentInternodeId(keepApex) : 0L)
+					+ " removeParentInternodeId=" + resolveApexParentInternodeId(dupApex));
+			}
+		}
+		;
+
+		/**
+		 * Apex termination rewrite.
+		 *
+		 * <p>Biological role: remove an apex that has completed its growth cycle or
+		 * otherwise satisfies the termination predicate.</p>
+		 *
+		 * <p>Structural effect: delete the apex node without creating replacement
+		 * topology.</p>
+		 */
+		a:ApexService, (useStaticArc == false && a.shouldTerminate() == true) ==> ;
+		
+		// shed flower/fruit
+		//b:FruitService, (b.shouldFall()) ==> cut;
+		
+		//shed a leaf
+		//l:Leaf, (l.shouldFall() == true) ==>> ; 
+
+	
+		
+		/**
+		 * Rule for applying bend.
+		 * <p>
+		 * This rule is activated when the static arc is not in use and shoot positioning is enabled.
+		 * </p>
+		 */
+		{
+			if (useStaticArc == false && useShootPositioning == true) {
+				ApplyBend();
+			}
+		}
+		
+
+		/** Update plant order whenever a new shoot appeared during this develop pass. */
+		pb:PlantBase, (newShootAppeared == true) ::>
+		{
+			pb.updateOrder();
+		}
+
+		syncInternode:Internode, (newShootAppeared == true) ::>
+		{
+			syncInternode.syncAnnualInternodeBiomassFromLocalOrNearbyLeaf();
+		}
+		 
+		/**
+		 * No-op placeholder rule kept to preserve the legacy rule skeleton.
+		 */
+		// ignore
+		temp ==> temp;
+
+	]}
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	/**
+	 * Helper functions used by the develop-stage rewrite rules.
+	 *
+	 * <p>This section contains step-local claim caches, topology lookups, geometry
+	 * helpers, and duplicate-detection predicates that keep the long XL rules
+	 * readable without hiding the actual state transitions.</p>
+	 */
+	static int lateralAttachClaimStep = Integer.MIN_VALUE;
+	static java.util.Set claimedLateralBudSiteIds = new java.util.HashSet();
+	
+		/**
+		 * Reset the lateral-attach claim cache for the current step.
+		 *
+		 * <p>Used to prevent two planned laterals from attaching to the same site
+		 * within one external derive pass.</p>
+		 */
+	static void resetLateralAttachClaimCacheIfNeeded() {
+		if (lateralAttachClaimStep == step) return;
+		lateralAttachClaimStep = step;
+		claimedLateralBudSiteIds = new java.util.HashSet();
+	}
+
+	/**
+	 * Reserve an internode attach site for a lateral bud in the current step.
+	 *
+	 * @param site internode attachment site
+	 * @return {@code true} when the site is reserved now; {@code false} when already claimed
+	 */
+	static boolean reserveLateralBudSite(Internode site) {
+		if (site == null) return false;
+		resetLateralAttachClaimCacheIfNeeded();
+		Long siteKey = Long.valueOf(site.getId());
+		if (claimedLateralBudSiteIds.contains(siteKey)) return false;
+		claimedLateralBudSiteIds.add(siteKey);
+		return true;
+	}
+
+	/** Resolve immediate/ancestral Joint ownership for a Petiole branch root. */
+	static Joint parentJointForPetiole(Petiole pt) {
+		if (pt == null) return null;
+		Joint jt = null;
+		try {
+			jt = first((* pt (<--)+ j:Joint *));
+		} catch (Throwable t) {
+			jt = null;
+		}
+		return jt;
+	}
+
+	/** Resolve owning internode via stored parentID contract (safe fallback path). */
+	static Internode parentInternodeFromStoredParentId(Petiole pt) {
+		if (pt == null || pt.parentID <= 0) return null;
+		try {
+			Organ parentNode = pt.getParent();
+			if (parentNode instanceof Internode) return (Internode) parentNode;
+		} catch (Throwable t) {
+			return null;
+		}
+		return null;
+	}
+
+	/** Resolve owning internode for a petiole (stored parent first, topology fallback second). */
+	static Internode parentInternodeForPetiole(Petiole pt) {
+		if (pt == null) return null;
+		Internode storedSite = parentInternodeFromStoredParentId(pt);
+		if (storedSite != null) return storedSite;
+		Joint jt = parentJointForPetiole(pt);
+		return parentInternodeForJoint(jt);
+	}
+
+	/** Resolve nearest internode ancestor for a joint site. */
+	static Internode parentInternodeForJoint(Joint jt) {
+		if (jt == null) return null;
+		Internode site = null;
+		try {
+			site = first((* jt (<--)+ i:Internode *));
+		} catch (Throwable t) {
+			site = null;
+		}
+		return site;
+	}
+
+	static int countDirectPetiolesOnInternode(Internode site) {
+		if (site == null) return 0;
+		int petioleCount = 0;
+		long siteId = site.getId();
+		for (Petiole petioleNode : (* storedPetiole:Petiole, (storedPetiole.parentID == siteId) *)) {
+			if (petioleNode == null) continue;
+			petioleCount++;
+		}
+		if (petioleCount > 0) return petioleCount;
+		for (Petiole petioleNode : (* site (-->)+ petCand:Petiole *)) {
+			if (petioleNode == null) continue;
+			Internode parentSite = parentInternodeForPetiole(petioleNode);
+			if (parentSite == null || parentSite != site) continue;
+			petioleCount++;
+		}
+		return petioleCount;
+	}
+
+	static boolean shouldEmitLeafBranchOnInternode(Internode site) {
+		return countDirectPetiolesOnInternode(site) == 0;
+	}
+
+	static double safeStress(ApexService a) {
+		double g = 1.0;
+		try {
+			PlantBase pb = first((* p:PlantBase, (p.plantNumber == a.plantNumber) *));
+			if (pb != null) g = pb.fMb_shoot;
+		} catch (Throwable t) {
+			g = 1.0;
+		}
+		if (Double.isNaN(g) || Double.isInfinite(g)) g = 1.0;
+		if (g < 0.0) g = 0.0;
+		if (g > 1.0) g = 1.0;
+		return g;
+	}
+
+	static double dafbApprox(ApexService a) {
+		return a.age - FLOWERING_TARGET;
+	}
+
+	static boolean hasLeafGeometry(double leafLength_m, double leafWidth_m) {
+		return !(Double.isNaN(leafLength_m) || Double.isInfinite(leafLength_m) || leafLength_m <= 0.0 ||
+			Double.isNaN(leafWidth_m) || Double.isInfinite(leafWidth_m) || leafWidth_m <= 0.0);
+	}
+
+	static double leafAreaFromGeometry(double leafLength_m, double leafWidth_m, int fid, double fallbackArea_m2) {
+		if (!hasLeafGeometry(leafLength_m, leafWidth_m)) return fallbackArea_m2;
+		double area_m2 = leafShape.calcLeafPolygonArea((float) leafLength_m, (float) leafWidth_m, fid);
+		if (Double.isNaN(area_m2) || Double.isInfinite(area_m2) || area_m2 <= 0.0) return fallbackArea_m2;
+		return area_m2;
+	}
+
+	static double resolvePotentialPetioleLength(double[][] petioleProfile, int rank1, double potentialLeafLength_m, double fpetioScale) {
+		double targetLength_m = Double.NaN;
+		double scale = fpetioScale;
+		if (Double.isNaN(scale) || Double.isInfinite(scale) || scale <= 0.0) {
+			scale = 0.5;
+		}
+		if (!(Double.isNaN(potentialLeafLength_m) || Double.isInfinite(potentialLeafLength_m) || potentialLeafLength_m <= 0.0)) {
+			targetLength_m = scale * potentialLeafLength_m;
+		}
+		if ((Double.isNaN(targetLength_m) || Double.isInfinite(targetLength_m) || targetLength_m <= 0.0) && petioleProfile != null) {
+			double actualPetioleLength_m = Organ.profileValueAtRank(petioleProfile, rank1);
+			if (!(Double.isNaN(actualPetioleLength_m) || Double.isInfinite(actualPetioleLength_m) || actualPetioleLength_m <= 0.0)) {
+				targetLength_m = Organ.actualToPotentialSize(actualPetioleLength_m);
+			}
+		}
+		return targetLength_m;
+	}
+
+	static boolean isMixedBudDynamicFloralApex(ApexService a) {
+		return (a instanceof ApexApple) && a.shouldProduceFlower == true;
+	}
+
+	static double safeRealizationRatio(double realized, double potential) {
+		if (Double.isNaN(potential) || Double.isInfinite(potential) || potential <= 1.0e-12) return 1.0;
+		double ratio = realized / potential;
+		if (Double.isNaN(ratio) || Double.isInfinite(ratio)) return 1.0;
+		return Math.max(0.0, ratio);
+	}
+
+	static void configureMixedBudFlowerFromApex(Flower f, ApexService a, boolean bloomReporter) {
+		if (f == null) return;
+		if (!(a instanceof ApexApple)) return;
+		ApexApple aa = (ApexApple)a;
+		double floweringTD = aa.getMixedBudFloweringTDFromBudBurst();
+		if (Double.isNaN(floweringTD) || Double.isInfinite(floweringTD) || floweringTD <= 0.0) {
+			floweringTD = 20.0;
+		}
+		f.mixedBudAppearanceDriven = true;
+		f.bloomControlledByApexBudBurst = true;
+		f.sourceApexID = a.getId();
+		f.sourceRosetteTarget = aa.floralRosetteLeafCount;
+		f.sourceRosetteAppearanceRank = aa.mixedBudFlowerAppearanceRank;
+		f.sourceApexBirthAge = aa.birthAge;
+		f.sourceApexBirthAgeD = aa.birthAgeD;
+		f.sourceApexBirthAgeGdd = aa.birthAgeGdd;
+		f.sourceApexAppearanceAge = aa.mixedBudFlowerAppearanceAge;
+		f.sourceApexAppearanceAgeD = aa.mixedBudFlowerAppearanceAgeD;
+		f.sourceApexAppearanceAgeGdd = aa.mixedBudFlowerAppearanceAgeGdd;
+		f.sourceApexThermalSinceBudBurstAtAppearance = aa.thermalTimeSinceBudBurst();
+		f.floweringTDFromBudBurst = floweringTD;
+		f.floweringTD = (float) floweringTD;
+		/*
+		 * For mixed buds, tm records the source-apex thermal threshold from bud burst.
+		 * Local Flower.age is not used to decide bloom for mixed buds.
+		 */
+		f.tm = floweringTD;
+		f.te = floweringTD + f.fruitingTD;
+		f.sourceApexThermalSinceBudBurst = aa.thermalTimeSinceBudBurst();
+		f.sourceApexDaysSinceBudBurst = aa.daysSinceBudBurst();
+		f.mixedBudBloomDelayAfterAppearance = floweringTD;
+		f.mixedBudBloomDebugReporter = bloomReporter;
+	}
+
+	static ApexApple resolveMixedBudFlowerSourceApex(Flower f) {
+		if (f == null) return null;
+		if (f.sourceApexID == 0L) return null;
+		ApexApple aa = first((* a:ApexApple, (a.getId() == f.sourceApexID) *));
+		return aa;
+	}
+
+	static void updateMixedBudFlowerTimingFromSourceApex(Flower f) {
+		if (f == null) return;
+		if (!f.bloomControlledByApexBudBurst) return;
+		ApexApple aa = resolveMixedBudFlowerSourceApex(f);
+		if (aa == null) return;
+		f.sourceApexThermalSinceBudBurst = aa.thermalTimeSinceBudBurst();
+		f.sourceApexDaysSinceBudBurst = aa.daysSinceBudBurst();
+		f.sourceApexAppearanceAge = aa.mixedBudFlowerAppearanceAge;
+		f.sourceApexAppearanceAgeD = aa.mixedBudFlowerAppearanceAgeD;
+		f.sourceApexAppearanceAgeGdd = aa.mixedBudFlowerAppearanceAgeGdd;
+	}
+
+	static void appendFlowerTimingDebug(String recordType, Flower f, ApexApple aa) {
+		if (!outputAppleDevelopmentDiagnostics) return;
+
+		AppleFlowerTimingDiagnosticOutputData row = new AppleFlowerTimingDiagnosticOutputData();
+		row.timestamp = timestamp;
+		row.step = step;
+		row.year = year;
+		row.dayOfYear = dayOfYear;
+		row.hourOfDay = hourOfDay;
+		row.scenario = scenario;
+		row.simuuid = simUUID;
+		row.plantNumber = (f != null) ? f.plantNumber : ((aa != null) ? aa.plantNumber : -1);
+		row.fieldInstanceId = (aa != null) ? aa.fieldInstanceId : ((f != null) ? f.fieldInstanceId : 0);
+		row.recordType = recordType;
+		row.sourceApexID = (f != null) ? f.sourceApexID : ((aa != null) ? aa.getId() : 0L);
+		row.flowerId = (f != null) ? f.getId() : 0L;
+		row.sourceRosetteTarget = (f != null) ? f.sourceRosetteTarget : ((aa != null) ? aa.floralRosetteLeafCount : 0);
+		row.sourceRosetteAppearanceRank = (f != null) ? f.sourceRosetteAppearanceRank : ((aa != null) ? aa.mixedBudFlowerAppearanceRank : 0);
+		row.apexBirthAge = (f != null) ? f.sourceApexBirthAge : ((aa != null) ? aa.birthAge : Double.NaN);
+		row.apexBirthAgeD = (f != null) ? f.sourceApexBirthAgeD : ((aa != null) ? aa.birthAgeD : Double.NaN);
+		row.apexBirthAgeGdd = (f != null) ? f.sourceApexBirthAgeGdd : ((aa != null) ? aa.birthAgeGdd : Double.NaN);
+		row.apexAppearanceAge = (f != null) ? f.sourceApexAppearanceAge : ((aa != null) ? aa.mixedBudFlowerAppearanceAge : Double.NaN);
+		row.apexAppearanceAgeD = (f != null) ? f.sourceApexAppearanceAgeD : ((aa != null) ? aa.mixedBudFlowerAppearanceAgeD : Double.NaN);
+		row.apexAppearanceAgeGdd = (f != null) ? f.sourceApexAppearanceAgeGdd : ((aa != null) ? aa.mixedBudFlowerAppearanceAgeGdd : Double.NaN);
+		row.apexThermalSinceBudBurstAtAppearance = (f != null) ? f.sourceApexThermalSinceBudBurstAtAppearance : ((aa != null) ? aa.thermalTimeSinceBudBurst() : Double.NaN);
+		row.currentApexThermalSinceBudBurst = (aa != null) ? aa.thermalTimeSinceBudBurst() : ((f != null) ? f.sourceApexThermalSinceBudBurst : Double.NaN);
+		row.floweringTDFromBudBurst = (f != null) ? f.floweringTDFromBudBurst : ((aa != null) ? aa.getMixedBudFloweringTDFromBudBurst() : Double.NaN);
+		row.flowerLocalAge = (f != null) ? f.age : Double.NaN;
+		row.flowerLocalAgeD = (f != null) ? f.ageD : Double.NaN;
+		row.hasFlowered = (f != null) ? f.hasFlowered : false;
+		row.ageDAtFlowering = (f != null) ? f.ageDAtFlowering : Double.NaN;
+		row.daysAfterBloom = (f != null) ? f.ageD - f.ageDAtFlowering : Double.NaN;
+		row.fruitingDaysAfterBloom = (f != null) ? f.fruitingDaysAfterBloom : Double.NaN;
+		DiagnosticTableCoordinator.writeAppleFlowerTiming(row);
+	}
+
+	static void appendMixedBudDebug(Leaf lf, ApexService a, String budType,
+		int nSpurLeaves, int nBourseShoots, String leafType, int leafRank,
+		double potentialArea, double realizedArea, double carbonStressFactor,
+		double dafb, String stage, boolean bourseExporterFlag) {
+		if (!outputAppleDevelopmentDiagnostics) return;
+
+		AppleSpurBourseDiagnosticOutputData row = new AppleSpurBourseDiagnosticOutputData();
+		row.timestamp = timestamp;
+		row.step = step;
+		row.year = year;
+		row.dayOfYear = dayOfYear;
+		row.hourOfDay = hourOfDay;
+		row.scenario = scenario;
+		row.simuuid = simUUID;
+		row.plantNumber = (lf != null) ? lf.plantNumber : ((a != null) ? a.plantNumber : -1);
+		row.fieldInstanceId = (lf != null) ? lf.fieldInstanceId : ((a != null) ? a.fieldInstanceId : 0);
+		row.recordType = "profilePlan";
+		row.plantId = row.plantNumber;
+		// Preserve the legacy column semantics: budId stores the emitting apex ID.
+		row.budId = (a != null) ? a.getId() : 0L;
+		row.budType = budType;
+		row.nSpurLeaves = nSpurLeaves;
+		row.nBourseShoots = nBourseShoots;
+		row.leafType = leafType;
+		row.leafRank = leafRank;
+		row.potentialArea = potentialArea;
+		row.realizedArea = realizedArea;
+		row.carbonStressFactor = carbonStressFactor;
+		row.DAFB = dafb;
+		row.stage = stage;
+		row.bourseExporterFlag = bourseExporterFlag;
+		DiagnosticTableCoordinator.writeAppleSpurBourse(row);
+	}
+
+	static void appendFlowerToFruitDebug(Flower f, FruitService b, PlantBase pb, Internode itn) {
+		if (!outputAppleDevelopmentDiagnostics) return;
+
+		AppleFlowerToFruitDiagnosticOutputData row = new AppleFlowerToFruitDiagnosticOutputData();
+		row.timestamp = timestamp;
+		row.step = step;
+		row.year = year;
+		row.dayOfYear = dayOfYear;
+		row.hourOfDay = hourOfDay;
+		row.scenario = scenario;
+		row.simuuid = simUUID;
+		row.plantNumber = (pb != null) ? pb.plantNumber : ((f != null) ? f.plantNumber : -1);
+		row.fieldInstanceId = (pb != null) ? pb.fieldInstanceId : ((f != null) ? f.fieldInstanceId : 0);
+		row.flowerId = (f != null) ? f.getId() : 0L;
+		row.fruitId = (b != null) ? b.getId() : 0L;
+		row.parentInternodeId = (itn != null) ? itn.getId() : 0L;
+		row.flowerBiomass = (f != null) ? f.biomass : Double.NaN;
+		row.flowerFreshWeight = (f != null) ? f.freshWeight : Double.NaN;
+		row.flowerWaterContent = (f != null) ? f.waterContent : Double.NaN;
+		row.fruitBiomassAfterInit = (b != null) ? b.biomass : Double.NaN;
+		row.fruitFreshWeightAfterInit = (b != null) ? b.freshWeight : Double.NaN;
+		row.flowerAge = (f != null) ? f.age : Double.NaN;
+		row.flowerAgeD = (f != null) ? f.ageD : Double.NaN;
+		row.ageDAtFlowering = (f != null) ? f.ageDAtFlowering : Double.NaN;
+		row.daysAfterBloom = (f != null) ? f.ageD - f.ageDAtFlowering : Double.NaN;
+		row.fruitingDaysAfterBloom = (f != null) ? f.fruitingDaysAfterBloom : Double.NaN;
+		row.FRUIT_DRY_WEIGHT = FRUIT_DRY_WEIGHT;
+		row.FRUIT_FRESH_WEIGHT = FRUIT_FRESH_WEIGHT;
+		row.FRUIT_AGE_AFTER_FULLBLOOM = FRUIT_AGE_AFTER_FULLBLOOM;
+		row.hasFlowered = (f != null) ? f.hasFlowered : false;
+		row.dropped = (f != null) ? f.dropped : false;
+		DiagnosticTableCoordinator.writeAppleFlowerToFruit(row);
+	}
+
+	static long resolveApexParentInternodeId(ApexService a) {
+		if (a == null) return 0L;
+		Internode parentInternode = null;
+		try {
+			parentInternode = first((* a (<--)+ ip:Internode *));
+		} catch (Throwable t) {
+			parentInternode = null;
+		}
+		return (parentInternode != null) ? parentInternode.getId() : 0L;
+	}
+
+	static Internode resolveBudParentInternode(BudService bud) {
+		return parentInternodeForBud(bud);
+	}
+
+	static String resolveAppleAxisRole(ApexService a) {
+		if (!(a instanceof ApexApple)) return "unknown";
+		ApexApple aa = (ApexApple) a;
+		if (aa.shouldProduceFlower == true) return "rosetteParent";
+		if ("bourseShoot".equals(aa.shootType)) return "bourseChild";
+		if (aa.getParentAxisApexId() > 0L) return "lateralChild";
+		return "parentAxis";
+	}
+
+	static void logAppleLeafInitiation(ApexService a, String eventName, int localRank, long parentInternodeId) {
+		if (!(outputAppleDevelopmentDiagnostics || debug)) return;
+		long apexId = (a != null) ? a.getId() : 0L;
+		long parentAxisApexId = 0L;
+		long sourceBudId = 0L;
+		String shootType = (a != null && a.shootType != null) ? a.shootType : "";
+		int order = (a != null) ? a.order : -1;
+		if (a instanceof ApexApple) {
+			ApexApple aa = (ApexApple) a;
+			parentAxisApexId = aa.getParentAxisApexId();
+			sourceBudId = aa.getSourceBudId();
+		}
+		String axisRole = resolveAppleAxisRole(a);
+		if (outputAppleDevelopmentDiagnostics) {
+			AppleLeafAxisDiagnosticOutputData row = new AppleLeafAxisDiagnosticOutputData();
+			row.timestamp = timestamp;
+			row.step = step;
+			row.year = year;
+			row.dayOfYear = dayOfYear;
+			row.hourOfDay = hourOfDay;
+			row.scenario = scenario;
+			row.simuuid = simUUID;
+			row.plantNumber = (a != null) ? a.plantNumber : -1;
+			row.fieldInstanceId = (a != null) ? a.fieldInstanceId : 0;
+			row.plantId = row.plantNumber;
+			row.apexId = apexId;
+			row.parentAxisApexId = parentAxisApexId;
+			row.sourceBudId = sourceBudId;
+			row.axisRole = axisRole;
+			row.shootType = shootType;
+			row.order = order;
+			row.localRank = localRank;
+			row.parentInternodeId = parentInternodeId;
+			row.event = eventName;
+			DiagnosticTableCoordinator.writeAppleLeafAxis(row);
+		}
+		if (debug) {
+			println("[apple][leaf-init] step=" + step
+				+ " apex=" + apexId
+				+ " parentAxisApex=" + parentAxisApexId
+				+ " axisRole=" + axisRole
+				+ " shootType=" + shootType
+				+ " order=" + order
+				+ " rank=" + localRank
+				+ " parentInternode=" + parentInternodeId
+				+ " event=" + eventName);
+		}
+	}
+
+	/**
+	 * Strict apple duplicate-apex identity check.
+	 * Duplicate candidates must share the same local axis tuple and apex-role metadata.
+	 */
+	static boolean sharesAppleApexIdentityKey(ApexService a, ApexService b) {
+		if (a == null || b == null) return false;
+		if (a == b || a.getId() == b.getId()) return false;
+		if (a.plantNumber != b.plantNumber) return false;
+		if (a.fieldInstanceId != b.fieldInstanceId) return false;
+		if (a.order != b.order) return false;
+		if (a.rank != b.rank) return false;
+		if (a.cpn != b.cpn) return false;
+		if (a.syllepticOrder != b.syllepticOrder) return false;
+		if (a.shouldProduceFlower != b.shouldProduceFlower) return false;
+		if (!String.valueOf(a.shootType).equals(String.valueOf(b.shootType))) return false;
+		if (a.axis1ID != b.axis1ID) return false;
+		if (a.axis2ID != b.axis2ID) return false;
+		if (a.axis3ID != b.axis3ID) return false;
+		if (a.axis4ID != b.axis4ID) return false;
+		if (a.axis5ID != b.axis5ID) return false;
+		if (a.axis6ID != b.axis6ID) return false;
+		if (a.axis7ID != b.axis7ID) return false;
+		if (a.axis8ID != b.axis8ID) return false;
+		if (a.axis9ID != b.axis9ID) return false;
+		return true;
+	}
+
+	/** Choose canonical apex (lowest ID) among apple apexes with the same identity tuple. */
+	static ApexService canonicalApexAmongIdentityDuplicates(ApexService target) {
+		if (target == null) return null;
+		ApexService keep = target;
+		for (ApexService cand : (* apx:ApexService, (apx.plantNumber == target.plantNumber) *)) {
+			if (cand == null || cand.getId() == target.getId()) continue;
+			if (!sharesAppleApexIdentityKey(target, cand)) continue;
+			if (cand.getId() < keep.getId()) keep = cand;
+		}
+		return keep;
+	}
+
+	/** @return true when target apex is non-canonical among same-identity apple apexes. */
+	static boolean isDuplicateIdentityApex(ApexService target) {
+		if (target == null) return false;
+		ApexService keep = canonicalApexAmongIdentityDuplicates(target);
+		if (keep == null) return false;
+		return keep.getId() != target.getId();
+	}
+}

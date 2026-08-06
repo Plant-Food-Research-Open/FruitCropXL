@@ -1,0 +1,4 @@
+file-name-model-options: model.options.default.json
+max-steps: 25
+light-interception-mode: cpu
+use-shading-factor: true

@@ -1,0 +1,72 @@
+import static updatesApple.*;
+import static updatesGrapevine.*;
+import static updatesBerryPopulation.*;
+import static updatesVirtualFruit.*;
+import static updatesSingleRoot.*;
+import java.io.Serializable;
+
+import static extraTools.*;
+
+public class UpdatesServiceFactory implements Serializable {
+	public static UpdatesService getService(String special_scenario, String species) {
+		UpdatesService service = null;
+	
+		// Special scenario takes priority over species when choosing the correct updates service.
+		if (!isStringNull(special_scenario)) {
+			println("special_scenario::" + special_scenario); 
+			service = getServiceFromSpecialScenario(special_scenario);
+		} 
+		//if special scenarios does not specify the updates file
+		if (service == null && !isStringNull(species)) {
+			service = getServiceFromSpecies(species);
+		} else {
+			println("Both special scenario and species are undefined or unrecognized."); 
+		}
+
+		// Check if no appropriate updates variant could be found.
+		if (service == null) {
+			// Default case: species = apple
+			return new UpdatesApple();
+		} else {
+			//println("Selected the following module for updates: " + service); 
+			return service;
+		}
+	}
+
+	private static UpdatesService getServiceFromSpecialScenario(String special_scenario) {
+		if ("berry_population".equals(special_scenario)) 
+		{
+			return new UpdatesBerryPopulation();
+		}
+		else if ("virtualFruit".equals(special_scenario)) 
+		{
+			return new UpdatesVirtualFruit();
+		} 
+		else if ("singleRoot".equals(special_scenario))
+		{
+			return new UpdatesSingleRoot();
+		}
+	 	else if ("optimal_canopy_architecture".equals(special_scenario))
+		{
+			return new UpdatesGrapevine();
+		} else {  
+			return null;
+		}
+	}
+
+	private static UpdatesService getServiceFromSpecies(String species) {
+		if (species.equals("grapevine")) 
+		{
+			return new UpdatesGrapevine();	
+		} else if (species.equals("apple")) {
+			return new UpdatesApple();
+		} else { 
+			return null; 
+		}
+		
+	}
+}
+
+public abstract class UpdatesService implements Serializable {
+	public abstract void updates();
+}

@@ -1,0 +1,363 @@
+import static absOrgan.*;
+import static phenology.*;
+import static modelOptions.*;
+import static initialConditions.*;
+import static environment.*;
+import static globalParameters.*;
+import static plantBase.*;
+import static carbonTransport.*;
+import static fruitBase.*;
+import static budBase.*;
+import java.util.Arrays;
+
+/* ############################# BUD YIELD FUNCTIONS ################################*/
+
+// Return the predicted number of bunches for the bud based on environmental conditions
+// Equation does not work yet - need to change coefficients for carbon concentration
+public static float getBunchesPerShoot(BudService bud)
+{	
+	float tmaxBUN = bud[accumulatedTmaxBUN] / bud[tmaxDaysBUN]; // Average daily max temperature
+	float radBUN = (bud[accumulatedRadBUN] / bud[radHoursBUN]) * 3600 * 24 * 0.000001 / 4.55; // Average radiation converted from umol/m2/s to mJ/m2
+	float carbonBUN =  bud[accumulatedCarbonBUN] / bud[carbonHoursBUN]; // Average carbon concentration
+	
+	// Intermediate values for calcuating bunches per shoot
+	float carbonIniCoeff;
+	float radIniCoeff;
+	float tmaxIniCoeff;
+
+	float bunchesPerShoot; // Predicted number of bunches for this shoot
+		
+	// Transform carbon concentration
+	// This part needs to be changed as it is based on FDM from APSIM grapevie model
+	/*if (carbonBUN < 0.1 || carbonBUN > 1) {
+		carbonIniCoeff = 1;
+	} else if (carbonBUN <= 0.5) { 
+		carbonIniCoeff = carbonBUN * 1.26;
+	} else {
+		carbonIniCoeff = carbonBUN * 0.74 + 0.26;
+	}*/
+	carbonIniCoeff = 1;
+		
+	// Transform radiation
+	if (radBUN < 10) {
+		radIniCoeff = 0.65;
+	} else {
+		radIniCoeff = radBUN * 0.0101;
+	}
+		
+	// Transform max temperature
+	if (tmaxBUN < 10) {
+		tmaxIniCoeff = 1.6;
+	} else {
+		tmaxIniCoeff = tmaxBUN * 0.1084;
+	}
+	
+	// Calculate bunches per shoot using transformed values
+	bunchesPerShoot = carbonIniCoeff * (-0.7965 + radIniCoeff + tmaxIniCoeff);
+	bunchesPerShoot = bunchesPerShoot > 2.1 ? 2.1 : bunchesPerShoot < 1.0 ? 1.0 : bunchesPerShoot;
+	return bunchesPerShoot;
+}
+
+// Update yield factors during year before bud burst
+public static void updateYieldFactors(BudService bud)
+{
+	// Yield factors should not be altered for bud in vegetative phase
+	if (bud.budType == 1) {return;}
+	
+	// Get float representing stage in bud developement
+	float phenologyStageNumeric = getPhenologyStageNumeric(bud);
+	
+	// Add max daily temperature to bud's total once per day for bunch number calculations
+	if (hourOfDay == 0 && phenologyStageNumeric >= 3.5168 && phenologyStageNumeric < 4.7841) {
+		float[] dayTemps = getSortedDayTemps();
+		bud.accumulatedTmaxBUN += dayTemps[23];
+		bud.tmaxDaysBUN++;
+	}
+	
+	// Add max daily temperature to bud's total once per day for fruit number calcuations
+	if (hourOfDay == 0 && phenologyStageNumeric >= 3.7336 && phenologyStageNumeric < 5.4935) {
+		float[] dayTemps = getSortedDayTemps();
+		bud.accumulatedTmaxBEN += dayTemps[23];
+		bud.tmaxDaysBEN++;
+	}
+	
+	// Add hourly radiation to bud's total once per hour for bunch number calcuations
+	if (phenologyStageNumeric >= 3.7585 && phenologyStageNumeric < 3.9206) {
+		bud.accumulatedRadBUN += globalRadiation;
+		bud.radHoursBUN++;
+	}
+	
+	// Add carbon concentration to bud's total once per hour for bunch number calculations
+	if (phenologyStageNumeric >= 3.2 && phenologyStageNumeric < 5.2) {
+		bud.accumulatedCarbonBUN += getSugarConcentration(bud);
+		bud.carbonHoursBUN++;
+	}
+	
+	// Add carbon concentration to bud's total once per hour for fruit number calculations
+	if (phenologyStageNumeric >= 4 && phenologyStageNumeric < 5.83) {
+		bud.accumulatedCarbonBEN += getSugarConcentration(bud);
+		bud.carbonHoursBEN++;
+	}
+}
+
+/* ############################# APEX YIELD FUNCTIONS ################################*/
+
+// Return the predicted number of berries for the apex based on environmental conditions
+// Equation does not work yet - need to change coefficients for carbon concentration
+public static float getBerriesPerBunch(ApexService apex)
+{
+	float tmaxBEN_apex = apex.accumulatedTmaxBEN / apex.tmaxDaysBEN;		// Average daily maximum temperature after budburst
+	float tminBEN_apex = apex.accumulatedTminBEN / apex.tminDaysBEN;		// Average daily minimum temperature after budburst
+	float tmaxBEN_bud = apex.tmaxBEN_bud;									// Average daily maximum temperature before budburst
+	float carbonBEN_apex = apex.accumulatedCarbonBEN / apex.carbonHoursBEN;	// Average carbon concentration after budburst
+	float carbonBEN_bud = apex.carbonBEN_bud;								// Average carbon concentration before budburst
+	
+	// Intermediate values for calcuating berries per bunch
+	float tmaxFlowCoeff;
+	float tminFlowCoeff;
+	float tmaxIniCoeff;
+	float carbonFlowCoeff;
+	float carbonIniCoeff;
+	
+	float berriesPerBunch;
+
+	// Transform maximum temperatures after budburst
+	if (tmaxBEN_apex < 30) {
+		tmaxFlowCoeff = 3.4217 * tmaxBEN_apex;
+	} else {
+		tmaxFlowCoeff = 1.7349 * tmaxBEN_apex + 50.604;
+	}
+	
+	// Transform minimum temperatures after budburst
+	if (tminBEN_apex < 30) {
+		tminFlowCoeff = 2.4697 * tminBEN_apex;
+	} else {
+		tminFlowCoeff = 0.5909 * tminBEN_apex + 56.364;
+	}
+	
+	// Transform maximum temperature before budburst
+	if (tmaxBEN_bud < 30) {
+		tmaxIniCoeff = 1.3927 * tmaxBEN_bud;
+	} else {
+		tmaxIniCoeff = 0.6219 * tmaxBEN_bud + 23.124;
+	}
+	
+	// Transform carbon concentration after budburst
+	// Needs to be changed, does not match APSIM model
+	/*if (carbonBEN_apex < 0.5) {
+		carbonFlowCoeff = 0.8 * carbonBEN_apex;
+	} else if (carbonBEN_apex < 0.8) {
+		carbonFlowCoeff = 1.6667 * carbonBEN_apex - 0.433;
+	} else if (carbonBEN_apex < 1.5) {
+		carbonFlowCoeff = 0.1714 * carbonBEN_apex + 0.763;
+	} else {
+		carbonFlowCoeff = 1.02;
+	}*/
+	carbonFlowCoeff = 1.02;
+	
+	// Transform carbon concentration before budbust
+	// Needs to be changed, does not match APSIM model
+	/*if (carbonBEN_bud < 0.1 || carbonBEN_bud > 1) {
+		carbonIniCoeff = 1;
+	} else if (carbonBEN_bud < 0.5) {
+		carbonIniCoeff = 1.396 * carbonBEN_bud; 
+	} else if (carbonBEN_bud < 1) {
+		carbonIniCoeff = 0.604 * carbonBEN_bud + 0.396;
+	} else {
+		carbonIniCoeff = 1;
+	}*/
+	carbonIniCoeff = 1;
+	
+	// Calculate number of berries per bunch
+	berriesPerBunch = (-67.4 + tmaxFlowCoeff + tminFlowCoeff + tmaxIniCoeff) * carbonFlowCoeff * carbonIniCoeff;
+	berriesPerBunch = berriesPerBunch > 150 ? 150 : berriesPerBunch < 30 ? 30 : berriesPerBunch;
+	return berriesPerBunch;
+}
+
+// Update yield factors after bud burst
+public static void updateYieldFactors(ApexService apex)
+{	
+	// Get float representing stage in bud developement for fruit number calculations
+	float phenologyStageNumeric = getPhenologyStageNumeric(apex);
+	
+	// Add max daily temperature to apex's total once per day for fruit number calculations
+	if (hourOfDay == 0 && phenologyStageNumeric >= 3.7752 && phenologyStageNumeric < 4.0962) {
+		float[] dayTemps = getSortedDayTemps();
+		apex.accumulatedTmaxBEN += dayTemps[23];
+		apex.tmaxDaysBEN++;
+	}
+	
+	// Add min daily temperature to apex's total once per day for fruit number calculations
+	if (hourOfDay == 0 && phenologyStageNumeric >= 3.8036 && phenologyStageNumeric < 4.2517) {
+		float[] dayTemps = getSortedDayTemps();
+		apex.accumulatedTminBEN += dayTemps[0];
+		apex.tminDaysBEN++;
+	}
+	
+	// Add carbon concentrationn to apex's total once per hour for fruit number calculations
+	if (phenologyStageNumeric >= 3.08 && phenologyStageNumeric < 4.05) {
+		apex.accumulatedCarbonBEN += getSugarConcentration(apex);
+		apex.carbonHoursBEN++;
+	}
+	
+	// Add max daily temperature to apex's total once per day for fruit mass calculations
+	if (hourOfDay == 0 && phenologyStageNumeric >= 3.6763 && phenologyStageNumeric < 3.9052) {
+		float[] dayTemps = getSortedDayTemps();
+		apex.accumulatedTmaxBM += dayTemps[23];
+		apex.tmaxDaysBM++;
+	}
+	
+	// Add total rainfall to apex's total once per hour for fruit mass calculations
+	if (phenologyStageNumeric >= 3.5555 && phenologyStageNumeric < 5) {
+		apex.accumulatedRainfallBM += rainfall;
+	}
+	
+	// Add hourly radiation to apex's total once per hour for fruit mass calcuations
+	if (phenologyStageNumeric >= 3.046 && phenologyStageNumeric < 3.8455) {
+		apex.accumulatedRadBM += globalRadiation;
+		apex.radHoursBM++;
+	}
+	
+	// Add carbon concentration to apex's total once per hour for fruit mass calculations
+	if (phenologyStageNumeric >= 3.32 && phenologyStageNumeric < 4.06) {
+		apex.accumulatedCarbonBM += getSugarConcentration(apex);
+		apex.carbonHoursBM++;
+	}
+		
+}
+
+/* ############################# BERRY YIELD FUNCTIONS ################################*/
+
+// Return the predicted mass of each fruit in grams based on environmental conditions
+// Equation does not work yet - need to change coefficients for carbon concentration
+public static float getBerryMass(FruitService fruit)
+{	
+	// Intermediate values for calcuating berries per bunch
+	float tmaxFlowCoeff;
+	float radFlowCoeff;
+	float rainfallFlowCoeff;
+	float rainfallVerCoeff;
+	float carbonFlowCoeff;
+	
+	float rad = fruit.radBM_apex * 3600 * 24 * 0.000001 / 4.55;
+	
+	float berryMass;
+	
+	tmaxFlowCoeff = 0.0327134 * fruit.tmaxBM_apex;				// Transform average max temperature before fruit set
+	radFlowCoeff = 0.0212212 * fruit.radBM_apex  * 3600 * 24 * 0.000001 / 4.55; // Average radiation converted from umol/m2/s to mJ/m2;				// Transform average radiation before fruit set
+	rainfallFlowCoeff = -0.0010101 * fruit.rainfallBM_apex;		// Transform total rainfall before fruit set
+	rainfallVerCoeff = 0.0010051 * fruit.accumulatedRainfallBM;	// Transform total rainfall after fruit set
+	
+	// Transform carbon concentration before fruit set
+	// Needs to be changed, does not match APSIM model
+	/*if (fruit.carbonBM_apex < 0.5) {
+		carbonFlowCoeff = 1.04 * fruit.carbonBM_apex;
+	} else if (fruit.carbonBM_apex < 0.8) {
+		carbonFlowCoeff = 1.6 * fruit.carbonBM_apex - 0.28;
+	} else {
+		carbonFlowCoeff = 1;
+	}*/
+	carbonFlowCoeff = 1;
+	
+	// Calculate mass of single fruit
+	berryMass = (0.92369 + tmaxFlowCoeff + radFlowCoeff + rainfallFlowCoeff + rainfallVerCoeff) * carbonFlowCoeff;
+	berryMass = berryMass < 1 ? 1 : berryMass > 3 ? 3 : berryMass;
+	return berryMass;
+}
+
+// Update yield factors after fruit set
+public static void updateYieldFactors(FruitService fruit)
+{	
+	// Get float representing stage in bud developement for fruit number calculations
+	float phenologyStageNumeric = getPhenologyStageNumeric(fruit);
+	
+	// Add total rainfall to fruit's total once per hour for fruit mass calculations
+	if (phenologyStageNumeric >= 5.09 && phenologyStageNumeric < 5.5758) {
+		fruit.accumulatedRainfallBM += rainfall;
+	}
+		
+}
+
+/* ############################# HELPER FUNCTIONS ################################*/
+
+// Get float representing stage in grapevine's phenology developement
+private static float getPhenologyStageNumericFromThermalAge(double thermalAge)
+{	
+	// Floats representing each transition in phenology stage
+	float budBurstNumeric = 3.0;
+	float floweringNumeric = 4.0;
+	float fruitSetNumeric = 5.0;
+	
+	float phenologyStageNumeric;
+	
+	// Calculate float showing how far organ has progressed through phenology stages
+	if (thermalAge < FLOWERING_TARGET) 	{
+		phenologyStageNumeric = budBurstNumeric + thermalAge / FLOWERING_TARGET;
+	} else if (thermalAge < FRUIT_SET_TARGET) {
+		phenologyStageNumeric = floweringNumeric + (thermalAge - FLOWERING_TARGET) / FRUIT_SET_TARGET;
+	} else {
+		phenologyStageNumeric = fruitSetNumeric + (thermalAge - FLOWERING_TARGET - FRUIT_SET_TARGET) / VERAISON_TARGET;
+	}
+	
+	return phenologyStageNumeric;
+}
+
+// Returns float representing the current stage in the bud's phenology developement
+private static float getPhenologyStageNumeric(BudService bud)
+{
+	return getPhenologyStageNumericFromThermalAge(thermalTimeAfterBudBurst);
+}
+
+// Returns float representing the current stage in the apex's phenology developement
+private static float getPhenologyStageNumeric(ApexService apex)
+{
+	return getPhenologyStageNumericFromThermalAge(apex.age);
+}
+
+// Returns float representing the current stage in the fruit's phenology developement
+private static float getPhenologyStageNumeric(FruitService fruit)
+{
+	// Floats representing each transition in phenology stage
+	float fruitSetNumeric = 5.0;
+	float veraisonNumeric = 6.0;
+	
+	float phenologyStageNumeric;
+	
+	// Calculate float representation of phenology stage
+	if (fruit.age < VERAISON_TARGET) {
+		phenologyStageNumeric = fruitSetNumeric + fruit.age / VERAISON_TARGET;
+	} else {
+		phenologyStageNumeric = veraisonNumeric;
+	}
+	
+	return phenologyStageNumeric;
+		
+}
+
+// Return an ordered list of hourly temperatures for the current day
+private static float[] getSortedDayTemps() 
+{
+	float[] dayTemps = new float[24];
+		
+	for (int i = 0; i < 24; i++) {
+		ClimateData currentDay = (ClimateData) climateList.get(step+i);
+		dayTemps[i] = currentDay.temp;   //step start from zero or 20 constant
+	}
+	Arrays.sort(dayTemps);
+	return dayTemps;
+}
+
+// Return carbon concentration of plant base to which organ belongs
+private static float getSugarConcentration(Organ organ)
+{
+	float sugarConcentration = 0;
+	PlantBase pb = first((* p:PlantBase, (p[plantNumber] == organ[plantNumber]) *));
+	
+	if (useCTRAM == true) {
+		sugarConcentration = Math.sqrt(2.0 * pb.cpt)/calculateCarbonFraction();
+	} else {
+		sugarConcentration = pb.sugarConcentration_phloem;
+	}
+	
+	return sugarConcentration;
+}

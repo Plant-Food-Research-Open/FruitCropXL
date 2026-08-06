@@ -1,0 +1,1211 @@
+{
+  "type" : "object",
+  "id" : "urn:jsonschema:PlantLevelOutputData",
+  "properties" : {
+    "timestamp" : {
+      "type" : "string",
+      "description" : "Time-stamp in ISO 8601 format"
+    },
+    "year" : {
+      "type" : "integer",
+      "description" : "year",
+      "name" : "year",
+      "defaultValue" : 0.0,
+      "tags" : [ "Time identifier" ]
+    },
+    "dayOfYear" : {
+      "type" : "integer",
+      "description" : "Day of year ",
+      "name" : "dayOfYear",
+      "defaultValue" : 0.0,
+      "tags" : [ "Time identifier" ]
+    },
+    "hourOfDay" : {
+      "type" : "integer",
+      "description" : "Hour of day",
+      "name" : "hourOfDay",
+      "defaultValue" : 0.0,
+      "tags" : [ "Time identifier" ]
+    },
+    "scenario" : {
+      "type" : "integer",
+      "description" : "Internal scenario number for configure different simulations",
+      "name" : "scenario",
+      "defaultValue" : 0.0,
+      "tags" : [ "Time identifier" ]
+    },
+    "simuuid" : {
+      "type" : "string",
+      "description" : "The unique simulation UUID assigned to each simulation run."
+    },
+    "plantAge_days" : {
+      "type" : "number",
+      "description" : "Plant age in days",
+      "name" : "plantAge_days",
+      "defaultValue" : 0.0,
+      "tags" : [ "Time identifier" ]
+    },
+    "plantAge_Td" : {
+      "type" : "number",
+      "description" : "Plant age in thermal days",
+      "name" : "plantAge_Td",
+      "unit" : "thermal day",
+      "defaultValue" : 0.0,
+      "tags" : [ "Time identifier" ]
+    },
+    "degreeDay" : {
+      "type" : "number",
+      "description" : "Elapsed time in growing degree days",
+      "name" : "degreeDay",
+      "defaultValue" : 0.0,
+      "tags" : [ "Time identifier" ]
+    },
+    "Ta" : {
+      "type" : "number",
+      "description" : "Ambient air temperature around the plant, measured in degrees.",
+      "name" : "Ta",
+      "unit" : "degree",
+      "defaultValue" : 0.0,
+      "tags" : [ "Weather conditions" ]
+    },
+    "rh" : {
+      "type" : "number",
+      "description" : "Relative humidity surrounding the plant, expressed as a percentage.",
+      "name" : "rh",
+      "defaultValue" : 0.0,
+      "tags" : [ "Weather conditions" ]
+    },
+    "incomingRadiation" : {
+      "type" : "number",
+      "description" : "Rate of solar radiation received per unit area, measured in micromoles of photons per square meter per second.",
+      "name" : "incomingRadiation",
+      "unit" : "umol/m��/s",
+      "defaultValue" : 0.0,
+      "tags" : [ "Weather conditions" ]
+    },
+    "cca" : {
+      "type" : "number",
+      "description" : "Co2 concentration in air",
+      "name" : "cca",
+      "unit" : "ppm",
+      "defaultValue" : 0.0,
+      "tags" : [ "Weather conditions" ]
+    },
+    "wind" : {
+      "type" : "number",
+      "description" : "wind speed in air",
+      "name" : "wind",
+      "unit" : "m/s",
+      "defaultValue" : 0.0,
+      "tags" : [ "Weather conditions" ]
+    },
+    "rainfall" : {
+      "type" : "number",
+      "description" : "wind speed in air",
+      "name" : "rainfall",
+      "unit" : "mm",
+      "defaultValue" : 0.0,
+      "tags" : [ "Weather conditions" ]
+    },
+    "soilWaterContent" : {
+      "type" : "string",
+      "description" : "Water mass content in the soil, expressed as a mass ratio (kg of water per kg of dry soil)."
+    },
+    "soilWaterPotential" : {
+      "type" : "string",
+      "description" : "Water potential of different soil layers, influencing water availability to the plant."
+    },
+    "meanSoilWaterPotential" : {
+      "type" : "number",
+      "description" : "Mean energy state of water in the soil, which affects its movement and availability to the plant, measured in MPa.",
+      "name" : "meanSoilWaterPotential",
+      "unit" : "MPa",
+      "defaultValue" : 0.0,
+      "tags" : [ "Soil conditions" ]
+    },
+    "totalSoilAvailableWater" : {
+      "type" : "number",
+      "description" : "Total amount of water available in the soil for plant uptake, measured in kilograms.",
+      "name" : "totalSoilAvailableWater",
+      "unit" : "kg",
+      "defaultValue" : 0.0,
+      "tags" : [ "Soil conditions" ]
+    },
+    "soilNContent" : {
+      "type" : "number",
+      "description" : "The concentration of nitrogen in the soil, expressed in grams per cubic meter.",
+      "name" : "soilNContent",
+      "unit" : "g/m��",
+      "defaultValue" : 0.0,
+      "tags" : [ "Soil conditions" ]
+    },
+    "leafArea" : {
+      "type" : "number",
+      "description" : "Total surface area of leaves on the plant, measured in square meters.",
+      "name" : "leafArea",
+      "unit" : "m��",
+      "defaultValue" : 0.0,
+      "tags" : [ "Leaf area and fruit number" ]
+    },
+    "leafNumber" : {
+      "type" : "integer",
+      "description" : "Total number of leaves on the plant, representing the cumulative count of all leaves.",
+      "name" : "leafNumber",
+      "defaultValue" : 0.0,
+      "tags" : [ "Leaf area and fruit number" ]
+    },
+    "totalFruitNumber" : {
+      "type" : "integer",
+      "description" : "Total number of fruits present on the plant, representing the cumulative count of all fruits.",
+      "name" : "totalFruitNumber",
+      "defaultValue" : 0.0,
+      "tags" : [ "Leaf area and fruit number" ]
+    },
+    "AbsorbedTotRad" : {
+      "type" : "number",
+      "description" : "Total radiation absorbed by the plant, measured in micromoles per plant per second.",
+      "name" : "AbsorbedTotRad",
+      "unit" : "umol/plant/s",
+      "defaultValue" : 0.0,
+      "tags" : [ "Radiation absorption and distribution at 1/3, 2/3, and 3/3 of the canopy. The actual height of the calculation changes with canopy height" ]
+    },
+    "AbsorbedPAR" : {
+      "type" : "number",
+      "description" : "Photosynthetically active radiation (PAR) absorbed by the plant, measured in micromoles per plant per second.",
+      "name" : "AbsorbedPAR",
+      "unit" : "umol/plant/s",
+      "defaultValue" : 0.0,
+      "tags" : [ "Radiation absorption and distribution at 1/3, 2/3, and 3/3 of the canopy. The actual height of the calculation changes with canopy height" ]
+    },
+    "fabsTotRad" : {
+      "type" : "number",
+      "description" : "Fraction of absorbed radiation of global radiation per square meter.",
+      "name" : "fabsTotRad",
+      "defaultValue" : 0.0,
+      "tags" : [ "Radiation absorption and distribution at 1/3, 2/3, and 3/3 of the canopy. The actual height of the calculation changes with canopy height" ]
+    },
+    "fabsPAR" : {
+      "type" : "number",
+      "description" : "Fraction of absorbed PAR per square meter. This has been scaled by dens FPAR. it is slightly differently from fPARLow, mid and up, which are PAR penetrated to the canopy",
+      "name" : "fabsPAR",
+      "defaultValue" : 0.0,
+      "tags" : [ "Radiation absorption and distribution at 1/3, 2/3, and 3/3 of the canopy. The actual height of the calculation changes with canopy height" ]
+    },
+    "fPARLow" : {
+      "type" : "number",
+      "description" : "Relative PAR irradiance in the lower canopy layer: mean incident PAR on leaf surfaces within the lower stratum, normalized by above-canopy incident PAR. The lower stratum spans from trunk height to 1/3 of the canopy height.",
+      "name" : "fPARLow",
+      "defaultValue" : 0.0,
+      "tags" : [ "Radiation distribution: normalized mean leaf irradiance by canopy strata (lower/middle/upper); strata bounds scale with canopy height." ]
+    },
+    "fPARMid" : {
+      "type" : "number",
+      "description" : "Relative PAR irradiance in the middle canopy layer: mean incident PAR on leaf surfaces within the middle stratum, normalized by above-canopy incident PAR. The middle stratum spans from 1/3 to 2/3 of the canopy height.",
+      "name" : "fPARMid",
+      "defaultValue" : 0.0,
+      "tags" : [ "Radiation distribution: normalized mean leaf irradiance by canopy strata (lower/middle/upper); strata bounds scale with canopy height." ]
+    },
+    "fPARUp" : {
+      "type" : "number",
+      "description" : "Relative PAR irradiance in the upper canopy layer: mean incident PAR on leaf surfaces within the upper stratum, normalized by above-canopy incident PAR. The upper stratum spans from 2/3 of the canopy height to the top of the canopy.",
+      "name" : "fPARUp",
+      "defaultValue" : 0.0,
+      "tags" : [ "Radiation distribution: normalized mean leaf irradiance by canopy strata (lower/middle/upper); strata bounds scale with canopy height." ]
+    },
+    "meanPAnet" : {
+      "type" : "number",
+      "description" : "Average potential rate of photosynthesis across the plant, measured in micromoles of CO2 per square meter per second.",
+      "name" : "meanPAnet",
+      "unit" : "umolco2/m��/s��",
+      "defaultValue" : 0.0,
+      "tags" : [ "Photosynthesis and water flux" ]
+    },
+    "meanAnet" : {
+      "type" : "number",
+      "description" : "Average rate of actual net photosynthesis across the plant, measured in umol of CO2 per square meter per second.",
+      "name" : "meanAnet",
+      "unit" : "umolco2/m��/s",
+      "defaultValue" : 0.0,
+      "tags" : [ "Photosynthesis and water flux" ]
+    },
+    "carbonAssimilation" : {
+      "type" : "number",
+      "description" : "Rate at which carbon is assimilated by the plant, measured in milligrams per plant per hour. Note this is carbon per hour",
+      "name" : "carbonAssimilation",
+      "unit" : "mgC/plant/hour",
+      "defaultValue" : 0.0,
+      "tags" : [ "Photosynthesis and water flux" ]
+    },
+    "waterFlux_optimized" : {
+      "type" : "number",
+      "description" : "Rate of water transport within the plant, measured in milligrams per plant per second.",
+      "name" : "waterFlux_optimized",
+      "unit" : "mg/plant/s",
+      "defaultValue" : 0.0,
+      "tags" : [ "Photosynthesis and water flux" ]
+    },
+    "WUE" : {
+      "type" : "number",
+      "description" : "Water use efficiency of the plant, measured as mg of carbon assimilated per mg of water transpired.",
+      "name" : "WUE",
+      "unit" : "mgC/mgH2O",
+      "defaultValue" : 0.0,
+      "tags" : [ "Photosynthesis and water flux" ]
+    },
+    "waterFluxPotential" : {
+      "type" : "number",
+      "description" : "Potential rate of water flux through the plant, measured in milligrams per second.",
+      "name" : "waterFluxPotential",
+      "unit" : "mg/s",
+      "defaultValue" : 0.0,
+      "tags" : [ "Photosynthesis and water flux" ]
+    },
+    "xylemWaterPotential" : {
+      "type" : "number",
+      "description" : "Water potential within the xylem, indicating the energy state of water in the plant, measured in MPa.",
+      "name" : "xylemWaterPotential",
+      "unit" : "MPa",
+      "defaultValue" : 0.0,
+      "tags" : [ "Photosynthesis and water flux" ]
+    },
+    "leaf_waterPotential" : {
+      "type" : "number",
+      "description" : "leaf water potential for middle layers",
+      "name" : "leaf_waterPotential",
+      "unit" : "Mpa",
+      "defaultValue" : 0.0,
+      "tags" : [ "Photosynthesis and water flux" ]
+    },
+    "potentialSupplyDemandRatio" : {
+      "type" : "number",
+      "description" : "the ratio of potential supply of biomass vs potential demand from all growing organs of the plant.",
+      "name" : "potentialSupplyDemandRatio",
+      "unit" : "mgC/mgH2O",
+      "defaultValue" : 0.0,
+      "tags" : [ "Carbon transport" ]
+    },
+    "phloemSugarConcentration" : {
+      "type" : "number",
+      "description" : "Concentration of sugar in the phloem, measured in mg of sugar per mg of solution.",
+      "name" : "phloemSugarConcentration",
+      "unit" : "mgSugar/mgSolution",
+      "defaultValue" : 0.0,
+      "tags" : [ "Carbon transport" ]
+    },
+    "biomassPlant" : {
+      "type" : "number",
+      "description" : "Total biomass of the plant including all organs and reserves, measured in mg.",
+      "name" : "biomassPlant",
+      "unit" : "mg/plant",
+      "defaultValue" : 0.0,
+      "tags" : [ "Biomass of different components" ]
+    },
+    "biomassLeaf" : {
+      "type" : "number",
+      "description" : "Total biomass of leaves on the plant, measured in mg.",
+      "name" : "biomassLeaf",
+      "unit" : "mg/plant",
+      "defaultValue" : 0.0,
+      "tags" : [ "Biomass of different components" ]
+    },
+    "biomassInternode" : {
+      "type" : "number",
+      "description" : "Total biomass of internodes of the plant, measured in mg. This includes trunk and cordon as they extend the internode class.",
+      "name" : "biomassInternode",
+      "unit" : "mg/plant",
+      "defaultValue" : 0.0,
+      "tags" : [ "Biomass of different components" ]
+    },
+    "biomassFlower" : {
+      "type" : "number",
+      "description" : "Total biomass of all flower on the plant, measured in mg.",
+      "name" : "biomassFlower",
+      "unit" : "mg/plant",
+      "defaultValue" : 0.0,
+      "tags" : [ "Biomass of different components" ]
+    },
+    "biomassFruit" : {
+      "type" : "number",
+      "description" : "Total biomass of all fruits on the plant, measured in mg.",
+      "name" : "biomassFruit",
+      "unit" : "mg/plant",
+      "defaultValue" : 0.0,
+      "tags" : [ "Biomass of different components" ]
+    },
+    "biomassFineRoot" : {
+      "type" : "number",
+      "description" : "Total biomass of fine roots within the plant system, measured in mg.",
+      "name" : "biomassFineRoot",
+      "unit" : "mg/plant",
+      "defaultValue" : 0.0,
+      "tags" : [ "Biomass of different components" ]
+    },
+    "biomassStructuralRoot" : {
+      "type" : "number",
+      "description" : "Total biomass of structural roots of the plant, measured in mg.",
+      "name" : "biomassStructuralRoot",
+      "unit" : "mg/plant",
+      "defaultValue" : 0.0,
+      "tags" : [ "Biomass of different components" ]
+    },
+    "biomassCordon" : {
+      "type" : "number",
+      "description" : "Total biomass of cordon of the plant, measured in mg. Internode that larger than one year old.",
+      "name" : "biomassCordon",
+      "unit" : "mg/plant",
+      "defaultValue" : 0.0,
+      "tags" : [ "Biomass of different components" ]
+    },
+    "biomassTrunk" : {
+      "type" : "number",
+      "description" : "Total biomass of trunk of the plant, measured in mg. the main axis of the stem",
+      "name" : "biomassTrunk",
+      "unit" : "mg/plant",
+      "defaultValue" : 0.0,
+      "tags" : [ "Biomass of different components" ]
+    },
+    "leafNSC" : {
+      "type" : "number",
+      "description" : "Amount of non-structural carbohydrates stored in leaves (NSC in all leaves), measured in mg per plant.",
+      "name" : "leafNSC",
+      "unit" : "mg/plant",
+      "defaultValue" : 0.0,
+      "tags" : [ "Nonstructural carbon concentrations in different parts" ]
+    },
+    "fineRootNSC" : {
+      "type" : "number",
+      "description" : "Amount of non-structural carbohydrates stored in fine roots (NSC in all fine roots), measured in mg per plant.",
+      "name" : "fineRootNSC",
+      "unit" : "mg/plant",
+      "defaultValue" : 0.0,
+      "tags" : [ "Nonstructural carbon concentrations in different parts" ]
+    },
+    "structuralRootNSC" : {
+      "type" : "number",
+      "description" : "Amount of non-structural carbohydrates stored in structural roots (NSC in all structural roots), measured in mg per plant.",
+      "name" : "structuralRootNSC",
+      "unit" : "mg/plant",
+      "defaultValue" : 0.0,
+      "tags" : [ "Nonstructural carbon concentrations in different parts" ]
+    },
+    "internodeNSC" : {
+      "type" : "number",
+      "description" : "Amount of non-structural carbohydrates stored in internodes (NSC in all internodes), measured in mg per plant.",
+      "name" : "internodeNSC",
+      "unit" : "mg/plant",
+      "defaultValue" : 0.0,
+      "tags" : [ "Nonstructural carbon concentrations in different parts" ]
+    },
+    "cordonNSC" : {
+      "type" : "number",
+      "description" : "Amount of non-structural carbohydrates stored in cordons (NSC in all cordons), measured in mg per plant.",
+      "name" : "cordonNSC",
+      "unit" : "mg/plant",
+      "defaultValue" : 0.0,
+      "tags" : [ "Nonstructural carbon concentrations in different parts" ]
+    },
+    "trunkNSC" : {
+      "type" : "number",
+      "description" : "Amount of non-structural carbohydrates stored in trunk (NSC in all trunk tissues), measured in mg per plant.",
+      "name" : "trunkNSC",
+      "unit" : "mg/plant",
+      "defaultValue" : 0.0,
+      "tags" : [ "Nonstructural carbon concentrations in different parts" ]
+    },
+    "totalUnloading" : {
+      "type" : "number",
+      "description" : "Total carbon unloaded from the phloem into all sink organs (sum of all unloading), in mgC per plant.",
+      "name" : "totalUnloading",
+      "unit" : "mgC/plant",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fraction of unloadings" ]
+    },
+    "fraction_leafUnloading" : {
+      "type" : "number",
+      "description" : "Proportion of total carbon unloaded into the leaves (fraction of total unloading to leaves).",
+      "name" : "fraction_leafUnloading",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fraction of unloadings" ]
+    },
+    "fraction_fruitUnloading" : {
+      "type" : "number",
+      "description" : "Proportion of total carbon unloaded into the fruits (fraction of total unloading to fruits).",
+      "name" : "fraction_fruitUnloading",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fraction of unloadings" ]
+    },
+    "fraction_fineRootUnloading" : {
+      "type" : "number",
+      "description" : "Proportion of total carbon unloaded into fine roots (fraction of total unloading to fine roots).",
+      "name" : "fraction_fineRootUnloading",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fraction of unloadings" ]
+    },
+    "fraction_structuralRootUnloading" : {
+      "type" : "number",
+      "description" : "Proportion of total carbon unloaded into structural roots (fraction of total unloading to structural roots).",
+      "name" : "fraction_structuralRootUnloading",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fraction of unloadings" ]
+    },
+    "fraction_internodeUnloading" : {
+      "type" : "number",
+      "description" : "Proportion of total carbon unloaded into the stems, including all internodes, cordon, and trunk.",
+      "name" : "fraction_internodeUnloading",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fraction of unloadings" ]
+    },
+    "fraction_perennielWoodUnloading" : {
+      "type" : "number",
+      "description" : "Proportion of total carbon unloaded into perennial woods, including trunk and cordon.",
+      "name" : "fraction_perennielWoodUnloading",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fraction of unloadings" ]
+    },
+    "fraction_flowerUnloading" : {
+      "type" : "number",
+      "description" : "Proportion of total carbon unloaded into flowers.",
+      "name" : "fraction_flowerUnloading",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fraction of unloadings" ]
+    },
+    "fraction_petioleUnloading" : {
+      "type" : "number",
+      "description" : "Proportion of total carbon unloaded into petioles.",
+      "name" : "fraction_petioleUnloading",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fraction of unloadings" ]
+    },
+    "fraction_leafLoading" : {
+      "type" : "number",
+      "description" : "Proportion of total carbon loaded from the leaves.",
+      "name" : "fraction_leafLoading",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fraction of loadings" ]
+    },
+    "fraction_internodeLoading" : {
+      "type" : "number",
+      "description" : "Proportion of total carbon loaded from the stems, including all internodes, cordon, and trunk.",
+      "name" : "fraction_internodeLoading",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fraction of loadings" ]
+    },
+    "fraction_perennielWoodLoading" : {
+      "type" : "number",
+      "description" : "Proportion of total carbon loaded from the perennial stems.",
+      "name" : "fraction_perennielWoodLoading",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fraction of loadings" ]
+    },
+    "fraction_fineRootLoading" : {
+      "type" : "number",
+      "description" : "Proportion of total carbon loaded from fine roots.",
+      "name" : "fraction_fineRootLoading",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fraction of loadings" ]
+    },
+    "fraction_structuralRootLoading" : {
+      "type" : "number",
+      "description" : "Proportion of total carbon loaded from structural roots.",
+      "name" : "fraction_structuralRootLoading",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fraction of loadings" ]
+    },
+    "totalLeakage" : {
+      "type" : "number",
+      "description" : "Total carbon leakage during transport.",
+      "name" : "totalLeakage",
+      "unit" : "mgC/plant",
+      "defaultValue" : 0.0,
+      "tags" : [ "Carbon leakage during transport" ]
+    },
+    "internodeLeakage" : {
+      "type" : "number",
+      "description" : "Amount of carbon leaked into stems, measured in mgC.",
+      "name" : "internodeLeakage",
+      "unit" : "mgC",
+      "defaultValue" : 0.0,
+      "tags" : [ "Carbon leakage during transport" ]
+    },
+    "structuralRootLeakage" : {
+      "type" : "number",
+      "description" : "Amount of carbon leaked into structural roots, measured in mgC.",
+      "name" : "structuralRootLeakage",
+      "unit" : "mgC",
+      "defaultValue" : 0.0,
+      "tags" : [ "Carbon leakage during transport" ]
+    },
+    "maintenanceDM" : {
+      "type" : "number",
+      "description" : "Cost of maintaining dry matter, typically energy or substrates used, measured in mg/hour.",
+      "name" : "maintenanceDM",
+      "unit" : "mg/plant/h",
+      "defaultValue" : 0.0,
+      "tags" : [ "Maintenance cost" ]
+    },
+    "maintenanceLeaf" : {
+      "type" : "number",
+      "description" : "Cost associated with maintaining leaves, typically energy or substrates used, measured in mg/hour.",
+      "name" : "maintenanceLeaf",
+      "unit" : "mgC",
+      "defaultValue" : 0.0,
+      "tags" : [ "Maintenance cost" ]
+    },
+    "maintenanceInternode" : {
+      "type" : "number",
+      "description" : "Cost associated with maintaining internodes, measured in mg/hour.",
+      "name" : "maintenanceInternode",
+      "unit" : "mgC",
+      "defaultValue" : 0.0,
+      "tags" : [ "Maintenance cost" ]
+    },
+    "maintenanceFruit" : {
+      "type" : "number",
+      "description" : "Total cost associated with maintaining all fruits, measured in mg/hour.",
+      "name" : "maintenanceFruit",
+      "unit" : "mgC",
+      "defaultValue" : 0.0,
+      "tags" : [ "Maintenance cost" ]
+    },
+    "maintenanceFineRoot" : {
+      "type" : "number",
+      "description" : "Cost associated with maintaining fine roots, measured in mg/hour.",
+      "name" : "maintenanceFineRoot",
+      "unit" : "mgC",
+      "defaultValue" : 0.0,
+      "tags" : [ "Maintenance cost" ]
+    },
+    "maintenanceStructuralRoot" : {
+      "type" : "number",
+      "description" : "Carbon cost associated with maintaining structural roots, measured in mg/hour.",
+      "name" : "maintenanceStructuralRoot",
+      "unit" : "mgC",
+      "defaultValue" : 0.0,
+      "tags" : [ "Maintenance cost" ]
+    },
+    "growthCost" : {
+      "type" : "number",
+      "description" : "Energy or substrate cost associated with growth processes, measured in mg/hour.",
+      "name" : "growthCost",
+      "unit" : "mg/plant",
+      "defaultValue" : 0.0,
+      "tags" : [ "Growth cost" ]
+    },
+    "growthCostLeaf" : {
+      "type" : "number",
+      "description" : "Cost associated with growth of leaves, typically energy or substrates used, measured in mg/hour.",
+      "name" : "growthCostLeaf",
+      "unit" : "mgC",
+      "defaultValue" : 0.0,
+      "tags" : [ "Growth cost" ]
+    },
+    "growthCostInternode" : {
+      "type" : "number",
+      "description" : "Cost associated with growth of internodes, measured in mg/hour.",
+      "name" : "growthCostInternode",
+      "unit" : "mgC",
+      "defaultValue" : 0.0,
+      "tags" : [ "Growth cost" ]
+    },
+    "growthCostFruit" : {
+      "type" : "number",
+      "description" : "Total cost associated with the growth of all fruits, measured in mg/hour.",
+      "name" : "growthCostFruit",
+      "unit" : "mgC",
+      "defaultValue" : 0.0,
+      "tags" : [ "Growth cost" ]
+    },
+    "growthCostFineRoot" : {
+      "type" : "number",
+      "description" : "Cost associated with growth of fine roots, measured in mg/hour.",
+      "name" : "growthCostFineRoot",
+      "unit" : "mgC",
+      "defaultValue" : 0.0,
+      "tags" : [ "Growth cost" ]
+    },
+    "growthCostStructuralRoot" : {
+      "type" : "number",
+      "description" : "Carbon cost associated with growth of structural roots, measured in mg/hour.",
+      "name" : "growthCostStructuralRoot",
+      "unit" : "mgC",
+      "defaultValue" : 0.0,
+      "tags" : [ "Growth cost" ]
+    },
+    "previousDailyNetCarbonBalance" : {
+      "type" : "number",
+      "description" : "Previous complete day's net carbon balance: assimilation plus flower self-assimilation minus growth and maintenance costs.",
+      "name" : "previousDailyNetCarbonBalance",
+      "unit" : "mgC/plant/day",
+      "defaultValue" : 0.0,
+      "tags" : [ "Carbon balance and perennial-structure carbon costs" ]
+    },
+    "cordonStructureDM_SEC" : {
+      "type" : "number",
+      "description" : "Absolute secondary structural growth demand for cordons.",
+      "name" : "cordonStructureDM_SEC",
+      "unit" : "mg C h-1",
+      "defaultValue" : 0.0,
+      "tags" : [ "Carbon balance and perennial-structure carbon costs" ]
+    },
+    "trunkStructureDM_SEC" : {
+      "type" : "number",
+      "description" : "Absolute secondary structural growth demand for trunks.",
+      "name" : "trunkStructureDM_SEC",
+      "unit" : "mg C h-1",
+      "defaultValue" : 0.0,
+      "tags" : [ "Carbon balance and perennial-structure carbon costs" ]
+    },
+    "perennielWoodStructureDM_SEC" : {
+      "type" : "number",
+      "description" : "Absolute secondary structural growth demand for cordon plus trunk.",
+      "name" : "perennielWoodStructureDM_SEC",
+      "unit" : "mg C h-1",
+      "defaultValue" : 0.0,
+      "tags" : [ "Carbon balance and perennial-structure carbon costs" ]
+    },
+    "structuralRootStructureDM_SEC" : {
+      "type" : "number",
+      "description" : "Absolute secondary structural growth demand for structural roots.",
+      "name" : "structuralRootStructureDM_SEC",
+      "unit" : "mg C h-1",
+      "defaultValue" : 0.0,
+      "tags" : [ "Carbon balance and perennial-structure carbon costs" ]
+    },
+    "cordonMaintenanceDM" : {
+      "type" : "number",
+      "description" : "Absolute maintenance demand for cordons.",
+      "name" : "cordonMaintenanceDM",
+      "unit" : "mg C h-1",
+      "defaultValue" : 0.0,
+      "tags" : [ "Carbon balance and perennial-structure carbon costs" ]
+    },
+    "trunkMaintenanceDM" : {
+      "type" : "number",
+      "description" : "Absolute maintenance demand for trunks.",
+      "name" : "trunkMaintenanceDM",
+      "unit" : "mg C h-1",
+      "defaultValue" : 0.0,
+      "tags" : [ "Carbon balance and perennial-structure carbon costs" ]
+    },
+    "perennielWoodMaintenanceDM" : {
+      "type" : "number",
+      "description" : "Absolute maintenance demand for cordon plus trunk.",
+      "name" : "perennielWoodMaintenanceDM",
+      "unit" : "mg C h-1",
+      "defaultValue" : 0.0,
+      "tags" : [ "Carbon balance and perennial-structure carbon costs" ]
+    },
+    "structuralRootMaintenanceDM" : {
+      "type" : "number",
+      "description" : "Absolute maintenance demand for structural roots.",
+      "name" : "structuralRootMaintenanceDM",
+      "unit" : "mg C h-1",
+      "defaultValue" : 0.0,
+      "tags" : [ "Carbon balance and perennial-structure carbon costs" ]
+    },
+    "cordonReserveDM" : {
+      "type" : "number",
+      "description" : "Absolute reserve synthesis demand for cordons.",
+      "name" : "cordonReserveDM",
+      "unit" : "mg C h-1",
+      "defaultValue" : 0.0,
+      "tags" : [ "Carbon balance and perennial-structure carbon costs" ]
+    },
+    "trunkReserveDM" : {
+      "type" : "number",
+      "description" : "Absolute reserve synthesis demand for trunks.",
+      "name" : "trunkReserveDM",
+      "unit" : "mg C h-1",
+      "defaultValue" : 0.0,
+      "tags" : [ "Carbon balance and perennial-structure carbon costs" ]
+    },
+    "perennielWoodReserveDM" : {
+      "type" : "number",
+      "description" : "Absolute reserve synthesis demand for cordon plus trunk.",
+      "name" : "perennielWoodReserveDM",
+      "unit" : "mg C h-1",
+      "defaultValue" : 0.0,
+      "tags" : [ "Carbon balance and perennial-structure carbon costs" ]
+    },
+    "structuralRootReserveDM" : {
+      "type" : "number",
+      "description" : "Absolute reserve synthesis demand for structural roots.",
+      "name" : "structuralRootReserveDM",
+      "unit" : "mg C h-1",
+      "defaultValue" : 0.0,
+      "tags" : [ "Carbon balance and perennial-structure carbon costs" ]
+    },
+    "sumRootConductance" : {
+      "type" : "number",
+      "description" : "Rate at which roots conduct water under a unit pressure gradient, measured in mg per MPa per second.",
+      "name" : "sumRootConductance",
+      "unit" : "mg/MPa/s",
+      "defaultValue" : 0.0,
+      "tags" : [ "Root base information" ]
+    },
+    "sumNuptakeCostRoot" : {
+      "type" : "number",
+      "description" : "Cost associated with nitrogen uptake by the roots, measured in mg/hour.",
+      "name" : "sumNuptakeCostRoot",
+      "unit" : "mgC",
+      "defaultValue" : 0.0,
+      "tags" : [ "Root base information" ]
+    },
+    "totalNitrogen" : {
+      "type" : "number",
+      "description" : "Total amount of nitrogen present in the entire plant including mobile and nonmobile, measured in milligrams.",
+      "name" : "totalNitrogen",
+      "unit" : "mg/plant",
+      "defaultValue" : 0.0,
+      "tags" : [ "Nitrogen information" ]
+    },
+    "plantNitrogenCommonPool" : {
+      "type" : "number",
+      "description" : "Total amount of nitrogen available across the plant, measured in milligrams.",
+      "name" : "plantNitrogenCommonPool",
+      "unit" : "mg",
+      "defaultValue" : 0.0,
+      "tags" : [ "Nitrogen information" ]
+    },
+    "plantNitrogenContent" : {
+      "type" : "number",
+      "description" : "Nitrogen content relative to plant mass, measured in mg per mg.",
+      "name" : "plantNitrogenContent",
+      "unit" : "mg/mg",
+      "defaultValue" : 0.0,
+      "tags" : [ "Nitrogen information" ]
+    },
+    "meanLeafNcontent" : {
+      "type" : "number",
+      "description" : "Average nitrogen content across all leaves, measured as a ratio of nitrogen to leaf mass.",
+      "name" : "meanLeafNcontent",
+      "unit" : "mg/mg",
+      "defaultValue" : 0.0,
+      "tags" : [ "Nitrogen information" ]
+    },
+    "NDegradation" : {
+      "type" : "number",
+      "description" : "Amount of nitrogen degraded in the growing organ, measured in milligrams.",
+      "name" : "NDegradation",
+      "unit" : "mg",
+      "defaultValue" : 0.0,
+      "tags" : [ "Nitrogen information" ]
+    },
+    "NSynthesis" : {
+      "type" : "number",
+      "description" : "Amount of nitrogen synthesized in all growing organs, measured in milligrams.",
+      "name" : "NSynthesis",
+      "unit" : "mg",
+      "defaultValue" : 0.0,
+      "tags" : [ "Nitrogen information" ]
+    },
+    "Nuptake" : {
+      "type" : "number",
+      "description" : "Amount of nitrogen taken up by the fine roots, measured in milligrams.",
+      "name" : "Nuptake",
+      "unit" : "mg",
+      "defaultValue" : 0.0,
+      "tags" : [ "Nitrogen information" ]
+    },
+    "fPAR_1" : {
+      "type" : "number",
+      "description" : "Relative PAR irradiance for canopy zone 1: mean incident PAR on leaf surfaces within the first user-defined height band, normalized by above-canopy incident PAR. Zone bounds are defined by output_height[0]���output_height[1].",
+      "name" : "fPAR_1",
+      "defaultValue" : 0.0,
+      "tags" : [ "Radiation distribution: normalized mean leaf irradiance in user-defined height bands (output_height)." ]
+    },
+    "fPAR_2" : {
+      "type" : "number",
+      "description" : "Relative PAR irradiance for canopy zone 2: mean incident PAR on leaf surfaces within the second user-defined height band, normalized by above-canopy incident PAR. Zone bounds are defined by output_height[1]���output_height[2].",
+      "name" : "fPAR_2",
+      "defaultValue" : 0.0,
+      "tags" : [ "Radiation distribution: normalized mean leaf irradiance in user-defined height bands (output_height)." ]
+    },
+    "fPAR_3" : {
+      "type" : "number",
+      "description" : "Relative PAR irradiance for canopy zone 3: mean incident PAR on leaf surfaces within the third user-defined height band, normalized by above-canopy incident PAR. Zone bounds are defined by output_height[2]���output_height[3].",
+      "name" : "fPAR_3",
+      "defaultValue" : 0.0,
+      "tags" : [ "Radiation distribution: normalized mean leaf irradiance in user-defined height bands (output_height)." ]
+    },
+    "fPAR_4" : {
+      "type" : "number",
+      "description" : "Relative PAR irradiance for canopy zone 4: mean incident PAR on leaf surfaces within the fourth user-defined height band, normalized by above-canopy incident PAR. Zone bounds are defined by output_height[3]���output_height[4] (or to canopy top for the last band).",
+      "name" : "fPAR_4",
+      "defaultValue" : 0.0,
+      "tags" : [ "Radiation distribution: normalized mean leaf irradiance in user-defined height bands (output_height)." ]
+    },
+    "fs_1" : {
+      "type" : "number",
+      "description" : "Fraction of PAR in zone 1 by light sensors if used",
+      "name" : "fs_1",
+      "defaultValue" : 0.0,
+      "tags" : [ "Customizable output based on height input" ]
+    },
+    "fs_2" : {
+      "type" : "number",
+      "description" : "Fraction of PAR in zone 2 by light sensors if used",
+      "name" : "fs_2",
+      "defaultValue" : 0.0,
+      "tags" : [ "Customizable output based on height input" ]
+    },
+    "fs_3" : {
+      "type" : "number",
+      "description" : "Fraction of PAR in zone 3 by light sensors if used",
+      "name" : "fs_3",
+      "defaultValue" : 0.0,
+      "tags" : [ "Customizable output based on height input" ]
+    },
+    "fs_4" : {
+      "type" : "number",
+      "description" : "Fraction of PAR in zone 4 by light sensors if used",
+      "name" : "fs_4",
+      "defaultValue" : 0.0,
+      "tags" : [ "Customizable output based on height input" ]
+    },
+    "cumLAI_1" : {
+      "type" : "number",
+      "description" : "Cumulative leaf area index above a specific threshold, representing leaf density or coverage in zone 1.",
+      "name" : "cumLAI_1",
+      "defaultValue" : 0.0,
+      "tags" : [ "Customizable output based on height input" ]
+    },
+    "cumLAI_2" : {
+      "type" : "number",
+      "description" : "Cumulative leaf area index above a specific threshold, representing leaf density or coverage in zone 2.",
+      "name" : "cumLAI_2",
+      "defaultValue" : 0.0,
+      "tags" : [ "Customizable output based on height input" ]
+    },
+    "cumLAI_3" : {
+      "type" : "number",
+      "description" : "Cumulative leaf area index above a specific threshold, representing leaf density or coverage in zone 3.",
+      "name" : "cumLAI_3",
+      "defaultValue" : 0.0,
+      "tags" : [ "Customizable output based on height input" ]
+    },
+    "cumLAI_4" : {
+      "type" : "number",
+      "description" : "Cumulative leaf area index above a specific threshold, representing leaf density or coverage in zone 4.",
+      "name" : "cumLAI_4",
+      "defaultValue" : 0.0,
+      "tags" : [ "Customizable output based on height input" ]
+    },
+    "intWaterPotential_1" : {
+      "type" : "number",
+      "description" : "Internode Water Potential in zone 1",
+      "name" : "intWaterPotential_1",
+      "defaultValue" : 0.0,
+      "tags" : [ "Customizable output based on height input" ]
+    },
+    "intWaterPotential_2" : {
+      "type" : "number",
+      "description" : "Internode Water Potential in zone 2",
+      "name" : "intWaterPotential_2",
+      "defaultValue" : 0.0,
+      "tags" : [ "Customizable output based on height input" ]
+    },
+    "intWaterPotential_3" : {
+      "type" : "number",
+      "description" : "Internode Water Potential in zone 3",
+      "name" : "intWaterPotential_3",
+      "defaultValue" : 0.0,
+      "tags" : [ "Customizable output based on height input" ]
+    },
+    "intWaterPotential_4" : {
+      "type" : "number",
+      "description" : "Internode Water Potential in zone 4",
+      "name" : "intWaterPotential_4",
+      "defaultValue" : 0.0,
+      "tags" : [ "Customizable output based on height input" ]
+    },
+    "meanAnet_1" : {
+      "type" : "number",
+      "description" : "Arithmetic mean of finite Leaf.AlimActual values for leaves with z in [output_height[0], output_height[1]).",
+      "name" : "meanAnet_1",
+      "unit" : "umol CO2/m2/s",
+      "defaultValue" : 0.0,
+      "tags" : [ "Canopy-zone physiology" ]
+    },
+    "meanAnet_2" : {
+      "type" : "number",
+      "description" : "Arithmetic mean of finite Leaf.AlimActual values for leaves with z in [output_height[1], output_height[2]).",
+      "name" : "meanAnet_2",
+      "unit" : "umol CO2/m2/s",
+      "defaultValue" : 0.0,
+      "tags" : [ "Canopy-zone physiology" ]
+    },
+    "meanAnet_3" : {
+      "type" : "number",
+      "description" : "Arithmetic mean of finite Leaf.AlimActual values for leaves with z in [output_height[2], output_height[3]).",
+      "name" : "meanAnet_3",
+      "unit" : "umol CO2/m2/s",
+      "defaultValue" : 0.0,
+      "tags" : [ "Canopy-zone physiology" ]
+    },
+    "meanAnet_4" : {
+      "type" : "number",
+      "description" : "Arithmetic mean of finite Leaf.AlimActual values for leaves with z >= output_height[3]; this final band is unbounded above.",
+      "name" : "meanAnet_4",
+      "unit" : "umol CO2/m2/s",
+      "defaultValue" : 0.0,
+      "tags" : [ "Canopy-zone physiology" ]
+    },
+    "meanLeafWaterPotential_1" : {
+      "type" : "number",
+      "description" : "Arithmetic mean of finite Leaf.waterPotential values for leaves with z in [output_height[0], output_height[1]).",
+      "name" : "meanLeafWaterPotential_1",
+      "unit" : "MPa",
+      "defaultValue" : 0.0,
+      "tags" : [ "Canopy-zone physiology" ]
+    },
+    "meanLeafWaterPotential_2" : {
+      "type" : "number",
+      "description" : "Arithmetic mean of finite Leaf.waterPotential values for leaves with z in [output_height[1], output_height[2]).",
+      "name" : "meanLeafWaterPotential_2",
+      "unit" : "MPa",
+      "defaultValue" : 0.0,
+      "tags" : [ "Canopy-zone physiology" ]
+    },
+    "meanLeafWaterPotential_3" : {
+      "type" : "number",
+      "description" : "Arithmetic mean of finite Leaf.waterPotential values for leaves with z in [output_height[2], output_height[3]).",
+      "name" : "meanLeafWaterPotential_3",
+      "unit" : "MPa",
+      "defaultValue" : 0.0,
+      "tags" : [ "Canopy-zone physiology" ]
+    },
+    "meanLeafWaterPotential_4" : {
+      "type" : "number",
+      "description" : "Arithmetic mean of finite Leaf.waterPotential values for leaves with z >= output_height[3]; this final band is unbounded above.",
+      "name" : "meanLeafWaterPotential_4",
+      "unit" : "MPa",
+      "defaultValue" : 0.0,
+      "tags" : [ "Canopy-zone physiology" ]
+    },
+    "meanGs_1" : {
+      "type" : "number",
+      "description" : "Arithmetic mean of finite Leaf.gs values for leaves with z in [output_height[0], output_height[1]).",
+      "name" : "meanGs_1",
+      "unit" : "mol/m2/s",
+      "defaultValue" : 0.0,
+      "tags" : [ "Canopy-zone physiology" ]
+    },
+    "meanGs_2" : {
+      "type" : "number",
+      "description" : "Arithmetic mean of finite Leaf.gs values for leaves with z in [output_height[1], output_height[2]).",
+      "name" : "meanGs_2",
+      "unit" : "mol/m2/s",
+      "defaultValue" : 0.0,
+      "tags" : [ "Canopy-zone physiology" ]
+    },
+    "meanGs_3" : {
+      "type" : "number",
+      "description" : "Arithmetic mean of finite Leaf.gs values for leaves with z in [output_height[2], output_height[3]).",
+      "name" : "meanGs_3",
+      "unit" : "mol/m2/s",
+      "defaultValue" : 0.0,
+      "tags" : [ "Canopy-zone physiology" ]
+    },
+    "meanGs_4" : {
+      "type" : "number",
+      "description" : "Arithmetic mean of finite Leaf.gs values for leaves with z >= output_height[3]; this final band is unbounded above.",
+      "name" : "meanGs_4",
+      "unit" : "mol/m2/s",
+      "defaultValue" : 0.0,
+      "tags" : [ "Canopy-zone physiology" ]
+    },
+    "sugarConcentration_1" : {
+      "type" : "number",
+      "description" : "Phloem sugar concentration in zone 1",
+      "name" : "sugarConcentration_1",
+      "defaultValue" : 0.0,
+      "tags" : [ "Customizable output based on height input" ]
+    },
+    "sugarConcentration_2" : {
+      "type" : "number",
+      "description" : "Phloem sugar concentration in zone 2",
+      "name" : "sugarConcentration_2",
+      "defaultValue" : 0.0,
+      "tags" : [ "Customizable output based on height input" ]
+    },
+    "sugarConcentration_3" : {
+      "type" : "number",
+      "description" : "Phloem sugar concentration in zone 3",
+      "name" : "sugarConcentration_3",
+      "defaultValue" : 0.0,
+      "tags" : [ "Customizable output based on height input" ]
+    },
+    "sugarConcentration_4" : {
+      "type" : "number",
+      "description" : "Phloem sugar concentration in zone 4",
+      "name" : "sugarConcentration_4",
+      "defaultValue" : 0.0,
+      "tags" : [ "Customizable output based on height input" ]
+    },
+    "pruneFlowersRemoved" : {
+      "type" : "number",
+      "description" : "Number of flowers removed",
+      "name" : "pruneFlowersRemoved",
+      "defaultValue" : 0.0,
+      "tags" : [ "Pruning outputs" ]
+    },
+    "pruneFruitsRemoved" : {
+      "type" : "number",
+      "description" : "Number of fruit removed",
+      "name" : "pruneFruitsRemoved",
+      "defaultValue" : 0.0,
+      "tags" : [ "Pruning outputs" ]
+    },
+    "pruneFruitBiomassRemoved" : {
+      "type" : "number",
+      "description" : "Flowr and Fruit biomass removed",
+      "name" : "pruneFruitBiomassRemoved",
+      "defaultValue" : 0.0,
+      "tags" : [ "Pruning outputs" ]
+    },
+    "pruneLeafAreaRemoved" : {
+      "type" : "number",
+      "description" : "Total leaf area removed during pruning (m2)",
+      "name" : "pruneLeafAreaRemoved",
+      "defaultValue" : 0.0,
+      "tags" : [ "Pruning outputs" ]
+    },
+    "pruneLeafBiomassRemoved" : {
+      "type" : "number",
+      "description" : "Leaf biomass removed during pruning",
+      "name" : "pruneLeafBiomassRemoved",
+      "defaultValue" : 0.0,
+      "tags" : [ "Pruning outputs" ]
+    },
+    "pruneInternodeBiomassRemoved" : {
+      "type" : "number",
+      "description" : "Internode biomass removed with vegetative shoot pruning",
+      "name" : "pruneInternodeBiomassRemoved",
+      "defaultValue" : 0.0,
+      "tags" : [ "Pruning outputs" ]
+    },
+    "fruitCount_b1" : {
+      "type" : "integer",
+      "description" : "Fruit object count in band 1.",
+      "name" : "fruitCount_b1",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit light interception" ]
+    },
+    "fruitCount_b2" : {
+      "type" : "integer",
+      "description" : "Fruit object count in band 2.",
+      "name" : "fruitCount_b2",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit light interception" ]
+    },
+    "fruitCount_b3" : {
+      "type" : "integer",
+      "description" : "Fruit object count in band 3.",
+      "name" : "fruitCount_b3",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit light interception" ]
+    },
+    "fruitCount_b4" : {
+      "type" : "integer",
+      "description" : "Fruit object count in band 4.",
+      "name" : "fruitCount_b4",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit light interception" ]
+    },
+    "fruitIncidentPAR_mean_b1_umol_m2_s" : {
+      "type" : "number",
+      "description" : "Mean incident fruit PAR in band 1.",
+      "name" : "fruitIncidentPAR_mean_b1_umol_m2_s",
+      "unit" : "umol/m^2/s",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit light interception" ]
+    },
+    "fruitIncidentPAR_mean_b2_umol_m2_s" : {
+      "type" : "number",
+      "description" : "Mean incident fruit PAR in band 2.",
+      "name" : "fruitIncidentPAR_mean_b2_umol_m2_s",
+      "unit" : "umol/m^2/s",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit light interception" ]
+    },
+    "fruitIncidentPAR_mean_b3_umol_m2_s" : {
+      "type" : "number",
+      "description" : "Mean incident fruit PAR in band 3.",
+      "name" : "fruitIncidentPAR_mean_b3_umol_m2_s",
+      "unit" : "umol/m^2/s",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit light interception" ]
+    },
+    "fruitIncidentPAR_mean_b4_umol_m2_s" : {
+      "type" : "number",
+      "description" : "Mean incident fruit PAR in band 4.",
+      "name" : "fruitIncidentPAR_mean_b4_umol_m2_s",
+      "unit" : "umol/m^2/s",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit light interception" ]
+    },
+    "flowerSelfAssimC" : {
+      "type" : "number",
+      "description" : "Flower self-assimilation carbon contribution",
+      "name" : "flowerSelfAssimC",
+      "unit" : "mg C h-1",
+      "defaultValue" : 0.0,
+      "tags" : [ "Carbon allocation diagnostics" ]
+    },
+    "droppedFlowerCount" : {
+      "type" : "integer",
+      "description" : "Dropped flower count under carbon limitation",
+      "name" : "droppedFlowerCount",
+      "defaultValue" : 0.0,
+      "tags" : [ "Carbon allocation diagnostics" ]
+    },
+    "totalFlowerCount" : {
+      "type" : "integer",
+      "description" : "Total flower count",
+      "name" : "totalFlowerCount",
+      "defaultValue" : 0.0,
+      "tags" : [ "Carbon allocation diagnostics" ]
+    },
+    "reserveSeasonBeta" : {
+      "type" : "number",
+      "description" : "Shared seasonal index for reserve KM and hydrolysis; 0 is early remobilization and 1 is late rebuilding.",
+      "name" : "reserveSeasonBeta",
+      "unit" : "-",
+      "defaultValue" : 0.0,
+      "tags" : [ "Reserve turnover diagnostics" ]
+    },
+    "effectiveHydRate" : {
+      "type" : "number",
+      "description" : "NSC-weighted effective reserve hydrolysis rate across annual internodes, cordons, trunks, and structural roots.",
+      "name" : "effectiveHydRate",
+      "unit" : "h-1",
+      "defaultValue" : 0.0,
+      "tags" : [ "Reserve turnover diagnostics" ]
+    },
+    "reserveHydrolysisFlux" : {
+      "type" : "number",
+      "description" : "Actual woody reserve hydrolysis flux loaded to the phloem from annual internodes, cordons, trunks, and structural roots.",
+      "name" : "reserveHydrolysisFlux",
+      "unit" : "mg C h-1",
+      "defaultValue" : 0.0,
+      "tags" : [ "Reserve turnover diagnostics" ]
+    },
+    "reserveSynthesisFlux" : {
+      "type" : "number",
+      "description" : "Actual woody reserve synthesis flux stored in annual internodes, cordons, trunks, and structural roots.",
+      "name" : "reserveSynthesisFlux",
+      "unit" : "mg C h-1",
+      "defaultValue" : 0.0,
+      "tags" : [ "Reserve turnover diagnostics" ]
+    },
+    "netReserveChange" : {
+      "type" : "number",
+      "description" : "Net actual woody reserve change: reserveSynthesisFlux minus reserveHydrolysisFlux.",
+      "name" : "netReserveChange",
+      "unit" : "mg C h-1",
+      "defaultValue" : 0.0,
+      "tags" : [ "Reserve turnover diagnostics" ]
+    }
+  }
+}

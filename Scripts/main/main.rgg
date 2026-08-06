@@ -1,0 +1,1650 @@
+
+// ##############################################//
+// 	Imports
+// ##############################################//
+import java.io.*;
+import java.io.FileWriter;
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileReader;
+import java.util.StringTokenizer;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Vector;
+import java.util.Arrays;
+import java.lang.Math;
+import java.util.UUID;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import org.apache.commons.math3.distribution.*;
+import de.grogra.gpuflux.tracer.FluxLightModelTracer.MeasureMode;
+import de.grogra.graph.impl.Edge;
+import de.grogra.graph.Graph;
+import de.grogra.imp.IMPWorkbench;
+import de.grogra.imp3d.View3D;
+import de.grogra.persistence.Transaction;
+import de.grogra.pf.ui.util.LockProtectedCommand;
+import de.grogra.pf.ui.Command;
+import de.grogra.util.Lock;
+import de.grogra.util.Utils;
+
+//graph and state
+import de.grogra.pf.registry.Item;
+import de.grogra.pf.registry.Registry;
+import de.grogra.pf.ui.Workbench;
+import de.grogra.pf.ui.JobManager;
+
+import de.grogra.util.concurrent.PTaskManager;
+import de.grogra.graph.impl.GraphManager;
+import de.grogra.pf.ui.Workbench;
+import de.grogra.pf.ui.Context;
+import de.grogra.graph.GraphState;
+import de.grogra.util.ThreadContext;
+import static carbonTransport.*;
+import static shootPositioning.*;
+import static structuralVariation.*;
+import static archReader.*;
+import static rootSystem.*;
+import static soil.*;
+import static initiationBase.*;
+import static flowerBase.*;
+import static fruitBase.*;
+import static fineRoot.*;
+import static structuralRoot.*;
+import static fieldBase.*;
+import static modelOptions.*;
+import static lightInterception.*;
+//import other modules
+import static absOrgan.*;
+import static leaf.*;
+import static shoot.*;
+import static plantBase.*;
+import plantBase.*;
+import static extraTools.*;
+import static carbonTransport.*;
+import static charts.*;
+import static outputTables.*;
+import static diagnosticTables.*;
+import static globalParameters.*;
+import static plantParameters.*;
+import static modelOptions.*;
+import static initialConditions.*;
+import static extraTools.*;
+import static environment.*;
+import static photosynthesisAndTranspiration.*;
+import static structuralVariation.*;
+import static phenology.*;
+import static leafAngleOptimization.*;
+import static server.*;
+import static dataset.*;
+import static interfaces.*;
+import static simRunBase.*;
+import static updatesBase.*;
+import static initiationBase.*;
+import static developBase.*;
+import static flowerBase.*;
+import static fruitBase.*;
+import static budBase.*;
+import static rootSystem.*;
+import static soil.*;
+import static twinningPlanner.*;
+import budPlanner.*;
+import leafPlanner.*;
+import fruitPlanner.*;
+import tests.TestRunner;
+import validation.ValidationRunner;
+
+//import dhs platform packages
+import cache.dhs.*;
+import cache.dhs.ModelInterface;
+import cache.dhs.RunStepArgs;
+import cache.dhs.Value;
+import cache.dhs.Reference;
+import cache.dhs.Metadata;
+import cache.dhs.Cache;
+import cache.dhs.CacheResult;
+import java.io.Serializable;
+//concurrent tasks
+import de.grogra.util.concurrent.*;
+
+
+import de.grogra.pf.ui.Command;
+import de.grogra.pf.ui.Context;
+import de.grogra.util.LockProtectedRunnable;
+
+transient static PTaskManager taskManager = new PTaskManager();
+
+global main mainInstance = new main();
+
+/** Used to handle simulation run configurations. */
+global SimRunService simRunService;
+
+/** Used to manage and apply updates during simulation. */
+global UpdatesService updatesService;
+
+global DevelopService developService;
+
+global InitiationService initiationService;
+
+global FruitCreator FRUIT_CREATOR;
+
+/** Command line arguments passed to the application, providing customizable configurations. */
+global CommandLineArgs commandLineArgs = new CommandLineArgs();
+
+/** Default XML output path for the simulation results. */
+global String DEFAULT_XML_OUT;
+
+/** This instantiates the helper class with an associated storage -- it is only used when running with dhs */
+global BasicMinervaHelper minerva = new BasicMinervaHelper("dhs-simulation-artifacts");
+global String scenario_name;
+
+
+/**
+ * Initializes the necessary configurations, parameters, and data for the model.
+ * 
+ * <p>
+ * This method performs several initialization tasks:
+ * <ul>
+ *   <li>Clears the console and resets command line arguments.</li>
+ *   <li>Clears all data stored in the Config module.</li>
+ *   <li>Initializes paths, charts, and tables.</li>
+ *   <li>Loads model input data, local parameters, and phenology parameters if needed.</li>
+ *   <li>Checks the file configuration and reads CSV files.</li>
+ *   <li>Initializes fruit data if virtual fruits are being used.</li>
+ *   <li>Initializes light models based on the configuration setting.</li>
+ * </ul>
+ * </p>
+ * 
+ * @throws RuntimeException if any file configurations are incorrect.
+ */
+protected void init()
+{
+	resetGraph();
+	derive();
+	//mainInstance.reCompile();
+	ModelArgs.init();	
+	// Reset these values at the start of every simulation
+	day = 0;
+	tt = 0;
+	step = 0;
+
+	clearConsole();
+	//command line load from the headless mode
+	// Clear all data stored in Config Module
+	CONFIG.reset();
+
+	/** global settings, MODEL INPUT AND PARAMETER LOAD */
+	SimulationLoader.initSimulationInstance();
+	scenario_name = splitAndCombine(FILE_NAME_MODEL_OPTIONS);
+
+	//update the output settings
+	outputTable_name = scenario_name;
+
+	PATH_OUTPUT = PATH_OUTPUT + splitAndCombine(FILE_NAME_MODEL_OPTIONS) + "/"; // Create a directory for scenario outputs
+	println(" PATH_OUTPUT: " + PATH_OUTPUT + " outputTable_name: " + outputTable_name);
+	createOrClearDirectory(PATH_OUTPUT);
+	
+	simUUID  = extractOrGenerateUUID(FILE_NAME_MODEL_OPTIONS);
+	
+    println("simUUID:  " + simUUID);
+    
+		/** initialise the alternative module choices */
+	simRunService = SimRunServiceFactory.getService(special_scenario);
+	updatesService = UpdatesServiceFactory.getService(special_scenario, species);
+	initiationService = InitiationServiceFactory.getService(initiation_method);
+	developService = DevelopServiceFactory.getService(special_scenario, species, useStructuralVariation);
+	main.FRUIT_CREATOR = new FruitCreator(fruitModule);
+	activeLeafShapeSpecies = species;
+	if (leafShapeSpecies != null && leafShapeSpecies.length() > 0) {
+		activeLeafShapeSpecies = leafShapeSpecies;
+	}
+	leafShape.LeafShapeFactory.getLeafShape(activeLeafShapeSpecies);
+	
+	//load csv input files
+	readCsvFiles();
+	
+	if(main.FRUIT_CREATOR.usesVirtualFruitService()) {
+		FruitService fruit = main.FRUIT_CREATOR.createFruit();
+		fruit.initData();
+	}
+		ensureLightModelInitialized();
+		//initiate after all the modules are being configured correctly
+		initiationService.initiate();
+		validateCurrentLightInterceptionGraphCapabilities();
+	    saveRunInputsAndSnapshot(PATH_OUTPUT, PATH_SCENARIOS + FILE_NAME_MODEL_OPTIONS);
+
+	if(useChart==true) {
+		initCharts();
+	}
+	initCsvWriters(outputTable_name);
+	DiagnosticTableCoordinator.initialize(
+		PATH_OUTPUT,
+		outputTable_name,
+		outputWaterFluxSolverDebug,
+		outputLeafGrowthDiagnostics,
+		outputCarbonTransportDiagnostics,
+		outputAppleDevelopmentDiagnostics);
+
+	/*/////////////////////////////////////////////////////
+		Remind and check of the files that the model load 
+	*//////////////////////////////////////////////////////
+	
+	println("======== Module configuration ===================");
+	println("");
+	println("species                 : " + species);
+	println("leafShapeSpecies        : " + activeLeafShapeSpecies);
+	println("Model options           : " + FILE_NAME_MODEL_OPTIONS);
+	println("special_scenario        : " + special_scenario);
+	if ("fieldRandomCanopy".equals(initiation_method)) {
+		println("fieldCanopy sourceMode  : " + fieldCanopy_sourceMode);
+	}
+	println("");
+	
+	println("initiationService       : " + initiationService.getClass().getSimpleName());
+	println("updatesService          : " + updatesService.getClass().getSimpleName());	
+	println("developService          : " + developService.getClass().getSimpleName());
+	println("berryService            : " + FRUIT_CREATOR.getServiceClass().getSimpleName());
+	println("fruitModule             : " + FRUIT_CREATOR.getFruitModule());
+	println("simRunService           : " + simRunService.getClass().getSimpleName());
+	println("useComplexRoot          : " + useComplexRoot);
+	println("useComplexLeaf          : " + useComplexLeaf);    
+	println("");
+	
+	println("======== Loaded functionality ===================");
+	println("thermalUnit             : " + thermalUnit);	
+	println("organGrowthMethod       : " + organGrowthMethod);
+	println("calcLightInterception   : " + calcLightInterception);
+	println("useShadingFactor        : " + useShadingFactor);
+	println("calcPotential_PT        : " + calcPotential_PT);
+	println("calcActual_PT           : " + calcActual_PT);
+	println("calcCarbonAllocation    : " + calcCarbonAllocation);	
+	println("useStructuralVariation  : " + useStructuralVariation);
+	println("useStaticArc            : " + useStaticArc);
+	println("usePhenology            : " + usePhenology);
+	println("useCTRAM                : " + useCTRAM);
+	println("");
+
+
+	println("======== File configuration ===========================");
+	println("parameter_file            : " + FILE_NAME_PLANT_PARAMETERS);
+	println("initial_conditions_file   : " + FILE_NAME_INITIAL_CONDITIONS);
+	println("soil_parameters_file      : " + FILE_NAME_SOIL_PARAMETERS);
+	if(FRUIT_CREATOR.usesVirtualFruitService())
+	println("VirtualFruitParm_file     : " + virtualFruitParameter_file);
+	println();
+	
+	println("climate_file              : " + climate_file);
+	println("organSize_file            : " + organSize_file);
+	println("shootArchitecture_file    : " + shootArchitecture_file);
+	println("shadingFactor_file        : " + shadingFactor_file);
+	println("berryModelInput_file      : " + berryModelInput_file);
+	println("");  
+
+	println("======== Debugging and Output Settings ==============");
+	println("Use Chart                : " + useChart);
+	println("Use Output Table         : " + useOutputTable);
+	println("Use JSON Output          : " + useOrganArrays);
+	println("Output Individual Fruit  : " + outputIndividualFruit);
+	println("Output Individual Leaf   : " + outputIndividualLeaf);
+	println("Output Indi- Internode   : " + outputIndividualInternode);
+	println("Debug Mode               : " + debug);
+	println("Print Flag               : " + printFlag);
+	println("");
+	
+	println("======== Model Arguments from command-line options ============");
+	println("Test Mode               : " + ModelArgs.testMode);
+	println("Validation Mode         : " + ModelArgs.validationMode);
+	println("Server Mode             : " + ModelArgs.serverMode);
+	println("From Dataset            : " + ModelArgs.fromDataset);
+	println("Run End Steps           : " + ModelArgs.runEndSteps);
+	println("Model Options File      : " + ModelArgs.modelOptions);
+	println("Model Path              : " + ModelArgs.modelPath);
+	println("Number of Cores         : " + ModelArgs.nCores);
+	println("Headless Mode           : " + ModelArgs.headless);
+	println("DHS Sim Phase           : " + ModelArgs.phase);
+	println("DHS Sim Request File    : " + ModelArgs.request);
+	println("");
+
+	println("======== Simulation info ========================");
+	println("Latitude                 : " + latitude);
+	println("Longitude                : " + longitude);
+	println("Time Zone                : " + getTimeZoneOffset(longitude));
+	println("inputEnvironmentCondition: " + inputEnvironmentCondition);
+	println("Start day of year        : " + dayOfYear);
+	println("Hour of day              : " + hourOfDay);
+	println("Number of simulation days: " + halt);
+	println("Current day length       : " + dayLength);
+	println("Sunrise time             : " + sunriseTime);
+	println("Sunset time              : " + sunsetTime);
+	println("Daytime                  : " + daytime);
+	println("");
+	
+	println("======== Population info ========================");
+	println("Population density       : " + 0.01 * Math.round(100 * dens) + " plants/m2");
+	println("Row distance             : " + rowDistance);
+	println("Plant distance           : " + plantDistance);
+	println("Number of plants         : " + totalPlants);
+	println("Total area               : " + 0.01 * Math.round(100 * totalArea) + " m2");
+	println("Focal area               : " + 0.01 * Math.round(100 * focalArea) + " m2");
+
+	println("==========================================================");
+
+	//leafShape.testArea();
+	
+	derive();
+	updateEnvironment();
+	updateSolarPosition(year, month, dayOfMonth, hourOfDay,
+						latitude, longitude, elevation, airPressure, Ta); 
+	System.gc();
+	
+ /* 
+ 	//test dynamic growth 	
+	organGrowthMethod.equals("TempLimited");
+ 	plastochron = 0.05;
+	// trigger light interception or not
+	calcLightInterception = false; 
+	// potential photosynthesis and transpiration without water stress 
+	calcPotential_PT = false;  		
+	// actual photosynthesis and transpiration with water stress 
+	calcActual_PT = false; 
+	// carbon allocation and carbohydrate reserve dynamics. 
+	calcCarbonAllocation = false;
+		  */
+
+}
+
+/**
+ * Executes a single step in the simulation cycle.
+ * <p>
+ * This method orchestrates the different stages of the simulation based on the current step.
+ * In the initial step, the method loads necessary information and initializes the architecture.
+ * For subsequent steps, it updates, develops, and refreshes associated charts and tables.
+ * Snapshots are optionally taken based on the current day and hour of the simulation.
+ * </p>
+ * Note: The method also manages garbage collection and updates the simulation time after every step.
+ */
+ 
+public void run()
+{
+	/**
+	 * Step 0: Initialization phase.
+	 * Loads architecture and performs initial setup. 
+	   It requires a derive to load the information, before you can use the information to load the architecture
+	   It takes some time for large files during saving when put in init. 
+	   under headless mode, derive in init produce errors after resetgraph.
+	*/
+try {
+	// Ensure step progresses even if an exception occurs later
+	
+    // =====================================================
+    // 0. Soft restart requested by TwinningPlanner (T1 LA check)
+    // This is for resetting the bud number to match the leaf area 
+    //    We do this BEFORE any other logic in run().
+    // =====================================================
+/*     if (resetBudNumber && step > 1) {
+      println("[main] Restart requested by TwinningPlanner (resetBudNumber=true).");
+      println("[main] Resetting graph and re-initialising before step 0…");
+
+      // Hard reset, but in a safe place (run() entry)
+      resetGraph();   // instance method of main
+      init();         // your existing init() (without derive() inside!)
+
+      // Start new simulation pass from init phase
+      step = 0;
+      if(debug == true) {
+      	  println("Resetting bud bumber did not succeed. Require external optimization and more clear checks");
+      	  System.exit(0);
+      	  
+      }
+      // NOTE: DO NOT clear resetBudNumber here.
+      // We want step==1 to see it and actually call BudPlanner with budTargetMode=2
+      return;
+    } */
+		
+	if(step == 0) 
+	 {
+		//try to find the issues earlier before large initialization of the tree
+		InitArch.checkSoilParams();
+		initiationService.initArchitecture();
+				
+		derive();
+		runDeferredPostReadNegativeZFixesStage1();
+		derive();
+		InitArch.finalizeIDReference();
+		syncRootBiomassAfterArchitectureRead("step0_after_finalizeIDReference");
+		[ 
+			rb0:RootBase ::> {
+				rb0.updateLayeredRootBiomassAndCarbon(BIOMASS_ROOT);
+			}	
+		]
+
+	
+			//InitArch.checkRootParams();
+		// Check leaf area and crop load after soil and root validations have passed
+		//InitArch.checkLeafAreaAndCropLoad();
+	   
+		assignOutputRef();
+		InitArch.setStructuralRootParentID();
+		
+		
+		step = 1;	
+		
+		long RosetteLeaf = count((* l:Leaf, (l.organType.contains("Rosette"))*));
+		long otherLeaf = count((* l:Leaf, (!l.organType.contains("Rosette"))*));
+		double leafArea = sum((* l:Leaf *).area);
+		println( " \n RosetteLeaf : " + RosetteLeaf + "other: " + otherLeaf +
+				" total leaf area: " + String.format("%.4f",leafArea));
+				println("[DBG_LEAF_CREATE] LeafSTEM=" + dbgLeafStemCreated
+      + " LeafBODY=" + dbgLeafBodyCreated
+      + " LeafEND_seen=" + dbgLeafEndNodesSeen);
+				
+		return;
+	 }	
+	
+	
+	 /**
+	 * Step 1 and beyond: Main simulation loop.
+	 * Includes task scheduling, organ updates, development progression, 3D rendering, output writing, and logging.
+	 */
+	 /**
+	 * Step 1 only: Count total buds and report initial leaf characteristics.
+	 * Helps determine flowering potential and initialize phenological context.
+	 */
+	if(step == 1) { 
+		
+			{
+		
+	
+		[
+			rb:RootBase ::> {
+				println("[RootFrame] rb plant=" + rb.plantNumber
+					+ " loc=" + location(rb).x + "," + location(rb).y + "," + location(rb).z);
+			}
+		]
+	
+		[
+			s:Soil, (s.layer == 0 && s.gridX == 0 && s.gridY == 0) ::> {
+				println("[SoilActual] id=" + s.id
+					+ " grid=" + s.gridX + "," + s.gridY
+					+ " layer=" + s.layer
+					+ " loc=" + location(s).x + "," + location(s).y + "," + location(s).z
+					+ " dims=" + s.widthX + "," + s.widthY + "," + s.length);
+			}
+		]
+	}
+		
+		runDeferredPostReadNegativeZFixesStage2IfNeeded();
+		syncRootBiomassAfterArchitectureRead("step1_after_stage2_fixes");
+		[ rb1:RootBase ::> {
+			rb1.verifyLayeredRootBiomassAndCarbon(BIOMASS_ROOT, 1e-3);
+			} 
+		]
+		//tidy up the internode biomass in the leaf allometry mode for static architecture
+		if(!annualInternodeBiomassMode.equalsIgnoreCase("density")) 
+		{
+			[	
+				i:Internode, (!((i instanceof Cordon) || (i instanceof Trunk))) ::> {
+				i.syncAnnualInternodeBiomassFromLocalOrNearbyLeaf();
+					//	println("internode biomass: " + i.biomass);
+				}		
+			]	
+		} 
+		InitArch.checkStatus(); 
+		//set the leaf area if the
+		if(useTwinningPlanner && debug) {
+		  double nLeaves = count((* l:Leaf, (l.plantNumber == 1)*));
+			
+		  if (nLeaves > 10) {
+			// For this to actually prune, make sure:
+			//   - modelOptions.leafPruningDOY == dayOfYear at step 1
+			LeafPlanner.runFromProjectParams_Prune(true);  // dryRun=false → real edits
+		  }
+		
+		  // ----------------------------------------------------
+		  // 2B. If NO leaves → fall back to BudPlanner T0
+		  //     (classic pre-season bud planning)
+		  // && useTwinningPlanner
+		  // ----------------------------------------------------
+		 if(dayOfYear == twinningDOY_T0 && useTwinningPlanner) {
+			println("[main] step=1: no leaves found → using BudPlanner T0.");
+			BudPlanner.runFromProjectParams(true); //dry run: true
+		  }
+		  
+		  double totalFruit = count((* b:FruitService *));
+		  if(totalFruit >= 1) {
+			  FruitPlanner.runFromProjectParams_Prune(true);  // dryRun=false → real edits	  	  
+		  }
+		}
+		  
+		 if(resetBudNumber == true && debug == false && useTwinningPlanner) {
+			  println("resetting budnumber");
+			  budTargetMode = 2;
+			  BudPlanner.runFromProjectParams(false); //dry run: true
+			  resetBudNumber = false;
+			  //debug = true;
+			  
+		  }
+		  
+	}
+		
+   		
+/**
+ * Configure task manager for parallel computation (if multiple cores are used).
+ */
+	taskManager.setSolverCount(ModelArgs.nCores);
+	
+/**
+ * Update organ states (mass, carbon, water, etc.) using defined physiological rules.
+ */
+   	updatesService.updates();
+	syncRootBiomassAfterArchitectureRead("step1_after_updates");
+        
+/**
+ * Trigger development (organogenesis, elongation, etc.) unless using static architecture.
+ */
+	if(!useStaticArc && !(step <= 2 && addBuds == true)) {
+		developService.develop();
+ 	}
+	
+/**
+ * Periodic recomputation of derived traits (e.g., canopy geometry, biomass).
+ * This helps ensure simulation consistency, especially for dynamic structures.
+ */
+	if(step % 10 == 0 ) 
+	{	
+		derive();
+		System.gc();
+	}
+/**
+ * Chart output: Optional visualization during simulation for debugging or analysis.
+ */
+	if(useChart == true) {
+		updateCharts();
+	}
+/**
+ * Output table update (e.g., for writing simulation variables to memory structure).
+ */
+ 
+	if(useOutputTable == true) {
+		updateTables();
+		//outputTables(outputTable_name);
+	}
+	
+/**
+ * Export organ-level data to CSV files (formerly Excel-based).
+ */
+	if(useOrganArrays == true) { // FIXME: rename field from Excel as we are now using CSV for output
+			writeOutputToCsv(); 
+		}
+		
+		
+/**
+ * Call the twinning method daily based on the input twinning DOY
+ */
+ // 1) Twinning – only if useTwinningPlanner=true
+  if(useTwinningPlanner && hourOfDay == 2) TwinningPlanner.runFromProjectParams(false);
+  
+  if(step<= 3) println("fruit number: " + count((* b:FruitService *)));
+  // 2) Independent leaf pruning (uses leafPruningDOY internally)
+  if(dayOfYear == leafPruningDOY && hourOfDay == 3) { 
+  	  LeafPlanner.runFromProjectParams_Prune(false);
+  }
+  if(step<= 3) println("fruit number: " + count((* b:FruitService *)));
+  // 3) Independent fruit pruning (uses fruitPruningDOY internally)
+  if(dayOfYear == fruitPruningDOY && hourOfDay == 4) {
+  	  FruitPlanner.runFromProjectParams_Prune(false);
+  }
+	
+/**
+ * Optional 3D visualization update (only when not in headless mode and during daytime).
+ */
+	if (Boolean.parseBoolean(ModelArgs.headless) == false && daytime) {
+		try {
+			repaintView3D();
+		} catch (NullPointerException e) {
+			println("No 3D view window open");// Ignore the NullPointerException and proceed.
+		}
+	}
+	
+/**
+ * Save 3D snapshot image (PNG) of the current model view for documentation.
+ * not work in headless mode
+ */
+	if (snapShot == true && hourOfDay == 12) {
+		makeSnapshot(PATH_OUTPUT + "Y" + year + "D" + dayOfYear + "H"+ hourOfDay + ".png");
+	}
+	 
+/**
+ * Export XEG scene file periodically (GroIMP 3D scene format).
+ */
+	
+ 	if (shouldOutputXEG(step, outputFreq3DScene) && daytime) {   
+		export3DScene(PATH_OUTPUT + year + "-" + dayOfYear + "-"+ hourOfDay + "." + output3DSceneFormat, output3DSceneFormat);
+	}
+	
+/**
+ * Simulation logging: Output all major states and environment metrics if enabled.
+ * Includes environmental data, water fluxes, sugar concentration, carbon allocation, and fruit status.
+ * The boolean variable of calcLight, potential PT, actual PT, and carbon allocation should be enables one layer by one layer, 
+ * else will not have proper results.  
+ */
+
+// --------------------------------------------------------------------
+// PRINT SNAPSHOT (guarded, null-safe, warn-once)
+// --------------------------------------------------------------------
+if (printFlag && step >= 1) {
+    PlantBase pb = null;
+    RootBase  rb = null;
+    Trunk     rt = null;
+    FieldBase fb = null;
+
+    // ---- Header ----
+    println(fmtStepHeader(step));
+    println(fmtLine("Time", String.format("Year %d | DOY %d | Hour %d", Integer.valueOf(year), Integer.valueOf(dayOfYear), Integer.valueOf(hourOfDay))));
+    println(fmtLine(
+        "Env",
+        String.format(
+            "Ta=%.1f C | RH=%.1f%% | CO2=%.0f ppm | Mean SWP=%.4f MPa",
+            Double.valueOf(Ta), Double.valueOf(rh * 100.0), Double.valueOf(cca), Double.valueOf(inputWaterPotential)
+        )
+    ));
+    println(fmtLine(
+        "Radiation",
+        String.format(
+            "Global=%.1f | Diffuse=%.1f | Direct=%.1f | fdiff=%.3f | fPAR=%.3f",
+            Double.valueOf(globalRadiation), Double.valueOf(diffuseRadiation), Double.valueOf(directRadiation), Double.valueOf(fdiff), Double.valueOf(fPAR)
+        )
+    ));
+
+    // ---- Safe retrievals (no exception spam) ----
+    if (outputTables.pbID > 0) pb = safeGetPlantBase(outputTables.pbID);
+    if (outputTables.rbID > 0) rb = safeGetRootBase(outputTables.rbID);
+    if (outputTables.fbID > 0) fb = safeGetFieldBase(outputTables.fbID);
+
+    // ---- Plant info ----
+    println(fmtSection("Plant information"));
+    if (pb != null) {
+     	   println(fmtLine("Height", pb.plantHeight, "m", 4));
+     	   println(fmtLine("Leaf Area", pb.leafArea, "m2", 4));
+
+        if (calcLightInterception) {
+            println(fmtLine("Absorbed PAR", pb.hourlyAbsorbedRadiation * fPAR, "MJ", 4));
+            println(fmtLine("fabs_plant", pb.fabs, "-", 4));
+            println(fmtLine("fpar_plant", pb.fpar, "-", 4));
+            println(fmtLine("fabs_soil", outputTables.fabsSoil, "-", 4));
+            println(fmtLine("fpar_soil", outputTables.fparSoil, "-", 4));
+
+            if (calcPotential_PT) {
+                println(fmtLine("meanAnet", pb.meanAnet, "µmol/m2/s", 4));
+
+                println(fmtSection("Water Transport"));
+                println(fmtLine("Water Flux Potential", pb.waterFluxPotential, "mg/plant/s", 4));
+
+                if (calcActual_PT) {
+                    println(fmtLine("Water Flux Optimized", pb.waterFlux_optimized, "mg/plant/s", 4));
+                    println(fmtLine("Xylem Water Potential", pb.xylemWaterPotential, "MPa", 4));
+                }
+            }
+        }
+
+        if (calcCarbonAllocation) {
+            println(fmtSection("Phloem sugar concentration"));
+            println(fmtLine("Phloem [sugar]", pb.sugarConcentration_phloem, "g_sugar/g_solution", 6));
+
+            println(fmtSection("Fraction of carbon loadings (major)"));
+            println(fmtLine("Leaf Loading", pb.fraction_leafLoading, "-", 4));
+            println(fmtLine("Internode Loading", pb.fraction_internodeLoading, "-", 4));
+            println(fmtLine("SRoot Loading", pb.fraction_structuralRootLoading, "-", 4));
+
+            println(fmtSection("Fraction of carbon unloadings (major)"));
+            println(fmtLine("Fruit Unloading", pb.fraction_fruitUnloading, "-", 4));
+            println(fmtLine("Fine Root Unloading", pb.fraction_fineRootUnloading, "-", 4));
+            println(fmtLine("SRoot Unloading", pb.fraction_structuralRootUnloading, "-", 4));
+            println(fmtLine("Internode Unloading", pb.fraction_internodeUnloading, "-", 4));
+        }
+    } // (no else message; warnOnce already handled missing pb)
+
+    // ---- Root info (quiet defaults; warn once for missing arrays) ----
+    if (rb != null) {
+        double[] fflux = rb.f_flux; // may be null
+	        if (fflux != null) {
+	            clearWarn("rb_flux_missing");
+	            for (int i = 0; i < fflux.length; i++) {
+	                int gid = (rb.gridIndex != null && i < rb.gridIndex.length) ? rb.gridIndex[i] : i;
+	                println(fmtLine(String.format("f_flux grid%d", Integer.valueOf(gid)), fflux[i], "-", 4));
+	            }
+	        } else {
+            warnOnce("rb_flux_missing", "⚠️ RootBase.f_flux not available yet (suppressing repeats).");
+        }
+
+    }
+    // (if rb is null, warnOnce already emitted; no further prints)
+
+    // ---- FieldBase / dataset hook ----
+    if (fb == null) {
+        warnOnce("fb_missing_still", "No FieldBase found; skipping dataset rows (suppressing repeats).");
+    } else {
+        clearWarn("fb_missing_still");
+        // ... add rows to dataset here
+    }
+
+    // ---- Fruit metrics ----
+    if (outputTables.fw_mean > 0) {
+        println(fmtSection("Fruit Metrics"));
+        println(fmtLine("FW Mean", outputTables.fw_mean, "mg", 1));
+        println(fmtLine("DW Mean", outputTables.dw_mean, "mg", 2));
+        println(fmtLine("Sugar Conc", outputTables.sc_mean, "g/g_pulp", 4));
+    }
+}
+
+  calcSimTime();
+  step++;
+	
+} catch (Exception e) {
+        System.out.println("⚠️ Exception in run(): " + e.getMessage());
+        e.printStackTrace();
+        // Step will still increment to avoid infinite loops
+        step++;
+    }
+}
+
+
+
+public void runEnd() {
+    // Hourly model: halt is expressed in days, so run exactly 24 steps per halt day.
+    int targetStep;
+    if (halt > 0) {
+        long tmp = 24L * (long) halt - 3;
+        if (tmp < 0L) tmp = 0L;
+        if (tmp > Integer.MAX_VALUE) tmp = Integer.MAX_VALUE;
+        targetStep = (int) tmp;
+    } else {
+        targetStep = Integer.MAX_VALUE; // run until continueRunning flips false
+    }
+
+    // ---- safety controls
+    int calls = 0;
+    int lastStep = step;
+    int stallCount = 0;
+
+    int expected = (targetStep == Integer.MAX_VALUE) ? 100000 : (targetStep - step + 1);
+    if (expected <= 0) expected = 1;
+    final int ABS_CAP   = (expected < (Integer.MAX_VALUE / 10)) ? (expected * 10) : 100000;
+    final int STALL_CAP = 20000;                  // no-step-advance for this many run() calls → hard exit
+    final long STALL_MS = 10L * 60L * 1000L;     // 10 min since last heartbeat → hard exit (watchdog)
+    final long[] lastBeat = new long[] { System.currentTimeMillis() };
+    final boolean[] done  = new boolean[] { false };
+
+    // Start watchdog (kills JVM if run() blocks and we stop heartbeating)
+    startWatchdog(STALL_MS, 98, "runEnd", done, lastBeat);
+
+    while (continueRunning && (step < targetStep) && (calls < ABS_CAP)) {
+        // heartbeat before entering run() so watchdog can see activity even if run() blocks intermittently
+        lastBeat[0] = System.currentTimeMillis();
+
+        run();
+        calls++;
+
+        // heartbeat after returning from run()
+        lastBeat[0] = System.currentTimeMillis();
+
+        // no-progress detector (run() returned but step didn't change)
+        if (step == lastStep) {
+            stallCount++;
+            if (stallCount >= STALL_CAP) {
+                done[0] = true; // stop watchdog thread
+                hardExitNow(97, "No progress for "+STALL_CAP+" consecutive run() calls (step="+step+")", true);
+                return; // unreachable
+            }
+        } else {
+            stallCount = 0;
+            lastStep = step;
+        }
+    }
+
+    done[0] = true; // stop watchdog
+
+    if (calls >= ABS_CAP) {
+        hardExitNow(96, "Absolute iteration cap hit: "+ABS_CAP+" calls (step="+step+", target="+targetStep+")", true);
+        return; // unreachable
+    }
+
+    saveGsz();
+}
+
+
+
+public void runEnd(int maxSteps) {
+    // guard inputs
+    if (maxSteps <= 0) {
+        hardExitNow(94, "Invalid maxSteps="+maxSteps, false);
+        return; // unreachable
+    }
+
+    // ---- safety controls
+    int calls = 0;
+    int lastStep = step;
+    int stallCount = 0;
+
+    final int ABS_CAP   = (maxSteps < (Integer.MAX_VALUE / 10)) ? (maxSteps * 10) : 100000;
+    final int STALL_CAP = 200000;                  // no-step-advance for this many run() calls → hard exit
+    final long STALL_MS = 10L * 60L * 10000L;     // 10 min watchdog
+    final long[] lastBeat = new long[] { System.currentTimeMillis() };
+    final boolean[] done  = new boolean[] { false };
+
+    startWatchdog(STALL_MS, 88, "runEnd(max)", done, lastBeat);
+
+    while ((step < maxSteps) && continueRunning && (calls < ABS_CAP)) {
+        lastBeat[0] = System.currentTimeMillis();
+        run();
+        calls++;
+        lastBeat[0] = System.currentTimeMillis();
+
+        if (step == lastStep) {
+            stallCount++;
+            if (stallCount >= STALL_CAP) {
+                done[0] = true;
+                hardExitNow(87, "No progress for "+STALL_CAP+" consecutive run() calls (step="+step+")", true);
+                return;
+            }
+        } else {
+            stallCount = 0;
+            lastStep = step;
+        }
+    }
+
+    done[0] = true;
+
+    if (calls >= ABS_CAP) {
+        hardExitNow(86, "Absolute iteration cap hit: "+ABS_CAP+" calls (final step="+step+")", true);
+        return;
+    }
+
+   saveGsz();
+}
+
+void saveGsz() {
+ // ---- normal completion (no hard exit)
+    if (saveGsz == true) {
+        String fullFilePath = PATH_OUTPUT + outputTable_name + ".gsz";
+        try {
+            workbench().save(false);
+            saveProjectAs(new java.io.File(fullFilePath));
+            println("Simulation finished. Final step=" + step + ", saving to " + fullFilePath);
+        } catch (Throwable t) {
+            System.err.println("Save failed: " + fullFilePath);
+            t.printStackTrace();
+            // Optionally fail job:
+            // hardExitNow(85, "Save failed: " + fullFilePath, false);
+        }
+    }
+}
+
+/**
+ * Runs the simulation for a specified number of time steps.
+ * 
+ * @param maxSteps the maximum number of steps the simulation should run for.
+ */
+
+/**
+ * Run basic unit tests defined in tests.rgg.
+ */
+	public void runBasicUnitTest() {
+		DEFAULT_XML_OUT = PATH_OUTPUT + File.separator + "basic_unit_tests.xml";
+
+		reset();
+		rayCount = 5000000;
+	
+	TestRunner.runTests(DEFAULT_XML_OUT);
+}
+
+/**
+ * Executes validation tests and outputs the results to a designated file.
+ * <p>
+ * The results of the validation tests are saved in an XML file named "validation_test.xml" 
+ * in the defined output path.
+ * </p>
+ */
+void runValidation() {
+	DEFAULT_XML_OUT = PATH_OUTPUT + File.separator + "validation_test.xml";
+	FILE_NAME_MODEL_OPTIONS = ValidationRunner.resolveStartupModelOptions();
+	reset();
+	ValidationRunner.runTests(DEFAULT_XML_OUT);
+}
+
+
+
+
+/**
+ * Resets the graphical representation of the simulation.
+ * <p>
+ * This method obtains the current workbench's graph context and clears out any existing edges associated 
+ * with the root node that are of type {@code BRANCH_EDGE}. It then sets up a new graph structure 
+ * with a fresh {@code RGGRoot} and connects an {@code Axiom} to it.
+ * </p>
+ * <p>
+ * This operation is typically used to initialize or clear the simulation's graphical representation 
+ * to ensure a fresh start.
+ * </p>
+ */
+void resetGraph() {
+	
+	
+	Context ctx = de.grogra.rgg.Library.workbench();  
+	Workbench wb = ctx.getWorkbench();
+    Registry r = wb.getRegistry();
+    GraphManager graph = r.getProjectGraph(); 
+	
+	
+    Transaction xa = graph.getActiveTransaction ();
+    Node root = graph.getRoot ();
+    for (Edge e = root.getFirstEdge (), f; e != null; e = f)
+    {
+        f = e.getNext (root);
+        if (e.testEdgeBits (Graph.BRANCH_EDGE)
+            && (e.getTarget () instanceof RGGRoot))
+        {
+            e.remove (xa);
+        }
+    }
+    RGGRoot rr = new RGGRoot ();
+    root.addEdgeBitsTo (rr, Graph.BRANCH_EDGE, xa);
+    rr.addEdgeBitsTo (new Axiom (), Graph.SUCCESSOR_EDGE, xa);
+    xa.commitAll();
+    Internode.resetLeafAllometryRuntimeCache();
+}
+
+
+void reCompile() {
+	((de.grogra.pf.ui.ProjectWorkbench)workbench()).compile();
+	
+}
+
+
+/**************************************************************************************
+ * running with headless mode
+***************************************************************************************/
+/**
+ * Initializes the simulation environment during startup.
+ * <p>
+ * Checks if the application is running in a headless environment and schedules a deferred
+ * execution of the {@link #run(Object)} method if necessary.
+ * </p>
+ */
+protected void startup() 
+{
+	super.startup();
+	if (de.grogra.pf.boot.Main.getProperty("headless") != null) {
+		runLater(null);
+	}
+	
+}
+
+
+/**
+ * Stores the arguments for the GroIMP model passed through command line.
+ */
+public class ModelArgs implements Serializable {
+	/**
+	 * headless is the default option for running on servers and for
+	 * launching large simulations
+	 * used for controlling whether to repaint the view as well
+	 * If set, the simulation will run without any graphical user interface (useful for server environments).
+	 */
+	public static String headless;
+	
+	/**
+	 * If set to true, the simulation will reinitialize all model variables and start from scratch.
+	 * If set to false, the simulation will attempt to load variables from a previously saved state and continue.
+	 * This flag should be set based on whether the user wants to start a new simulation or resume an existing one.
+	 * default to true
+	 */
+	public static String reset = "true";
+	
+	/**
+	 * Path to the root directory of the model.
+	 * If set, it will override the default working directory as the main path for the simulation.
+	 */
+	public static String modelPath;
+	
+	/**
+	 * Path to the directory of the model scenario independently.
+	 * If set, it will override the default working directory as the scanrio fold for the simulation.
+	 * this is very useful for parameter optimization, batch simulations with different model scenarios
+	 * but would like to keep the input the same
+	 */
+	public static String modelScenarioPath;
+	
+	/**
+	 * Path to the directory of the shoot architecture file
+	 * If set, it will read the the shoot architecture file from the new folder instead of Model_input
+	 */
+	public static String shootArchitecturePath;
+
+	/**
+	 * Path to the output directory of the model.
+	 * If set, the model will output files to this directory.
+	 */
+	public static String outputPath;
+
+	/**
+	 * Path to a file containing model options.
+	 * If provided, the simulation will read model configurations from this file.
+	 */
+	public static String modelOptions;
+
+	/**
+	 * Number of cores to use for the simulation. use in the cocurrent plugin.
+	 * If set, the simulation will utilize the specified number of CPU cores for parallel processing.
+	 */
+	public static int nCores = 4;
+	
+	/**
+	 * useShadingFactor controls whether use cloned plants 
+	 * i need to control this in model argument as i need to be able to switch this on powerplant
+	 * to run simulations both with clone and without clone to calculate the shading factor
+	 */
+	public static String shadingFactor = "true";
+	
+	/**
+	 * Number of end steps to run for the simulation.
+	 * If specified, the simulation will run scenarios for a given number of steps and output results accordingly.
+	 * This value must be between 1 and 9 to use reduced clone nodes.
+	 */
+	public static String runEndSteps;
+	
+	
+	/**
+	 * Mode to run basic unit tests. 
+	 * If set, the simulation will execute unit tests and output results to an XML file.
+	 */
+	public static String testMode;
+	
+	/**
+	 * Mode to run validation tests.
+	 * If set, the simulation will execute validation tests to verify expected behaviors.
+	 */
+	public static String validationMode;
+	
+	/**
+	 * Mode to launch a server instance.
+	 * If set, the simulation will start a server to serve simulation-related requests.
+	 * if XServer is not added in the headless run command, then it will run the simRun configured in the simRun
+	 *	complex simulations will be configured in the simConfig, and launch using the methods in simRun
+	 */
+	public static String serverMode;
+	
+	/**
+	 * Specifies a dataset for running a simulation.
+	 * If set, the simulation will be initialized from the given dataset.
+	 */
+	public static String fromDataset;
+	
+
+	/**
+	 * Phase of the simulation in progress.
+	 * This is a custom argument used for specialized simulation processes (like DHS workflows).
+	 */
+	public static String phase;
+	
+	/**
+	 * Path to the simulation instance XML file.
+	 * This file provides the necessary configuration for running a specific simulation scenario.
+	 */
+	public static String request;
+
+	public static void init() {
+		ModelArgs.modelPath = commandLineArgs.getRawProperty("modelPath");
+		ModelArgs.modelScenarioPath = commandLineArgs.getRawProperty("modelScenarioPath");
+		ModelArgs.shootArchitecturePath = commandLineArgs.getRawProperty("shootArchitecturePath");
+		
+		ModelArgs.outputPath = commandLineArgs.getRawProperty("outputPath");
+		ModelArgs.headless = commandLineArgs.getRawProperty("headless");
+		ModelArgs.runEndSteps = commandLineArgs.getRawProperty("runEndSteps");
+		ModelArgs.shadingFactor = commandLineArgs.getRawProperty("shadingFactor");
+		
+		String resetArg = commandLineArgs.getRawProperty("reset");
+		if (resetArg != null && !resetArg.isEmpty()) {
+			ModelArgs.reset = resetArg;
+		}
+		println("resetArg: " + resetArg + " reset: " + reset);
+		
+				
+	try {
+		String nCoresStr = commandLineArgs.getRawProperty("nCores");
+		if (nCoresStr != null) {
+			nCoresStr = nCoresStr.trim();
+			if (nCoresStr.length() > 0 && !"null".equalsIgnoreCase(nCoresStr)) {
+				nCores = Integer.valueOf(nCoresStr).intValue(); // 1.5 compatible
+			} else {
+            ModelArgs.nCores = Runtime.getRuntime().availableProcessors(); // Default to available cores
+            println("nCores not provided. Defaulting to: " + ModelArgs.nCores);
+        }
+	    } else {
+            ModelArgs.nCores = Runtime.getRuntime().availableProcessors(); // Default to available cores
+            println("nCores not provided. Defaulting to: " + ModelArgs.nCores);
+        }
+		} catch (NumberFormatException e) {
+			println("Invalid value for nCores. Using 1 core as fallback.");
+			ModelArgs.nCores = 2; // Fallback to a single core if parsing fails
+		}
+				
+		ModelArgs.testMode = commandLineArgs.getRawProperty("runTests");
+		ModelArgs.validationMode = commandLineArgs.getRawProperty("runValidationTests");
+		ModelArgs.serverMode = commandLineArgs.getRawProperty("server");
+		ModelArgs.fromDataset = commandLineArgs.getRawProperty("fromDataset");
+		
+		//dhs arguments
+		ModelArgs.phase = commandLineArgs.getRawProperty("phase");
+		//the simulation instance xml file
+		ModelArgs.request = commandLineArgs.getRawProperty("request");
+
+		ModelArgs.modelOptions = commandLineArgs.getRawProperty("modelOptions"); // Deprecated
+		if (ModelArgs.phase != null && ModelArgs.modelOptions != null)
+		{
+			println("*** Warning ***: using (deprecated) commandline model options file specifier: " + ModelArgs.modelOptions);
+			println("in conjunction with DHS model phase: " + ModelArgs.phase);
+			
+
+			boolean strict_commandline_options = true;
+			if (strict_commandline_options)
+			{
+				println("... terminating execution.");
+				System.exit(1);
+			} else {
+				println("... ambiguous model.options handling may cause errors.");
+				println("... use model options passed via the simulation request instead.");
+			}
+		}
+
+
+    
+		if(ModelArgs.modelPath == null) { 
+			MAINPATH = Library.getWD() + "/../";
+			assignPath();
+		} else { 
+			MAINPATH = ModelArgs.modelPath; 
+			assignPath();
+		}
+		if (ModelArgs.modelScenarioPath != null) {
+			PATH_SCENARIOS = ModelArgs.modelScenarioPath + "/";
+		}
+		if (ModelArgs.outputPath != null) {
+			PATH_OUTPUT = ModelArgs.outputPath + "/";
+		}
+	}
+	
+}
+
+/**
+ * Executes the main simulation logic or related tasks based on the input arguments.
+ * <p>
+ * This method interprets command line arguments to determine the mode of operation.
+ * Depending on the arguments, it might:
+ * - Run unit tests and output results to an XML file.
+ * - Run validation tests.
+ * - Run a simulation using a given dataset.
+ * - Launch a server instance.
+ * - Execute the default simulation logic.
+ * </p>
+ * <p>
+ * After executing the desired task, the application is terminated.
+ * </p>
+ *
+ * @param info Auxiliary information that might be needed for the run. Currently unused.
+ */
+		 
+protected void run(Object info) {
+//public void test() {  //on local UI environment
+
+	// BasicMinervaHelper minerva = new BasicMinervaHelper("dhs-simulation-artifacts");  // (global)
+
+	ModelArgs.init();
+
+	println("modelPath: " + ModelArgs.modelPath);
+
+	if (ModelArgs.phase != null && ModelArgs.request != null) {
+		println("running on DHS platform.");
+		println("sim request: " + ModelArgs.request);
+
+		String xmlFilePath = MAINPATH + ModelArgs.request;
+		// In GroIMP, you might use a different method to parse XML, depending on the available API.
+		// The following is a hypothetical example as the actual method would depend on GroIMP's XML parsing capabilities.
+		
+		RequestHandler.init(xmlFilePath);
+		println("FruitCropXL_water_OID: " + CacheManager.FruitCropXL_water_OID);
+		
+		stepwiseOutput = true;
+
+		if (ModelArgs.phase.equals("run")) {
+			runModelPhase();
+		} else if (ModelArgs.phase.equals("prep")) {
+			prepModelPhase();
+		} else if (ModelArgs.phase.equals("post")) {
+			postModelPhase();
+		} else if (ModelArgs.phase.equals("control")) {
+			controlModelPhase();
+		}
+		else {
+			println("Error: invalid phase mode '" + ModelArgs.phase + "'"); // FIXME: check how to send errors to the DHS Platform, e.g: RunTimeExceptions
+			System.exit(1); // TODO: check if this exit code is a correct error code for the DHS Platform
+		}
+	} else { // Default case as existing scripts calling the model do not pass a phase or request
+		runStandalone();
+	}
+
+	println("Ending the model execution");
+	System.exit(0);
+}  
+
+/**
+ * Preparation model phase for the DHS Platform.
+ */
+private void prepModelPhase() {
+	println(MODEL_ID + ": Running prep model phase");
+	CacheManager.registerStateVariables();
+/* 	double[] waterFlux = {0.1, 0.2, 0.3, 0.3};
+	cacheCom.writeWaterUptake(step, waterFlux); */
+}
+
+
+/**
+ * Run model phase for the DHS Platform.
+ */
+protected void runModelPhase() {
+	if (printFlag) { println(MODEL_ID + ": Running run model phase"); }
+	keepTable = false;
+	setSeed(12345679);
+
+    // String scenario_name = "default";
+    
+    String pfx_plant_level = PATH_OUTPUT + scenario_name + "/plant-level-" + scenario_name + "-step-";
+    String pfx_field_level = PATH_OUTPUT + scenario_name + "/field-level-" + scenario_name + "-step-";
+    String oid_pl;				// plant-level
+    String oid_fl;				// field-level
+    String oid_pl_series;
+    String oid_fl_series;
+    String oid_sim_series;
+    String oid_vis_series;
+    String of_3D_scene;
+    String oid_3D_scene;
+
+	//reset is NEEDED to start the model properly
+	if("true".equalsIgnoreCase(ModelArgs.reset) || ModelArgs.reset.isEmpty() || ModelArgs.reset == null) {
+		reset();
+	}
+	// boolean useModelToModelComms = true; // TODO: check how this is determined
+	RootBase rb1 = first((* p:RootBase, (p.plantNumber == 1)*)); 
+
+	// used when the model is a plugin model as part of a larger simulation
+	// Note: this only runs the model steps (no control loop)
+	if (printFlag) { println(" Running as sub-model: " + MODEL_ID); }
+	ModelInterface modelInterface = new ModelInterface(MODEL_ID);
+	if (printFlag) { println(" ... FruitCrop submodel setup complete, entering wait loop"); }
+
+	oid_pl_series = CacheManager.plant_level_series;      // used as an oid enumeration prefix 
+	oid_fl_series = CacheManager.field_level_series;
+	oid_vis_series = CacheManager.visualisation_series;             // currently only one output visualisation file type per simulation
+	oid_sim_series = CacheManager.FruitCropXL_water_OID;  // we set the artifact series id as the simulation id
+
+	boolean synchronous = false;   // set asynchronous (non-blocking) data uploads.
+
+	int dhs_step;
+	while (true) {
+		if (printFlag) { println("main.rgg (run): waiting for step"); }
+		RunStepArgs runStepArgs = modelInterface.waitForStep();
+		dhs_step = runStepArgs.i; 
+	
+		inputSoilWaterPotential = false;
+		useSoilWaterBalanceModel = true;
+
+		// ======== Read in values of state variables from previous step
+		CacheManager.readSoilWaterContent(dhs_step-1); 
+
+		println(" soilWaterContentArray[0]: " + soilWaterContentArray[0] +
+				"\n soilWaterContentArray[1]: " + soilWaterContentArray[1]);
+		//for the first step, it could be zero
+		validateSoilWaterContent(soilWaterContentArray);
+		
+		/**
+		 * ======== Run one step
+		 * the groimp model has step 0 to do the initiation
+		 * update the soil water status
+		 */
+		[
+			s:Soil ::> { 
+				s.updateSoilWaterStatus();
+				//println("waterPotential of layer" + s.layer + ": " + s.waterPotential);
+				//println("waterContent of layer" + s.layer + ": " + s.waterContent);
+			}
+			
+		] 
+		
+		run();		
+	
+		println("dhs step: " + (dhs_step) + " rb1.waterUptake_mm " + rb1.waterUptake_mm[0]);
+		CacheManager.writeWaterUptake(dhs_step, rb1.waterUptake_mm);
+		
+		// ======== Check water uptake state variables were written
+		CacheManager.readWaterUptake(dhs_step);	
+		println(" waterUptake_1: " + CacheManager.waterUptake_1 +
+				"\n waterUptake_3: " + CacheManager.waterUptake_3);
+		
+		oid_pl = oid_pl_series + "." +  Integer.toString(step);
+		oid_fl = oid_fl_series + "." +  Integer.toString(step);
+
+		minerva.m_store(pfx_plant_level + Integer.toString(step) + ".csv", "FruitCropXL-plant-level", oid_pl, oid_sim_series);
+		minerva.m_store(pfx_field_level + Integer.toString(step) + ".csv", "FruitCropXL-field-level", oid_fl, oid_sim_series);
+
+		
+		if (hourOfDay == 12) {
+			of_3D_scene = PATH_OUTPUT + scenario_name + "/" + Integer.toString(year) + "-" + Integer.toString(dayOfYear) + "-12." + output3DSceneFormat;
+			oid_3D_scene = CacheManager.getVisualisationSeries(output3DSceneFormat) + "." + Integer.toString(step);
+
+			// println("3D scene file: " + of_3D_scene);
+			// println("3D scene oid: " +  oid_3D_scene);
+			minerva.m_store(of_3D_scene, "FruitCropXL-"+output3DSceneFormat, oid_3D_scene, oid_sim_series);
+		}
+
+		println("");
+		
+		try {
+		 	if (shouldOutputXEG(step, outputFreq3DScene) && daytime) {
+				println("xeg output : " + year + "-" + dayOfYear);
+			}
+
+		} catch (Exception p) {
+		     println( "exception displaying status:" +p.getMessage());
+		}
+
+
+		modelInterface.notifyStepComplete(true);
+
+		// ======== Handle output tables
+		for (int i = 0; i < TABLES.length; i++) {
+			 try {
+				if (outputTables.pbID > 0) {
+					
+					PlantBase pb = getPlantBase();  // e.g., graph().getNodeForId(pbID)	
+					// Add any logic here that uses `pb`
+					writeTablesToDataModels(TABLES[i], pb);
+					CacheManager.write_pb_variables(step, pb);
+
+				}
+			} catch (Exception e) {
+				//println("⚠️ Failed to retrieve or process PlantBase: " + e.getMessage());
+			}
+		}
+		try {
+			if (outputTables.rbID > 0) {
+				RootBase rb = getRootBase();  // e.g., graph().getNodeForId(rbID)
+				CacheManager.write_rb_variables(step, rb);
+			}
+		} catch (Exception e) {
+		    println("⚠️ Failed to retrieve or process RootBase: " + e.getMessage());
+		}
+		try {
+			if (outputTables.fbID > 0) {
+				FieldBase fb = getFieldBase();  // e.g., graph().getNodeForId(fbID)
+				CacheManager.write_fb_variables(step, fb);
+			}
+		} catch (Exception e) {
+		    println("⚠️ Failed to retrieve or process FieldBase: " + e.getMessage());
+		}
+		try {
+			CacheManager.write_misc_outputs(step);
+		} catch (Exception e) {
+		    println("⚠️ Failed to write miscellaneous outputs: " + e.getMessage());
+		}
+		//it seems it needs to wait the updateTable step finished and then to get the table value
+		//Better to use the assign value part to get a new array
+		//println(" test " + OUTPUT_TABLES[0].resolve().getCell(0,1).getX());
+	}
+
+	System.exit(0);
+}
+
+protected void runStandalone() {
+
+	int runEndSteps = 1;
+	
+	// Assign model argument values
+
+	if (ModelArgs.modelOptions != null) {
+		FILE_NAME_MODEL_OPTIONS = ModelArgs.modelOptions;
+		if("true".equalsIgnoreCase(ModelArgs.reset)) {
+		  reset();
+		}
+	}
+	
+	Integer endSteps = parseIntOrNull(ModelArgs.runEndSteps);
+	if (endSteps != null) {
+		runEndSteps = endSteps.intValue();
+		// optionally: System.out.println("runEndSteps=" + runEndSteps);
+	} else {
+		// keep default or set a fallback
+		runEndSteps = 1;
+	}
+
+
+	// Determine run modes
+
+	if (ModelArgs.testMode != null) {
+		runBasicUnitTest();
+	} else if (ModelArgs.validationMode != null) {
+		runValidation();
+	} else if (ModelArgs.fromDataset != null) {
+		println("Running simulation from dataset.");
+		if("true".equalsIgnoreCase(ModelArgs.reset)) {
+		  reset();
+		}
+		new DatasetSimulationRunner().runSimulation();
+	} else if (ModelArgs.serverMode != null) {
+		println("Starting server.");
+		if("true".equalsIgnoreCase(ModelArgs.reset)) {
+		  reset();
+		}
+		launchServer();
+	} else if (ModelArgs.runEndSteps != null) {
+		// Running scenarios from a list and output tables for each scenario
+		if(runEndSteps > 1 && runEndSteps < 10) {
+			useShadingFactor = true;
+		}
+		if("true".equalsIgnoreCase(ModelArgs.reset)) {
+		  reset();
+		}
+		runEnd(runEndSteps); 
+	} else {
+		// println("Starting simulation...");
+		if("true".equalsIgnoreCase(ModelArgs.reset)) {
+		  reset();
+		}
+		simRunService.simRun();
+	}
+}
+
+/**
+ * Control model phase for the DHS Platform.
+ */
+private void controlModelPhase() {
+	// control loop for DHS zone execution, used when the Soil model is
+	// running as the main simulation loop controller
+	// Note: this only runs the control loop
+	println(RequestHandler.request_oid);
+	println(MODEL_ID + ": Running as zone controller");
+	ZoneControl zone = new ZoneControl(RequestHandler.request_oid, MODEL_ID);
+	println(" ... initialising zone: " + MODEL_ID);
+
+	Thread.sleep(200); // TODO: Need to ask why this is necessary as this was present in the SWM
+	zone.init();
+	
+	//reset is NEEDED to initialize the model options
+	if("true".equalsIgnoreCase(ModelArgs.reset)) {
+		  reset();
+	}
+	
+	// Note: step 0 is for initial conditions
+        println("halt day:" + halt);
+	for (int step = 1; step <= 24 * halt ; step++) { // Hourly model: run exactly 24 zone steps per halt day.
+//	for (int step = 1; step <= 48; step++) { // TODO: Currently run control loop for a max of 10 steps, use halt instead (similar to runEnd)
+		// TODO: read updated data to simulate the next step. Do not initialise data structures here.
+		println("Run step: " + step);
+		// writeTimeCode();  write the timecode for current step to the output table.
+		boolean success = zone.runStep(step, step, 1.0);
+
+		if (!success) {
+			println("DHS zone error running step " + step);
+			break;
+		}
+	}
+	zone.exit();
+}
+
+
+/**
+ * Post model phase for the DHS Platform.
+ */
+private void postModelPhase() {
+	println("Running post model phase");
+}
+
+
+
+/**
+ * Safely solves all pending parallel tasks managed by the {@link PTaskManager}.
+ * <p>
+ * This method guarantees that {@link PTaskManager#solve()} always runs in a valid
+ * {@link GraphState} context, which is required for any graph operations in GroIMP.
+ * It distinguishes between two execution cases:
+ *
+ * <ul>
+ *   <li><b>Active GraphState (main simulation thread)</b> –
+ *       Executes {@link #taskManager}.solve() directly, allowing multi-threaded solving.</li>
+ *   <li><b>No GraphState (background or worker thread)</b> –
+ *       Wraps {@link #taskManager}.solve() in a
+ *       {@link de.grogra.util.LockProtectedRunnable} and calls
+ *       {@link de.grogra.graph.Graph#execute(de.grogra.util.LockProtectedRunnable, boolean)}
+ *       to temporarily attach a GraphState and execute the task in a locked context.
+ *       <b>Single-threaded solving</b> is enforced in this mode to prevent crashes
+ *       from detached solver threads (e.g., {@code NonGraphLockedSolver}).</li>
+ * </ul>
+ *
+ * <p>
+ * This method is synchronized to avoid simultaneous execution by multiple threads,
+ * which could cause concurrent modifications of the graph. The use of
+ * {@code graph.execute()} with {@link LockProtectedRunnable} ensures that:
+ *
+ * <ol>
+ *   <li>The graph is locked during execution to prevent concurrent modifications.</li>
+ *   <li>A temporary {@link GraphState} is pushed for the current thread.</li>
+ *   <li>Tasks execute safely without triggering
+ *       {@code IllegalStateException: No active GraphState found}.</li>
+ *   <li>Solver threads will not throw {@link NullPointerException} in headless/HPC runs,
+ *       because single-thread fallback is used when necessary.</li>
+ *   <li>The lock and temporary GraphState are automatically released afterward.</li>
+ * </ol>
+ *
+ * <b>Usage:</b>
+ * <pre>
+ *     // Safely solve tasks from any thread, in headless or interactive mode
+ *     MySimulationClass.solveTasksSafely();
+ * </pre>
+ *
+ * This implementation is HPC- and headless-friendly, avoiding any dependency on
+ * UI event loops or {@code runLater} scheduling.
+ *
+ * @see PTaskManager#solve()
+ * @see GraphState#current(Graph)
+ * @see de.grogra.graph.Graph#execute(de.grogra.util.LockProtectedRunnable, boolean)
+ */
+public synchronized static void solveTasksSafely() {
+    Context ctx = de.grogra.rgg.Library.workbench();
+    Workbench wb = ctx != null ? ctx.getWorkbench() : null;
+    Graph graph = (wb != null && wb.getRegistry() != null)
+            ? wb.getRegistry().getProjectGraph() : null;
+
+    if (graph == null) {
+        println("No project graph available.");
+        return;
+    }
+
+    GraphState gs = GraphState.current(graph);
+
+    try {
+        if (gs == null) {
+            // No active GraphState: execute safely in protected context
+            graph.execute(new LockProtectedRunnable() {
+                @Override
+                public void run(boolean write, Lock lock) {
+                    taskManager.setSolverCount(1);
+                    taskManager.solve();
+
+                    // Reset to prevent stale threads
+                    //Tasks already queued are executed.
+                    //Thread pool is cleaned for next iteration.
+                    //You avoid NullPointerException or AbstractMethodError caused by early reassignment.
+
+                    taskManager = new PTaskManager();
+                }
+            }, true);
+        } else {
+            taskManager.setSolverCount(ModelArgs.nCores);
+            taskManager.solve();
+        }
+    } catch (Exception e) {
+        println("Exception during task solving: " + e.getMessage());
+        e.printStackTrace();
+    }
+}
+
+
+/**
+ * Runs the simulation until a predefined stopping condition is met.
+ * <p>
+ * The simulation continues to run hourly steps until either the number of steps reaches 24 times the value of 'halt'
+ * or the simulation is manually halted by setting 'continueRunning' to false.
+ * </p>
+ */
+// ------------------------ helpers ------------------------
+/** Hard-exit the JVM with an exit code, after best-effort GSZ save. */
+private void hardExitNow(int code, String reason, boolean trySave) {
+    try {
+        System.err.println("FATAL: " + reason + "  (exit=" + code + ")");
+        if (trySave && saveGsz == true) {
+            String fullFilePath = PATH_OUTPUT + outputTable_name + ".gsz";
+            try {
+                workbench().save(false);
+                saveProjectAs(new java.io.File(fullFilePath));
+                System.err.println("Saved GSZ to: " + fullFilePath);
+            } catch (Throwable t) {
+                System.err.println("Save failed during hard-exit: " + t);
+            }
+        }
+    } catch (Throwable t2) {
+        // swallow
+    }
+    System.exit(code);
+}
+
+/** Start a watchdog that hard-exits if no progress heartbeat occurs within stallMs. */
+private Thread startWatchdog(final long stallMs, final int exitCode, final String tag,
+                             final boolean[] doneFlag, final long[] lastBeatRef) {
+    if (stallMs <= 0L) return null;
+    Thread wd = new Thread(new Runnable() {
+        public void run() {
+            while (!doneFlag[0]) {
+                try { Thread.sleep(5000L); } catch (InterruptedException ie) { /* ignore */ }
+                long now = System.currentTimeMillis();
+                long last = lastBeatRef[0];
+                if (!doneFlag[0] && (now - last) > stallMs) {
+                    hardExitNow(exitCode, "Watchdog("+tag+"): no progress for "+(now-last)+" ms", true);
+                    return;
+                }
+            }
+        }
+    }, "runEnd-watchdog-"+tag);
+    wd.setDaemon(true);
+    wd.start();
+    return wd;
+}
+// ---------------------- end helpers ----------------------

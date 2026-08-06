@@ -1,0 +1,423 @@
+import static updatesBase.*;
+import static fieldBase.*;
+import static absOrgan.*;
+import static leaf.*;
+import static shoot.*;
+import static plantBase.*;
+import static charts.*;
+import static outputTables.*;
+import static environment.*;
+import static globalParameters.*;
+import static plantParameters.*;
+import static modelOptions.*;
+import static lightInterception.*;
+import static initialConditions.*;
+import static phenology.*;
+import static soil.*;
+import static structuralVariation.*;
+import static berryYield.*;
+import static carbonTransport.*;
+import static fruitBase.*;
+import static budBase.*;
+import static main.*;
+import static pruning.*;
+import static extraTools.*;
+import static interfaces.*;
+import java.util.Arrays;
+
+public class UpdatesGrapevine extends UpdatesService {
+    public void updates() {[
+        /**
+         * update the plant base biomass and surface area
+         */
+            pb:PlantBase ::>  				
+            {   
+                pb.updateBiomass();
+                pb.updateSurfaceArea();
+            }
+            
+        /**
+         * update the environmental conditions
+         * Update environment conditions such as solar position, air temperature, etc.
+         */
+            {
+                updateEnvironment();
+                updateSolarPosition(year, month, dayOfMonth, hourOfDay, 
+                                            latitude, longitude, elevation,airPressure, Ta);
+                if(hourOfDay == 0) {
+                    day++;
+                    if(inputEnvironmentCondition == false) dayOfYear++; 
+                    }
+                tt = tt + deltaAgeGdd(Ta, baseT, DT);
+            /* 	 println(" Year " + year + " dayOfYear " + dayOfYear + " hourOfDay " + hourOfDay + "\n" 
+                    + " step " + step + " daytime " + daytime + " degree days, " + Math.round(tt * 100.0)/100.0); */
+            }
+            
+         s:Soil ::> { 
+			s.updateSoilWaterStatus();
+			//if (printFlag) { println("waterPotential of layer" + s.layer + ": " + s.waterPotential); }
+			//if (printFlag) { println("waterContent of layer" + s.layer + ": " + s.waterContent); }
+		}   
+            
+        /**
+         * Calculates the age for each organ in the model.
+         */
+            o:Organ ::> 
+            {
+                o.calcAge();
+                o.update3D();
+            }
+
+            l:Leaf ::>
+            {
+                l.earlyLeafFallbackUsedThisStep = false;
+            }
+            
+            
+	        /** Compute, populate and commit light interception through the shared backend service. */
+	            {
+	                runLightInterceptionStep(true);
+	                refreshLightInterceptionSnapshotProvenanceIfNeeded();
+	            }
+
+	        /**
+	         * Checks for organs with NaN Biomass.
+	         */
+            g:GrowingOrgan::>
+            {
+            if(Double.isNaN(g.biomass)) {
+            				if (printFlag) { println("organ info " + g.toString()); }
+                            if (printFlag) { println(" biomass NA " + g.ID + " _ " +  g.cordonNumber + "_" + g.nodeNumber + "_" + g.rank ); }
+                    }
+            if(Double.isNaN(g.unloading)) {
+            				if (printFlag) { println("organ info " + g.toString()); }
+                            if (printFlag) { println(" biomass NA " + g.ID + " _ " +  g.cordonNumber + "_" +  "_" + g.nodeNumber + "_" + g.rank); }
+                    }        
+            }
+            
+            Internode g:GrowingOrgan, (Double.isNaN(g.biomass) || Double.isNaN(g.unloading)) ==> ;
+	              
+	        /**
+	         * Calculates potential photosynthesis and transpiration for all visible organs that meet certain conditions.
+         */
+           {
+          	//tic();
+			[ 
+				l:Leaf, (l.shouldCalcAnet() && lightInterceptionComputed && calcPotential_PT == true) ::> 
+				{     
+					taskManager.add(l.pptask);
+				}
+				{solveTasksSafely();}
+
+				l:Leaf, (l.shouldUseEarlyLeafPhotosynthesisFallback()) ::>
+				{
+					l.calcEarlyLeafPhotosynthesisFallback();
+				}
+				
+				
+					l:Leaf, (isLeafHydraulicBypassTestScenario()) ::>
+                {   
+					l.calcActualTranspiration();
+					l.calcActualPhotosynthesisAndTranspiration();
+                 }
+			]
+			//println("Anet: "+toc());
+         } 
+
+        /**
+         * Update the plant base, specifically focusing on carbon assimilation.
+         */
+            pb:PlantBase, (calcPotential_PT == true) ::> 
+            {
+                pb.calcAge();
+                pb.updateCarbonAssimilation();
+                
+            } 
+            
+            
+        /**
+         * Updates soil water potential and conductivity.
+         * Calc actual photosynthesis and water flux
+         */
+        {
+            if(calcPotential_PT == true && calcActual_PT == true) {
+            [
+                s:Soil ::>
+                {
+                    s.calcSoilWaterPotential(s.relativeWaterContent);
+                    s.calcSoilConductivity();
+                    s.calcSolubleN();
+                }
+                
+                pb:PlantBase ::> 
+                {
+                    pb.updateWaterFlux();
+                    pb.getRootBase().updateInput();
+                    pb.getRootBase().calcfluxAllocation();
+                    
+					if(pb.shouldCalcWaterFlux() && !isLeafHydraulicBypassTestScenario()) {
+                        pb.calcActualWaterFlux();
+                    } 
+                }
+                
+                 l:Leaf ::> 
+                {   
+                    if(l.earlyLeafFallbackUsedThisStep)
+                    {
+                        // Early-leaf fallback already calculated provisional potential and actual photosynthesis.
+                    }
+                    else if(l.shouldCalcAnet())
+                    {
+                        l.calcActualPhotosynthesisAndTranspiration();
+                        //taskManager.add(l.antask);
+                    } else {
+                        l.updateLeafStatusAtNight();
+                    }
+                }
+                //{solveTasksSafely();}
+
+            pb:PlantBase ::>
+				{
+					pb.updateCarbonAssimilation();
+				}
+
+				]
+				}
+        }
+
+        /**
+         * Update the carbon allocation 
+         */
+        {
+            if(calcPotential_PT == true && calcActual_PT == true && 
+               calcCarbonAllocation == true && !organGrowthMethod.equals("TempLimited")) {
+            [
+      /*       //need to be careful for this		
+            g:GrowingOrgan ::>
+            {
+                //in the modules organ carbon demand and loading is in unit of mg, in Alla's CTRAM it is in g/h
+                //converting from carbon potential cp to carbon concentration		   
+                double cc = Math.sqrt(2.0 * Initial_cp);
+                g.calcPTCTRAM(cc); 
+            }
+             */
+            
+            //calculate the carbon partitioning and solving the phloem carbon concentration 
+            pb:PlantBase ::> 
+            {
+                pb.updateCarbonAssimilation();
+                if(useCTRAM == true) {
+                    pb.updateCarbonTransport();
+                    
+                } else {
+                	pb.calcPhloemSugarConcentration();
+                }
+              if(calcNUptake) {
+                	pb.getRootBase().updateNitrogenUptake();
+                }
+            } 
+            
+            //update the nitrogen uptake
+            /* r:FineRoot ::>
+            {
+                //r.calcNitrogenUptake();
+            }  */
+            
+            ]
+            }
+        }
+        
+               //update the status of all growing organ, e.g. biomass, carbon concentration
+       //Please only call the update function once during one step, else organ state variables will be over updated.
+       {
+        [
+        g:GrowingOrgan ::> 
+        {
+            taskManager.add(g.gutask);
+        }
+        ]
+            solveTasksSafely();
+        }
+
+        {
+            if (enableCarbonDeficitLeafRemoval) {
+            [
+            l:Leaf ::>
+            {
+                l.updateCarbonSelfBalanceHistory();
+            }
+            ]
+            }
+        }
+
+        {
+            if (enableCarbonDeficitLeafRemoval && hourOfDay == leafCarbonDeficitRemovalHour) {
+            [
+            Petiole (-->)+ l:Leaf, (l.shouldRemoveForCarbonDeficit()) ==>>
+            {
+                l.carbonDeficitRemoved = 1;
+                carbonDeficitLeafRemovalOccurred = true;
+            };
+            ]
+            }
+        }
+
+        pb:PlantBase ::>
+        {
+            if (pb.getRootBase() != null) {
+                pb.getRootBase().updateFineRootTurnoverAndExudation();
+            }
+        }
+
+        /**
+         * Accumulates organ assimilates, 
+         * and update biomass compound and sink strengths for the whole plant.
+         */
+            pb:PlantBase ::> 
+            {   
+                pb.updateAbsorbedRadiation();
+                pb.updateBiomass();
+                pb.updateNSC();
+                pb.updateSurfaceArea();
+                if (printFlag) { println("plant fabs " + pb.fabs); }
+                //if (printFlag) { println("plant leaf area " + pb.leafArea); }
+                pb.updateHeight();
+                //pb.updateNPool();
+                pb.updateCarbonPartition();
+                pb.updateSupplyDemand();
+            
+            } 
+            
+            fb:FieldBase, (fb.isReportable) ::>
+            {
+                fb.updateLai();
+                fb.updateHarvest();
+                fb.updateAbsorbedRadiation();
+                fb.updateBiomass();
+            }
+
+        /**
+         * Changes the angle between petiole and leaf
+         */
+            jm:JMidrib, (useStaticArc == false && useLeafAngleOpt == false) ::>
+            {
+                
+                jm[angle] = jm.updateDeclinationAngle();
+            }
+                
+
+            
+        /**
+         * Updates the phenology stage for buds, apex, and berries.
+         * This function handles updates based on several conditions such as yield estimation and climate steps.
+         */		
+            {
+                if (usePhenology == true) {	
+                // Update phenology stage for bud
+                [
+                    bd:BudService ::>
+                {
+                    updateBudStage(bd);	
+                    if (useYieldEst == true && bd.budType == 2 ) {
+                        updateYieldFactors(bd);
+                    }
+                }
+                // Update phenology stage for apex
+                //only update phenology for the apex on main shoot
+                a:ApexService, (a.order == 0) ::>
+                {
+                    //updateFlowering(a);
+                    
+                    if (a.shouldProduceBunch() == true ) {
+                        if(useYieldEst == true) updateYieldFactors(a);
+                    }
+                }
+                    
+                // Update phenology stage for fruit
+                be:FruitService ::>
+                {
+                    updateBerryStage(be);
+                
+                    if (useYieldEst == true ) 
+                    {
+                        updateYieldFactors(be);
+                    }
+                }
+                
+                ]
+                }
+            }
+            
+            
+            g:GrowingOrgan,(organGrowthMethod.equals("TempLimited")) ::> 
+                {
+                    if(g.length < 0.1 && g.age < 10 && !(g instanceof Petiole))
+                        {
+                            g.length = g.length+ 0.01;
+                        }
+                    if(g.length < 0.06 && g.age < 10 && (g instanceof Petiole))
+                        {
+                            g.length = g.length+ 0.5 * 0.01;
+                        }
+                    g.update();        
+                }
+            
+            
+        /**
+         * Determine when bud should produce secondary shoot based on thermal time and soil water potential
+         * Initiate parameters for calculating organogenesis probabilities for primary axis
+         */	
+            a:ApexService, (useTrophicCompetition == true) ::>
+                a.updateOrganogenesisParams();
+                
+            bd:BudService, (useTrophicCompetition == true) ::>
+                bd.updateOrganogenesisParams();
+           
+         	/**
+		 * Rule for harvesting plants.
+		 * <p>
+		 * This rule is activated when a plant should be harvested.
+		 * </p>
+		 */
+		pb:PlantBase, (pb.shouldHarvest() == true) ::>
+		{
+			pb.harvest();
+		}
+		//double check to ensure fruit is removed safety
+		b:FruitService, (daysSinceWinterSolstice >= harvestDAWS) ==>> ;
+		
+		/**
+		 * Rule for pruning.
+		 * <p>
+		 * This rule is activated when pruning is enabled, it's the day of the year for pruning, and the plant has not been pruned yet.
+		 * </p>
+		 */
+		{
+			if (usePruning == true && dayOfYear == pruningDOY && hasBeenPruned == false) {
+				prune();    
+			}
+		}
+		         
+                
+        /**
+         * Updates the hour of the day after light calculation.
+         * This is necessary to correct the time of the day for display.
+         * The displayed hourOfDay in the run is the previous hourOfDay plus 1.
+         */
+            {
+                if(hourOfDay == 24) hourOfDay = 0;
+                if(useShootPositioning == true && step == 1) shootPositioning.initShootPos(); 
+                if(useShootPositioning == true && (step >= 2 && step <= 6)) shootPositioning.ApplyBend();
+            }  
+            
+                
+        /**
+         * Updates the hour of the day after light calculation.
+         * This is necessary to correct the time of the day for display.
+         * The displayed hourOfDay in the run is the previous hourOfDay plus 1.
+         */
+            {
+                if(hourOfDay == 24) hourOfDay = 0;
+	            }
+    ]}
+}

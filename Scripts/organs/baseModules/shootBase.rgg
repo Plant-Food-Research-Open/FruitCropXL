@@ -1,0 +1,533 @@
+import java.util.Arrays;
+import org.apache.commons.math3.analysis.function.*;
+import org.apache.commons.math3.exception.NoBracketingException;
+import org.apache.commons.math3.exception.TooManyEvaluationsException;
+import org.apache.commons.math3.exception.NumberIsTooLargeException;
+import org.apache.commons.math3.geometry.euclidean.threed.Vector3D;
+import org.apache.commons.math3.geometry.euclidean.threed.Rotation;
+
+import static main.*;
+import static archReader.*;
+import static plantBase.*;
+import static globalParameters.*;
+import static plantParameters.*;
+import static modelOptions.*;
+import static initialConditions.*;
+import static absOrgan.*;
+import static environment.*;
+import static rootSystem.*;
+import static extraTools.*;
+import static structuralVariation.*;
+import static soil.*;
+import static fruitBase.*;
+import static budBase.*;
+import static shootBase.*;
+
+import io.github.fruitcropxl.config.params.groups.*;
+import io.github.fruitcropxl.config.params.structures.*;
+
+/**
+ * Represents the base structure and attributes of a shoot in a plant model.
+ * This module encapsulates various parameters that define a shoot's characteristics,
+ * from its identifying information to its geometry and orientation.
+ * 
+ * <p>This class provides methods for initializing the shoot parameters and calculating 
+ * the type of each phytomer based on a hidden hybrid Markov/semi-Markov chain.</p>
+ */
+module ShootBase 
+{
+	/**
+	 * Keep saved GroIMP graphs compatible after shoot-base helper/signature changes so
+	 * reopening a project does not drop shader/object links.
+	 */
+	private static final long serialVersionUID = -3986201283658103699L;
+
+	/** Variables to uniquely identify shoot. */
+	 /** The plant number in the field.*/
+    int plantNumber;
+    /** The cordon identification of an organ.*/
+    int cordonNumber;
+    /** The node position of an organ on a cordon.*/
+    int nodeNumber;
+	/** Represents the phytomer rank of the organ. */
+	int rank;
+	/** Represents the cumulative phytomer number for the organ. */
+	int cpn;
+    /** order from xnode (1 = main stem (trunk), 2 for cordon, 3 for uprights, 4 for branches on the uprights) */
+	int order;
+	/** Identifier for Axis 1, which is the trunk. */
+	int axis1ID;
+	/** Identifier for Axis 2. Represents the cordon identification where an organ grows. */
+	int axis2ID;
+	/** Represents the node position of an organ on a cordon for Axis 3. */
+	int axis3ID;
+	/** Identifier for Axis 4. */
+	int axis4ID;
+	/** Identifier for Axis 5. */
+	int axis5ID;
+	/** Identifier for Axis 6. */
+	int axis6ID;
+	/** Identifier for Axis 7. */
+	int axis7ID;
+	/** Identifier for Axis 8. */
+	int axis8ID;
+	/** Identifier for Axis 9. */
+	int axis9ID;
+	/** check whether this is new shoot. used in shoot root ratio */
+	boolean newShoot = false;  
+	
+	
+	/** Azimuth angle of base of shoot measured in degrees from north. */
+	float azimuthAngle;
+	/** Elevation angle of base of shoot measured in degrees from horizontal. */
+	float basalElevation;
+	/** Difference between tangent angle at base and apex of shoot. */
+	float tangentDifference;
+	/** Ratio between length of shoot and average shoot length. */
+	float normalizedLength;
+	/** Proportion of leaf that accounts for half of curvature. */
+	float curvatureProportion;
+	/** Rotation angle for each internode indexed by rank. */
+	float[] shootInternodeAngle;
+	/** Length of each internode indexed by rank. */
+	float[] shootInternodeLength;
+	/** Rotation angle of each petiole indexed by rank. */
+	float[] petioleRotation;
+	/** Declination angle of each petiole indexed by rank. */
+	float[] petioleDeclination;
+	/** Declination angle of each leaf indexed by rank. */
+	float[] leafDeclination;
+	
+	/** Type of each phytomer (P0, P1, P2) indexed by rank. */
+	int[] phytomerTypes;
+	
+	/** Potential pytomer number and shoot length */
+	int phytomerNumber;  
+	/** Potential shoot length. Could be affected by management, like trimming */
+	float potentialLength;
+	float potentialShootBiomass; 
+	float potentialBiomass;
+	
+	 /******************************************************************/
+	 /** Parameters for shoot base for estimating potential biomass*/
+	 /******************************************************************/
+	 double meanShootDia = 4.2e-3;  // 5 mm
+	 double r1 = 0.6;	//proportion of leaves in the structural dry weight of leafy shoots		
+	 /** density of the shoot mg/cm3 */
+	 float SHOOT_DENSITY;
+	
+	/**
+	 * Initializes parameters to uniquely identify a shoot and calculates shoot parameters.
+	 * @param plantNumber The number representing the plant.
+	 * @param cordonNumber The number representing the cordon.
+	 * @param nodeNumber The number representing the node.
+	 */
+	void initiate(ApexService a)
+	{
+	
+		this.plantNumber = a.plantNumber;                                                 
+		this.nodeNumber = a.nodeNumber; 
+		this.cordonNumber = a.cordonNumber;
+		this.rank = a.rank;
+		this.cpn = a.cpn;
+		this.order = a.order;
+		this.axis2ID = a.axis2ID; 
+		this.axis3ID = a.axis3ID;
+		this.axis4ID = a.axis4ID;
+		this.axis5ID = a.axis5ID;
+		this.axis6ID = a.axis6ID;
+		this.axis7ID = a.axis7ID;
+		this.axis8ID = a.axis8ID;
+		this.axis9ID = a.axis9ID;
+		/** passing the phytomer number from the apex as it has been generated when it initiates from bud */
+		this.phytomerNumber = a.phytomerNumber;
+		this.newShoot = true;
+		this.potentialLength = a.potentialLength;
+		if (species.equals("apple")) {
+			double profiledPotentialLength_m = resolveAppleProfiledPotentialLength(a.shootType, a.budType, this.phytomerNumber);
+			if (!(Double.isNaN(profiledPotentialLength_m) || Double.isInfinite(profiledPotentialLength_m) || profiledPotentialLength_m <= 0.0)) {
+				this.potentialLength = (float) profiledPotentialLength_m;
+			}
+		}
+		
+		
+		/** Set the context for file name parameters*/
+		CategoryStore config = ((DocumentCategoryNameGroup) CONFIG.getGroup(FILE_NAME_PLANT_PARAMETERS, 
+			DocumentCategoryNameGroup.class)).getCategoryStore();
+
+		/** Configuration context for internode carbon-related parameters */
+		config.setCategoryContext("internode-carbon");
+		SHOOT_DENSITY = config.getDouble("SHOOT_DENSITY");
+		
+		
+		if(species.equals("grapevine")) {
+			// Generate shoot parameters from random distribution
+			generateShootParameters();
+			
+			// Parameters for internodes and leaves in arrays indexed by rank
+			shootInternodeAngle = Arrays.copyOf(singleShootInternodeAngle, singleShootInternodeAngle.length);
+			shootInternodeLength = Arrays.copyOf(singleShootInternodeLength, singleShootInternodeLength.length);
+			petioleRotation = Arrays.copyOf(singleShootPetioleRotation, singleShootPetioleRotation.length);
+			petioleDeclination = Arrays.copyOf(singleShootPetioleDeclination, singleShootPetioleDeclination.length);
+			leafDeclination = Arrays.copyOf(singleShootLeafDeclination, singleShootLeafDeclination.length);
+			
+			// Store parameters for whole shoot
+			azimuthAngle = singleAzimuthAngle;
+			basalElevation = singleBasalElevation;
+			tangentDifference = singleTangentDifference;
+			normalizedLength = singleNormalizedLength;
+			curvatureProportion = singleCurvatureProportion;
+			
+		}
+		calcPotentialGrowth();
+	}
+	
+
+	
+	
+	/**
+	 * Initializes parameters to uniquely identify a shoot and calculates shoot parameters.
+	 * @param plantNumber The number representing the plant.
+	 * @param cordonNumber The number representing the cordon.
+	 * @param nodeNumber The number representing the node.
+	 * this was the original method used in the initiation when there is no apex
+	 */
+	void initiate(int plantNumber, int cordonNumber, int nodeNumber)
+	{
+		
+		/** Set the context for file name parameters*/
+		CategoryStore config = ((DocumentCategoryNameGroup) CONFIG.getGroup(FILE_NAME_PLANT_PARAMETERS, 
+			DocumentCategoryNameGroup.class)).getCategoryStore();
+
+		/** Configuration context for internode carbon-related parameters */
+		config.setCategoryContext("internode-carbon");
+		SHOOT_DENSITY = config.getDouble("SHOOT_DENSITY");
+		
+		
+		// Set parameters for uniquely identifying shoot
+		this.plantNumber = plantNumber;
+		this.cordonNumber = cordonNumber;
+		this.nodeNumber = nodeNumber;
+		this.newShoot = true;
+		if (useStructuralVariation == true) {
+			// Generate shoot parameters from random distribution
+			generateShootParameters();
+			
+			// Parameters for internodes and leaves in arrays indexed by rank
+			shootInternodeAngle = Arrays.copyOf(singleShootInternodeAngle, singleShootInternodeAngle.length);
+			shootInternodeLength = Arrays.copyOf(singleShootInternodeLength, singleShootInternodeLength.length);
+			petioleRotation = Arrays.copyOf(singleShootPetioleRotation, singleShootPetioleRotation.length);
+			petioleDeclination = Arrays.copyOf(singleShootPetioleDeclination, singleShootPetioleDeclination.length);
+			leafDeclination = Arrays.copyOf(singleShootLeafDeclination, singleShootLeafDeclination.length);
+			
+			// Store parameters for whole shoot
+			azimuthAngle = singleAzimuthAngle;
+			basalElevation = singleBasalElevation;
+			tangentDifference = singleTangentDifference;
+			normalizedLength = singleNormalizedLength;
+			curvatureProportion = singleCurvatureProportion;
+		}
+		
+		calcPhytomerTypes();
+	}
+	
+	
+	/**
+	 * Initializes an array of phytomer types (P0, P1, P2) for each phytomer in the shoot. 
+	 * Phytomer types are determined using the hidden hybrid Markov/semi-Markov chain from Louarn et al., 2007.
+	 */
+	void calcPhytomerTypes()
+	{
+		phytomerTypes = new int[organSize.length];
+		int rank = 1;
+		int zone = 1;
+		float p = Math.random();
+		while (zone == 1 && rank < phytomerTypes.length) {
+			phytomerTypes[rank] = 0;
+			if (rank == 3 && p < 0.28 ||
+				rank == 4 && p < 0.75 ||
+				rank == 5 && p < 0.97 ||
+				rank == 6) {
+				rank++;
+				phytomerTypes[rank] = 1;
+				zone++;
+			}
+			rank++;
+		}
+		while (zone == 2 && rank < phytomerTypes.length) {
+			if (phytomerTypes[rank-1] == 0) {
+				float q = Math.random();
+				if (q > 0.43) {
+					phytomerTypes[rank] = 1;
+					zone++;
+				} else {
+					phytomerTypes[rank] = 0;
+				}
+			} else {
+				phytomerTypes[rank] = (phytomerTypes[rank-1] + 1) % 3;
+			}
+			rank++;
+		}
+		while (zone == 3 && rank < phytomerTypes.length) {
+			phytomerTypes[rank] = (phytomerTypes[rank-1] + 1) % 3;
+			rank++;
+		}
+	}
+	
+	/**
+	 * Determines if this ShootBase is the base of the shoot to which the provided organ belongs.
+	 * @param organ The organ to check.
+	 * @return True if this ShootBase is the base of the shoot of the given organ, false otherwise.
+	 */
+	boolean isBaseOf(Organ organ) {
+		if (organ == null) return false;
+		return this.plantNumber == organ.plantNumber &&
+			   this.cordonNumber == organ.cordonNumber &&
+			   this.nodeNumber == organ.nodeNumber &&
+			   this.axis2ID == organ.axis2ID &&
+			   this.axis3ID == organ.axis3ID &&
+			   this.axis4ID == organ.axis4ID &&
+			   this.axis5ID == organ.axis5ID &&
+			   this.axis6ID == organ.axis6ID &&
+			   this.axis7ID == organ.axis7ID &&
+			   this.axis8ID == organ.axis8ID &&
+			   this.axis9ID == organ.axis9ID;
+	}
+
+	/**
+	 * Estimate potential shoot growth
+	 * @return The potential biomass of the shoot
+	 */
+
+	double resolveAppleProfiledPotentialLength(String shootTypeName, int budTypeCode, int plannedRanks) {
+		double[][] internodeProfile = null;
+		try {
+			if (hasOrganSizeInput()) ensureOrganSizeProfilesLoaded();
+		} catch (RuntimeException ex) {
+			internodeProfile = null;
+		} catch (NoSuchFieldError ex) {
+			internodeProfile = null;
+		}
+
+		if ("bourseShoot".equals(shootTypeName)) {
+			internodeProfile = bourseInternodeProfile;
+		} else if ((shootTypeName != null && shootTypeName.indexOf("F") >= 0) || budTypeCode == 2) {
+			internodeProfile = rosetteInternodeProfile;
+		} else {
+			internodeProfile = vegShootInternodeProfile;
+		}
+
+		if (internodeProfile == null) return Double.NaN;
+
+		int safeRanks = plannedRanks;
+		if (safeRanks < 1) safeRanks = 1;
+		double totalLength_m = 0.0;
+		int r;
+		for (r = 1; r <= safeRanks; r++) {
+			double actualLength_m = Organ.profileValueAtRank(internodeProfile, r);
+			if (Double.isNaN(actualLength_m) || Double.isInfinite(actualLength_m) || actualLength_m < 0.0) {
+				return Double.NaN;
+			}
+			totalLength_m += Organ.actualToPotentialSize(actualLength_m);
+		}
+		return totalLength_m;
+	}
+
+	double calcDensityBasedAnnualInternodeBiomass() {
+		double dia = meanShootDia;
+		if (Double.isNaN(dia) || Double.isInfinite(dia) || dia <= 0.0) {
+			dia = 4.2e-3;
+		}
+		double len = potentialLength;
+		if (Double.isNaN(len) || Double.isInfinite(len) || len < 0.0) {
+			len = 0.0;
+		}
+		return len * Math.PI * (dia * dia / 4.0) * SHOOT_DENSITY * 1e6;
+	}
+
+	double calcLeafAllometryAnnualInternodeBiomass(double annualLeafBiomass) {
+		double k = annualInternodeLeafBiomassRatio;
+		if (Double.isNaN(k) || Double.isInfinite(k) || k < 0.0) {
+			k = 0.4;
+		}
+		if (Double.isNaN(annualLeafBiomass) || Double.isInfinite(annualLeafBiomass) || annualLeafBiomass <= 0.0) {
+			return Double.NaN;
+		}
+		return k * annualLeafBiomass;
+	}
+
+	double estimateAnnualLeafBiomass(double densityShootBiomass) {
+		double leafFrac = r1;
+		if (Double.isNaN(leafFrac) || Double.isInfinite(leafFrac) || leafFrac <= 0.0 || leafFrac >= 0.95) {
+			leafFrac = 0.6;
+		}
+		if (Double.isNaN(densityShootBiomass) || Double.isInfinite(densityShootBiomass) || densityShootBiomass <= 0.0) {
+			return Double.NaN;
+		}
+		return densityShootBiomass * leafFrac / (1.0 - leafFrac);
+	}
+
+	double resolveAnnualInternodeBiomass() {
+		double densityEstimate = calcDensityBasedAnnualInternodeBiomass();
+		if (!species.equals("apple")) {
+			return densityEstimate;
+		}
+		if (annualInternodeBiomassMode == null || annualInternodeBiomassMode.length() == 0) {
+			annualInternodeBiomassMode = "density";
+		}
+		if (annualInternodeBiomassMode.equals("density")) {
+			return densityEstimate;
+		}
+		if (annualInternodeBiomassMode.equals("leafAllometry")) {
+			double leafBiomass = estimateAnnualLeafBiomass(densityEstimate);
+			double allometricEstimate = calcLeafAllometryAnnualInternodeBiomass(leafBiomass);
+			if (Double.isNaN(allometricEstimate) || Double.isInfinite(allometricEstimate) || allometricEstimate < 0.0) {
+				return densityEstimate;
+			}
+			return allometricEstimate;
+		}
+		return densityEstimate;
+	}
+	 
+	void calcPotentialGrowth()
+	{
+		if(species.equals("apple")) {
+			//@fracisco to update
+			meanShootDia = 4.2e-3; //based on francisco's calculation
+			this.potentialShootBiomass = resolveAnnualInternodeBiomass();
+			double leafFrac = r1;
+			if (Double.isNaN(leafFrac) || Double.isInfinite(leafFrac) || leafFrac <= 0.0 || leafFrac >= 0.95) {
+				leafFrac = 0.6;
+			}
+			this.potentialBiomass = potentialShootBiomass / (1.0 - leafFrac);
+			
+			//if (printFlag) { println("potential shoot length " + potentialLength + " potentialBiomass " + potentialBiomass); }
+		}
+		
+		if(species.equals("grapevine")) {
+			
+			meanShootDia = 7e-3;  // 7 mm
+			
+			this.potentialLength = sum(shootInternodeLength);
+			this.potentialShootBiomass = potentialLength * Math.PI * (this.meanShootDia*this.meanShootDia/4) *
+										 SHOOT_DENSITY * 1e6; //mg, times 1e6 to convert from mg/cm3 into mg/m3
+			this.potentialBiomass = potentialShootBiomass / (1 - r1);
+		}
+	}
+	
+	/**
+	 * Retrieves the rotation angle at the end of the internode for the specified rank.
+	 * Issues warnings and returns default values in case of null, empty, infinite or NaN angle values.
+	 * @param rank The rank of the internode.
+	 * @return The rotation angle for the internode of the given rank.
+	 */
+ 
+	float getInternodeAngle(int rank) {
+		// Check if the shootInternodeAngle array is null
+		if (shootInternodeAngle == null) {
+			if(printFlag) { println("Warning: shootInternodeAngle array is null"); }
+			return 0;
+		}
+	
+		// Check if the array length is zero
+		if (shootInternodeAngle.length == 0) {
+			if (printFlag) { println("Warning: shootInternodeAngle array is empty"); }
+			return 0;
+		}
+	
+		float angle;
+		if (rank < shootInternodeAngle.length) {
+			angle = shootInternodeAngle[rank];
+		} else {
+			angle = shootInternodeAngle[shootInternodeAngle.length - 1];
+		}
+	
+		// Check if the angle is infinite
+		if (Float.isInfinite(angle)) {
+			if (printFlag) { println("Warning: Angle is infinite"); }
+			return 0;
+		}
+	
+		// Check if the angle is NaN (Not a Number)
+		if (Float.isNaN(angle)) {
+			if (printFlag) { println("Warning: Angle is NaN"); }
+			return 0;
+		}
+	
+		return angle;
+	}
+	
+	/**
+	 * Retrieves the length of the internode for the specified rank.
+	 * @param rank The rank of the internode.
+	 * @return The length of the internode of the given rank.
+	 */
+	float getInternodeLength(int rank)
+	{
+		if (rank < shootInternodeLength.length) {
+			return shootInternodeLength[rank];
+		} else {
+			return shootInternodeLength[shootInternodeLength.length - 1];
+		}
+	}
+	/**
+	 * Retrieves the RH rotation angle for the petiole at the specified rank.
+	 * @param rank The rank of the petiole.
+	 * @return The RH rotation angle for the petiole of the given rank.
+	 */
+	float getPetioleRotation(int rank)
+	{
+		if (rank < petioleRotation.length) {
+			return petioleRotation[rank];
+		} else {
+			return petioleRotation[petioleRotation.length - 1];
+		}
+	}
+	
+	/**
+	 * Retrieves the right-up (RU) rotation angle for the petiole at the specified rank.
+	 * @param rank The rank of the petiole.
+	 * @return The RU rotation angle for the petiole of the given rank.
+	 */
+	float getPetioleDeclination(int rank)
+	{
+		if (rank < petioleDeclination.length) {
+			return petioleDeclination[rank];
+		} else {
+			return petioleDeclination[petioleDeclination.length - 1];
+		}
+	}
+	/**
+	 * Retrieves the angle to initialize the JMidrib for the leaf at the specified rank.
+	 * @param rank The rank of the leaf.
+	 * @return The angle to initialize JMidrib for the leaf of the given rank.
+	 */
+	float getLeafDeclination(int rank)
+	{
+		if (rank < leafDeclination.length) {
+			return leafDeclination[rank];
+		} else {
+			return leafDeclination[leafDeclination.length - 1];
+		}
+	}
+	
+	/**
+	 * Retrieves the type of the phytomer (P0, P1, P2) for the specified rank.
+	 * @param rank The rank of the phytomer.
+	 * @return An integer representing the type (P0, P1, P2) of the phytomer of the given rank.
+	 */
+	int getPhytomerType(int rank)
+	{
+		  // Null check for phytomerTypes
+		if (phytomerTypes == null) {
+			return 0;
+			// Alternatively, return a default value or handle the null case as appropriate
+		}
+
+		if (rank < phytomerTypes.length) {
+			return phytomerTypes[rank];
+		} else {
+			return (phytomerTypes[phytomerTypes.length - 1] + (rank - phytomerTypes.length)) % 3;
+		}
+	}
+}

@@ -1,0 +1,131 @@
+import static globalParameters.*;
+import static modelOptions.*;
+import static lightInterception.*;
+import static initialConditions.*;
+import static absOrgan.*;
+import static environment.*;
+import static plantBase.*;
+import static rootSystem.*;
+import static fineRoot.*;
+import static structuralRoot.*;
+import static soil.*;
+import static initiationBase.*;
+import static fieldBase.*;
+
+public class InitiationSingleRoot extends InitiationService {
+    public void initiate() {[
+		{
+			continueRunning = true;
+			focalPlants = 0;
+		}
+		
+		Axiom ==>
+		temp
+		if(isRayTracingLightMode() && useDirectRadiation) (
+        // Initialize direct light settings 
+           [dir:DirectLight]            
+           { dir.update();}  
+        )
+	        if(isRayTracingLightMode() && useDiffuseRadiation) (
+        // Initialize diffuse light settings 
+           [dif:DiffuseLight]            
+           { dif.update();
+           }  
+        )
+			
+		FieldBase
+		{double tileWidth = plantDistance/nrTiles;}
+		/** measure stick (to compare ..) *************************************/
+			[
+				//Translate(-(nrTiles+1)*tileWidth,-tileWidth,0) 
+				//measureStick(10, 0.1) // (number of steps, step length (in m))
+			] 
+				
+		[
+			{
+				int i = 0;
+			}
+			for (int strip=1; strip<=nrStrips; strip++) (
+			
+			//setup of a strip
+			for (int row=1; row<=nrRows; row++) (
+	
+				//setup of a row
+				[
+					{borderX = 0;}
+					for (int pos=1; pos<=nrPlants; pos++) (
+						//if one wants to reduce the overlap between rows
+						if(pos == 1) (Translate(row%2 == 0 ? 0.5*plantDistance : 0,0,0))
+	
+					[
+							{i++;}
+						
+					
+							// add the plants
+		/* ############################# FRUITING CUTTING SYSTEM ################################*/
+							if(trainingSystem == 0)   //fruit-cutting system
+								(
+							pi:PlantIdentifier pb:PlantBase [RU(180) rb:RootBase]
+							{
+								
+									pi.initiate(i, row, pos, strip, species);
+									pb.initiate(i, row, pos, strip, pi);
+									rb.initiate_pb(pb,numofSoilLayers);
+									
+									pb.addRootBase(rb);
+									if (pb.border == false) {focalPlants++;}
+							}
+									//add the soil and root layers as branches
+							[
+								RU(180) for (int r = 0; r < numofSoilLayers; r++) (
+								sl:Soil {sl.initiate(r, pb);}
+								[ M(-sl.length) sr:StructuralRoot [fr:FineRoot]] 
+								 
+									{
+										fr.initiate_pb(r, pb);							
+										fr.addSoilArray(sl);
+										sr.initiate_pb(r, pb);
+										rb.addChildSoilRoot(r, sl, fr, sr);
+									}
+								)
+							]
+						
+								
+							) //bracket for the fruit cutting system
+							
+	
+	
+							
+	
+		]
+		/* #############################################################*/					
+							if (pos != nrPlants && pos % 4 == 0) (
+											Translate(plantDistance, 0, 0)
+										)
+							else (Translate(plantDistance,0,0) )
+							
+							{if (pos != nrPlants) {borderX += plantDistance;}}
+							)
+					]
+					
+					if (row != nrRows) (
+						Translate(0,rowDistance,0)	
+						{borderY += rowDistance;}
+					)
+				)
+				Translate(0,stripDistance,0)
+				
+				
+				{if (strip != nrStrips) {borderY += stripDistance;}}
+			)	
+			]	
+		
+			{
+				totalArea = rowDistance * plantDistance * totalPlants;
+				focalArea = rowDistance * plantDistance * focalPlants;
+				dens = 1 / (rowDistance * plantDistance);	
+			}
+			
+		; //end of Axiom
+	]}
+}

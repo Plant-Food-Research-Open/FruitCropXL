@@ -1,0 +1,70 @@
+import de.grogra.util.concurrent.*;
+
+import static absOrgan.*;
+import static leaf.*;
+import static shoot.*;
+import java.io.Serializable;
+
+
+class PPTask extends PTask implements Serializable {
+	Node n;
+	
+	public PPTask(Node n){
+		this.n=n;
+	}
+	@Override
+	public void run(){
+		((PhotosynthateOrgan)n).calcPotentialPhotosynthesis();
+	}
+}
+
+
+
+class TranspirationTask extends PTask implements Serializable {
+	Node n;
+	
+	public TranspirationTask(Node n){
+		this.n=n;
+	}
+	@Override
+	public void run(){
+		((PhotosynthateOrgan)n).calcActualTranspiration();
+	}
+}
+
+class AnetTask extends PTask implements Serializable {
+	Node n;
+	
+	public AnetTask(Node n){
+		this.n=n;
+	}
+	@Override
+	public void run(){
+		((PhotosynthateOrgan)n).calcActualPhotosynthesisAndTranspiration();
+	}
+}
+
+ class GrowthUpdateTask extends PTask implements Serializable {
+	Node n;
+	
+	public GrowthUpdateTask(Node n){
+		this.n=n;
+	}
+	@Override
+	public void run(){
+		((GrowingOrgan)n).growthUpdate();
+ 	}
+}
+
+
+class WaterFluxTask extends PTask implements Serializable {
+	Node n;
+	
+	public WaterFluxTask(Node n){
+		this.n=n;
+	}
+	@Override
+	public void run(){
+		((Internode)n).updateWaterFlux();
+	}
+} 

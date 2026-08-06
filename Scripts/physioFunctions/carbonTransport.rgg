@@ -1,0 +1,1986 @@
+// carbon transport model
+// XL port of L+C model Mechanistic modelling of coupled phloem/xylem transport for L-systems:
+// combining analytical and computational methods
+// Original model by Seleznyova and Hanan. (2018)
+// Port by Junqi zhu <junqi.zhu@plantandfood.co.nz>
+import static globalParameters.*;
+import static absOrgan.*;
+import static leaf.*;
+import static shoot.*;
+import static budBase.*;
+import static plantBase.*;
+import static modelOptions.*;
+import static initialConditions.*;
+import static plantParameters.*;
+import static rootSystem.*;
+import static flowerBase.*;
+import static fruitBase.*;
+import static fineRoot.*;
+import static structuralRoot.*;
+import static berryComplex.*;
+import static virtualFruit.*;
+import static diagnosticTables.*;
+
+/**
+ * Carbon transport model (XL port of the L+C coupled phloem/xylem framework).
+ *
+ * <p><b>Scope</b> — Implements the Seleznyova & Hanan (2018) analytical + computational
+ * approach for mass transport through the phloem, coupled to xylem hydraulics, on top of
+ * a GroIMP/XL plant graph. The solver operates in the carbon-potential domain
+ * Φ (denoted {@code cp}) with {@code cp = 0.5 * c^2}, where {@code c} is phloem carbon
+ * concentration (g C cm⁻³). Nonlinear organ loading/unloading is linearised per Newton step as
+ * {@code j(Φ) ≈ a + b · Φ}, with {@code a,b} assembled into per-node branch terms.</p>
+ *
+ * <p><b>Key conventions</b>
+ * <ul>
+ *   <li><b>Potential:</b> {@code cp} is carbon potential Φ; {@code cpt}/{@code cpb} are top/bottom
+ *       potentials of a transport element.</li>
+ *   <li><b>Flux sign:</b> {@code j} is net mass carbon flux (gC·h⁻¹). Positive {@code j} = unloading
+ *       from phloem to the organ (sink). Negative {@code j} = loading from organ to phloem (source).</li>
+ *   <li><b>Linearisation:</b> Each organ computes {@code sink_source_a} and {@code sink_source_b},
+ *       then branch-level accumulators {@code branch_flux_a}, {@code branch_flux_b} are folded
+ *       upstream per axis.</li>
+ *   <li><b>Resistance/xylem coupling:</b> Transport update uses local phloem resistance {@code r}
+ *       and xylem pull term {@code xp}; Munch counter flow is updated from branch flux.</li>
+ * </ul></p>
+ *
+ * <p><b>Solver loop</b> (one time step)
+ * <ol>
+ *   <li>{@code linearise(pb, context)} — compute per-organ (a,b).</li>
+ *   <li>{@code updateBranchFlux(pb, context)} — fold (a,b) upstream by axis/root to the PlantBase.</li>
+ *   <li>{@code updateCarbonPotential(pb, context)} — UNFOLD potentials from PlantBase to its children.</li>
+ *   <li>{@code updateFlow(pb, context)} — update organ fluxes j = a + b·cpt and the solve residual.</li>
+ *   <li>{@code updateResistence(pb)} — refresh phloem resistance and related transport params.</li>
+ *   <li>Repeat 1–5 until the residual is at most {@code MAXERROR} or the iteration limit is exceeded.</li>
+ *   <li>{@code updateCarbonStatus(pb)} — compute per-organ sugar, loading/leakage/unloading and Mcf.</li>
+ * </ol></p>
+ *
+ * <p><b>Debugging</b> — Verbose printing is guarded by the global {@code debug_CT} flag; some summaries
+ * print unconditionally where noted. The fold/unfold passes use step ticks to warn on double writes.</p>
+ *
+ * <p><b>Units</b> — Fluxes are g C h⁻¹ unless stated. {@code cp} in g² C cm⁻⁶, concentrations in g C cm⁻³
+ * (or converted sugar units where noted). Constants are documented inline.</p>
+ *
+ *******************************************************************************************
+ * Revised carbon transport linearisation using sugar-domain source/sink responses.
+ *
+ * <p><b>Purpose.</b>
+ * The carbon transport (CT) solver still operates in the carbon-potential domain,
+ * where:
+ * <pre>
+ *     Phi = cp = 0.5 * c^2
+ * </pre>
+ *
+ * with {@code c} being phloem carbon concentration. The solver requires each
+ * organ exchange flux to be locally linearised as:
+ *
+ * <pre>
+ *     j(Phi) ~= a + b * Phi
+ * </pre>
+ *
+ * where {@code j} is the net carbon exchange flux between the organ and the
+ * phloem. Positive {@code j} represents unloading from phloem to organ
+ * (sink behaviour), while negative {@code j} represents loading from organ
+ * to phloem (source behaviour).
+ *
+ * <p>The revised implementation changes the biological response domain of
+ * source loading and sink unloading. Instead of evaluating the loading and
+ * unloading response functions directly in {@code Phi}-space, the model now:
+ *
+ * <ol>
+ *   <li>converts local carbon potential {@code Phi} to phloem carbon concentration,</li>
+ *   <li>converts phloem carbon concentration to phloem sugar concentration,</li>
+ *   <li>evaluates source/sink response functions in sugar concentration space,</li>
+ *   <li>uses the chain rule to obtain derivatives with respect to {@code Phi},</li>
+ *   <li>builds the standard CT linear coefficients {@code a} and {@code b}.</li>
+ * </ol>
+ *
+ * <p>This preserves the analytical/iterative CT solver structure while making
+ * organ-level source and sink responses more consistent with the CP/common-pool
+ * carbon allocation formulation, where limitation functions are naturally
+ * parameterised in sugar or concentration space.
+ *
+ * <h3>Conversion from carbon potential to sugar concentration</h3>
+ *
+ * <p>The local carbon potential is first converted to carbon concentration:
+ *
+ * <pre>
+ *     c = sqrt(2 * Phi)
+ * </pre>
+ *
+ * and then converted to phloem sugar concentration through:
+ *
+ * <pre>
+ *     sugar = convertPhloemCtoSugar(c)
+ * </pre>
+ *
+ * This conversion is wrapped by {@code sugarFromCp(cp)}. The derivative used
+ * for the chain rule assumes that sugar concentration is proportional to carbon
+ * concentration:
+ *
+ * <pre>
+ *     dSugar/dPhi = sugar / (2 * Phi)
+ * </pre>
+ *
+ * Because this derivative becomes numerically sensitive near {@code Phi = 0},
+ * the implementation applies lower bounds to {@code cp} and sugar concentration
+ * using {@code CT_CP_MIN} and {@code CT_SUGAR_MIN}.
+ *
+ * <h3>Sink unloading response in sugar space</h3>
+ *
+ * <p>Sink unloading is evaluated using a Michaelis-Menten-like response:
+ *
+ * <pre>
+ *     f(sugar; Km) = sugar / (Km + sugar) + epsilon
+ * </pre>
+ *
+ * where {@code Km} is the sugar-domain half-saturation parameter for the
+ * corresponding sink component. Different sink components can use different
+ * {@code Km} values, for example:
+ *
+ * <ul>
+ *   <li>{@code km_pri} for primary structural growth demand,</li>
+ *   <li>{@code km_sec} for secondary structural growth demand,</li>
+ *   <li>{@code km_res} for reserve storage demand,</li>
+ *   <li>{@code KM_MTNCE} for maintenance demand,</li>
+ *   <li>{@code km_res} for fine-root exudation in the current implementation.</li>
+ * </ul>
+ *
+ * <p>The derivative in sugar space is:
+ *
+ * <pre>
+ *     df/dSugar = Km / (Km + sugar)^2
+ * </pre>
+ *
+ * The CT solver needs the derivative with respect to {@code Phi}, therefore:
+ *
+ * <pre>
+ *     df/dPhi = df/dSugar * dSugar/dPhi
+ *             = Km / (Km + sugar)^2 * sugar / (2 * Phi)
+ * </pre>
+ *
+ * This is implemented by {@code dSinkUnloading_fromSugar_dcp(cp, kmSugar)}.
+ *
+ * <h3>Source loading response in sugar space</h3>
+ *
+ * <p>Source loading is evaluated using a logistic response in sugar space:
+ *
+ * <pre>
+ *     g(sugar) = -1 / (1 + exp(b * (sugar - sugar0)))
+ * </pre>
+ *
+ * where {@code b} is the logistic slope and {@code sugar0} is the sugar-domain
+ * inflection point. The negative sign preserves the existing CT convention that
+ * source loading into the phloem is a negative exchange flux.
+ *
+ * <p>The derivative in sugar space is:
+ *
+ * <pre>
+ *     dg/dSugar = b * exp(b * (sugar - sugar0))
+ *                 / (1 + exp(b * (sugar - sugar0)))^2
+ * </pre>
+ *
+ * and the derivative required by the CT solver is:
+ *
+ * <pre>
+ *     dg/dPhi = dg/dSugar * dSugar/dPhi
+ *             = dg/dSugar * sugar / (2 * Phi)
+ * </pre>
+ *
+ * This is implemented by {@code dSourceLoading_fromSugar_dcp(cp, bSugar, c0Sugar)}.
+ * The exponential argument is clamped to avoid overflow.
+ *
+ * <h3>Organ-level Taylor linearisation</h3>
+ *
+ * <p>For each organ and each Newton iteration, the current potential
+ * {@code Phi0 = o.cpt} is used as the expansion point. For a generic response
+ * function {@code h(Phi)}, the first-order Taylor expansion is:
+ *
+ * <pre>
+ *     h(Phi) ~= h(Phi0) + h'(Phi0) * (Phi - Phi0)
+ * </pre>
+ *
+ * Multiplying by the corresponding potential flux/demand term {@code PT} gives:
+ *
+ * <pre>
+ *     j(Phi) ~= PT * (h0 - Phi0 * hPrime) + PT * hPrime * Phi
+ * </pre>
+ *
+ * Therefore:
+ *
+ * <pre>
+ *     a = PT * (h0 - Phi0 * hPrime)
+ *     b = PT * hPrime
+ * </pre>
+ *
+ * <p>For sink components, {@code h} is the sugar-domain unloading response
+ * converted back to {@code d/dPhi}. For source loading, {@code h} is the
+ * sugar-domain logistic loading response converted back to {@code d/dPhi}.
+ *
+ * <p>The final organ coefficients are:
+ *
+ * <pre>
+ *     sink_source_a = mgTogram * (sum(sinkA) + loadA)
+ *     sink_source_b = mgTogram * (sum(sinkB) + loadB)
+ * </pre>
+ *
+ * and the organ exchange flux used by the CT solver is:
+ *
+ * <pre>
+ *     j = sink_source_a + sink_source_b * cpt
+ * </pre>
+ *
+ * <h3>Whole-plant CT calculation flow</h3>
+ *
+ * <p>The revised sugar-domain response functions are used inside the existing
+ * CT solve sequence:
+ *
+ * <ol>
+ *   <li>{@code linearise(pb, context)} computes local {@code sink_source_a} and
+ *       {@code sink_source_b} for each organ.</li>
+ *   <li>{@code updateBranchFlux(pb, context)} folds local coefficients upstream through
+ *       the plant graph to obtain branch-level {@code branch_flux_a} and
+ *       {@code branch_flux_b}.</li>
+ *   <li>{@code updateCarbonPotential(pb, context)} solves/unfolds carbon potential from
+ *       {@code PlantBase} to downstream transport elements using branch
+ *       coefficients, phloem resistance, and xylem-pull terms.</li>
+ *   <li>{@code updateFlow(pb, context)} recomputes local fluxes as
+ *       {@code j = a + b * cpt} and accumulates the convergence residual.</li>
+ *   <li>{@code updateResistence(pb)} updates concentration-dependent resistance
+ *       and transport parameters from the latest local carbon concentration.</li>
+ *   <li>The loop repeats until the convergence residual is at most {@code MAXERROR} or the iteration
+ *       guard is reached.</li>
+ *   <li>{@code updateCarbonStatus(pb)} updates final organ sugar concentration,
+ *       carbon allocation state, carbon flux, and Munch counter-flow terms.</li>
+ * </ol>
+ *
+ * <h3>Parameter interpretation</h3>
+ *
+ * <p>After this revision, parameters passed to {@code SinkUnloading_fromSugar}
+ * and {@code SourceLoading_fromSugar} are interpreted in sugar concentration
+ * space, not carbon-potential space. In particular, the legacy parameter name
+ * {@code sourceLoading_cp} may be misleading when used as the logistic
+ * inflection argument in {@code SourceLoading_fromSugar}; biologically and
+ * numerically it should now be interpreted as a sugar-domain threshold.
+ *
+ * <p>Recommended future cleanup: rename {@code sourceLoading_cp} to a clearer
+ * name such as {@code sourceLoadingSugarThreshold} or
+ * {@code sourceLoading_sugar_c0}, while preserving backward compatibility in
+ * the JSON/config loader if required.
+ *
+ * <h3>Numerical guards</h3>
+ *
+ * <p>The revision relies on the following guards:
+ *
+ * <ul>
+ *   <li>{@code CT_CP_MIN}: lower bound for carbon potential before conversion,</li>
+ *   <li>{@code CT_SUGAR_MIN}: lower bound for sugar concentration in derivative calculations,</li>
+ *   <li>{@code CT_DERIV_MAX}: upper bound for source/sink derivatives with respect to {@code Phi}.</li>
+ * </ul>
+ *
+ * <p>These guards are required because {@code dSugar/dPhi = sugar / (2 * Phi)}
+ * is sensitive near zero carbon potential and can otherwise produce unstable
+ * Newton coefficients.
+ *
+ * @see #SinkUnloading_fromSugar(double, double)
+ * @see #dSinkUnloading_fromSugar_dcp(double, double)
+ * @see #SourceLoading_fromSugar(double, double, double)
+ * @see #dSourceLoading_fromSugar_dcp(double, double, double)
+ * @see #lineariseOrgan(GrowingOrgan)
+ * @see #linearise(PlantBase, CarbonTransportSolveContext)
+ * @see #updateBranchFlux(PlantBase, CarbonTransportSolveContext)
+ * @see #updateCarbonPotential(PlantBase, CarbonTransportSolveContext)
+ * @see #updateFlow(PlantBase, CarbonTransportSolveContext)
+ * @see #updateResistence(PlantBase)
+ * @see #updateCarbonStatus(PlantBase)
+ * @author  Port: Junqi Zhu {@code <junqi.zhu@plantandfood.co.nz>}
+ * @since   2021 updated on 2025-08
+ */
+
+
+/* #### defines pertinents for the carbon transport model ##################*/
+global double INFTY     = 1e10;      // very large number
+global double EPSILON   = 1.0/INFTY; // very small number different from zero
+global double MAXERROR  = 1e-5;      // error threshold for evaluating carbon flow
+
+global boolean debug_CT = false;
+
+// Retained only so saved GroIMP projects containing the former globals load cleanly.
+// Active solves use CarbonTransportSolveContext and never read or write these fields.
+global double Serror = 0.0;
+global int error_count = 0;
+
+/** Per-call mutable state for one plant's carbon-transport solve. */
+private class CarbonTransportSolveContext {
+  double convergenceError = 0.0;
+  int iterationCount = 0;
+  int foldStep = 0;
+  int unfoldStep = 0;
+
+  double leafA = 0.0, leafB = 0.0, leafJ = 0.0;
+  double petioleA = 0.0, petioleB = 0.0, petioleJ = 0.0;
+  double shootA = 0.0, shootB = 0.0, shootJ = 0.0;
+  double fineRootA = 0.0, fineRootB = 0.0, fineRootJ = 0.0;
+  double structuralRootA = 0.0, structuralRootB = 0.0, structuralRootJ = 0.0;
+  double fruitA = 0.0, fruitB = 0.0, fruitJ = 0.0;
+}
+
+// CT response is evaluated in sugar concentration domain and linearised d/dPhi.
+static final double CT_CP_MIN = 1e-10;
+static final double CT_SUGAR_MIN = 1e-9;
+static final double CT_DERIV_MAX = 1e9;
+static final double CT_PHI_FLOOR = 1e-8;
+// g C h-1 per unit Phi; guards only numerically degenerate folded boundaries.
+static final double CT_PB_B_ABS_MIN = 1e-12;
+
+// defines pertinent to test case 
+// constant source and sink
+global double SOURCEj = 0; //-0.4;  	    // [g h-1] maximum initial influx from the source (for initialization of the system)  
+//global double SINKj = 0.5;            // [g h-1] maximun possible influx into the terminal sink
+ 
+global double SOURCEcp = 0.0002;   //calculate carbon potential for sourceLoading_cp; initial value is important; far from the answer can cause nan value
+global double initial_c0 = Math.sqrt(2*SOURCEcp);
+// defines pertinent to phloem resistance
+global double R0 = 0.847E-3;	  // [MPa cm-4 h] //resistance at zero phloem sugar concentration
+global double R_ct = 0.024298245614035;  // [MPa cm3 g-1 K-1] //universal gas constant
+//global double Tk = 293.15;             // [K]
+
+// defines pertinent to water potential
+//global double Rx = 1.0063894024855E-6;          // [cm-4 h] resistance per unit length of xylem
+global double MolalVolumeSucrose = 0.6301;      // [g-1 cm3]  
+
+
+
+/* #### defines the functions for the carbon transport model ##################*/
+
+/**
+ * CP-style unloading response evaluated in sugar concentration space, then used by
+ * the CT Phi-domain solver through Taylor linearisation in {@link #lineariseOrgan}.
+ *
+ * @param cp carbon potential Phi (not common-pool concentration)
+ * @param kmSugar half-saturation sugar concentration (g sugar cm^-3)
+ * @return unloading activity in sugar domain (unitless multiplier before PT scaling)
+ */
+static double SinkUnloading_fromSugar(double cp, double kmSugar) {
+    double cpEff = Math.max(CT_CP_MIN, cp);
+    double sugar = sugarFromCp(cpEff);
+    if (Double.isNaN(sugar) || sugar < 0.0) {
+        sugar = 0.0;
+    }
+    double km = kmSugar;
+    if (Double.isNaN(km) || km <= 0.0) {
+        km = CT_SUGAR_MIN;
+    }
+    return sugar / (km + sugar) + 1e-6;
+}
+
+/**
+ * Chain-rule derivative dS/dPhi for {@link #SinkUnloading_fromSugar}.
+ *
+ * @param cp carbon potential Phi (not common-pool concentration)
+ * @param kmSugar half-saturation sugar concentration (g sugar cm^-3)
+ * @return dS/dPhi with numerical guards near Phi=0
+ */
+static double dSinkUnloading_fromSugar_dcp(double cp, double kmSugar) {
+    double cpEff = Math.max(CT_CP_MIN, cp);
+    double sugar = sugarFromCp(cpEff);
+    if (Double.isNaN(sugar) || sugar < CT_SUGAR_MIN) {
+        sugar = CT_SUGAR_MIN;
+    }
+    double km = kmSugar;
+    if (Double.isNaN(km) || km <= 0.0) {
+        km = CT_SUGAR_MIN;
+    }
+    double dS_dSugar = km / ((km + sugar) * (km + sugar));
+    double dSugar_dCp = sugar / (2.0 * cpEff);
+    double out = dS_dSugar * dSugar_dCp;
+    if (Double.isNaN(out) || out < 0.0) {
+        out = 0.0;
+    }
+    if (out > CT_DERIV_MAX) {
+        out = CT_DERIV_MAX;
+    }
+    return out + 1e-20;
+}
+
+
+/**
+ * CP-style source loading response evaluated in the sugar concentration domain.
+ * Negative return value preserves the existing source-loading sign convention.
+ *
+ * @param cp carbon potential Phi (not common-pool concentration)
+ * @param bSugar logistic slope in sugar concentration space
+ * @param c0Sugar logistic inflection sugar concentration (g sugar cm^-3)
+ * @return loading activity (negative, before PT scaling)
+ */
+static double SourceLoading_fromSugar(double cp, double bSugar, double c0Sugar) {
+    double cpEff = Math.max(CT_CP_MIN, cp);
+    double sugar = sugarFromCp(cpEff);
+    if (Double.isNaN(sugar) || sugar < 0.0) {
+        sugar = 0.0;
+    }
+    double expArg = bSugar * (sugar - c0Sugar);
+    if (expArg > 100.0) expArg = 100.0;
+    if (expArg < -100.0) expArg = -100.0;
+    double e = Math.exp(expArg);
+    return -1.0 / (1.0 + e);
+}
+
+/**
+ * Chain-rule derivative dLoading/dPhi for {@link #SourceLoading_fromSugar}.
+ *
+ * @param cp carbon potential Phi (not common-pool concentration)
+ * @param bSugar logistic slope in sugar concentration space
+ * @param c0Sugar logistic inflection sugar concentration (g sugar cm^-3)
+ * @return dLoading/dPhi, clamped for numerical stability
+ */
+static double dSourceLoading_fromSugar_dcp(double cp, double bSugar, double c0Sugar) {
+    double cpEff = Math.max(CT_CP_MIN, cp);
+    double sugar = sugarFromCp(cpEff);
+    if (Double.isNaN(sugar) || sugar < CT_SUGAR_MIN) {
+        sugar = CT_SUGAR_MIN;
+    }
+    double expArg = bSugar * (sugar - c0Sugar);
+    if (expArg > 700.0) expArg = 700.0;
+    if (expArg < -700.0) expArg = -700.0;
+    double e = Math.exp(expArg);
+    double dg_dSugar = bSugar * e / ((1.0 + e) * (1.0 + e));
+    double dSugar_dCp = sugar / (2.0 * cpEff);
+    double out = dg_dSugar * dSugar_dCp;
+    if (Double.isNaN(out)) {
+        out = 0.0;
+    }
+    if (Math.abs(out) > CT_DERIV_MAX) {
+        out = Math.signum(out) * CT_DERIV_MAX;
+    }
+    return out;
+}
+
+/////////ALTERNATIVE FUNCTION IF YOU WANT TO DO DERIVATIVE REGARDING TO C//////////
+
+// phloem resistance ratio R_ct/R0
+/**
+ * Empirical phloem resistance ratio as a function of phloem carbon concentration.
+ *
+ * @param cab phloem carbon concentration (g C cm⁻³)
+ * @return R_ct/R0 ratio (dimensionless)
+ */
+static double PhloemResistanceRatio_sucrose (double cab) 
+{
+  double  k1 = 0.19961;
+  double  k2 = 1.00954;
+  double  k3 = -2.2249;
+  double  k4 = 1.2776; 
+  return (1.0+k1*cab+k2*cab*cab)/(1.0+k3*cab+k4*cab*cab);			 
+} 
+
+//Osmotic pressure ratio P/RT
+/**
+ * Osmotic pressure ratio P/(R·T) as a function of phloem carbon concentration.
+ *
+ * @param cab phloem carbon concentration (g C cm⁻³)
+ * @return P/(R·T) (dimensionless)
+ @FIXME fix the effects of sorbital form on pressure ratio. 
+ * double cabEq = cabTotal_gC_cm3 * ((1.0 - fSor)*1.0 + fSor*MOL_EQ_FACTOR);
+ * double P_over_RT = PressureRatio(cabEq);
+
+ */
+static double PressureRatio (double cab) 
+{
+  double  a = 1.03913;
+  double  b = 0.86536;
+  double  c = 5.2465;
+  //quick scalling for the osmotic potential ratio to RT
+  double cabEq = cab * ((1.0 - FRACTION_SORBITOL)*1.0 + FRACTION_SORBITOL* (MOL_SURCROSE/MOL_SORBITOL));
+  return (a + b*cabEq + c*cabEq*cabEq);			 
+}
+// ---- constants you already have (names are examples) ----
+static final double CF_SUC = CARBON_FRACTION_SUCROSE;   // ~0.42 gC/g sucrose
+static final double CF_SOR = CARBON_FRACTION_SORBITOL;  // ~0.40 gC/g sorbitol
+static final double RHO_WATER_25C = 1.0;               // g/cm3, good 5–25% w/w
+
+
+// Minimal η/ηwater fits at 25 °C vs weight fraction w (0–0.3). Replace when you fit CRC points.
+static double etaRelSucrose(double w){ return 1.0 + 2.4*w + 12.0*w*w; }
+static double etaRelSorbitol(double w){ return 1.0 + 1.6*w + 6.5*w*w; }
+
+// helpers
+static double soluteMassPerCm3(double cab, double carbonFrac){ return cab / Math.max(1e-12, carbonFrac); }
+static double weightFraction(double gs){ return gs / (gs + RHO_WATER_25C); } // gs = g solute per cm3
+
+// FRACTION_SORBITOL in [0,1]
+static double PhloemResistanceRatio_mixture(double cab, double FRACTION_SORBITOL){
+    // split carbon between species
+    double cabSor = cab * FRACTION_SORBITOL;
+    double cabSuc = cab * (1.0 - FRACTION_SORBITOL);
+
+    // convert to g solute / cm3 (approx density)
+    double gsSor = soluteMassPerCm3(cabSor, CF_SOR);
+    double gsSuc = soluteMassPerCm3(cabSuc, CF_SUC);
+    double gsTot = gsSor + gsSuc;
+    double wTot  = weightFraction(gsTot);     // overall wt% as fraction 0–1
+
+    // log-additivity for viscosity of two non-electrolytes (Grunberg–Nissan with G12≈0)
+    double xSuc = (gsTot > 0) ? gsSuc / gsTot : 0.0;
+    double xSor = 1.0 - xSuc;
+    double etaRelMix = Math.exp(xSuc*Math.log(etaRelSucrose(wTot)) + xSor*Math.log(etaRelSorbitol(wTot)));
+
+    // reference (what your k1..k4 implicitly used)
+    double etaRelRef = etaRelSucrose(wTot);
+
+    // scale sucrose baseline by viscosity ratio
+    return PhloemResistanceRatio_sucrose(cab) * (etaRelMix / Math.max(1e-12, etaRelRef));
+}
+
+/** cp → phloem sugar concentration (g sugar cm⁻³). 
+ * Convert carbon potential to sugar concentration (model’s sugar unit).
+ *
+ * @param cp carbon potential Φ (≥0)
+ * @return sugar concentration (g sugar cm⁻³)
+ */
+static double sugarFromCp(double cp) {
+  double c = Math.sqrt(Math.max(0.0, 2.0 * cp));     // c = √(2cp), guard cp≥0
+  return convertPhloemCtoSugar((double) c);
+}
+/** KM in sugar domain → KM in cp domain: cp = 0.5 * c² (with c in gC cm⁻³). 
+ * Convert Michaelis constant from sugar-concentration space to potential space.
+ *
+ * @param km_sugar KM in sugar domain (g sugar cm⁻³)
+ * @return KM in cp domain (g² C cm⁻⁶)
+ */
+static double kmSugarToCp(double km_sugar) {
+  double c = convertSugarToPhloemC((double) km_sugar); // sugar → phloem C
+  return 0.5 * c * c;
+}
+
+
+
+/**
+ * Linearise sinks and sources for a single organ (fills sink_source_a/b).
+ *
+ * <p><b>Purpose</b> — Compute the first-order (Taylor) linearisation of the organ’s
+ * net phloem exchange <code>j(Φ)</code> around the current carbon potential
+ * <code>Φ = cp = o.cpt</code>, so the solver can use
+ * <code>j ≈ a + b · Φ</code> within a Newton step.</p>
+ *
+ * <p><b>Inputs used</b>
+ * <ul>
+ *   <li><code>o.cpt</code> (top-side carbon potential Φ) and <code>o.cpb</code> (bottom-side guard).</li>
+ *   <li>Organ PT multipliers: <code>o.loading_PT</code>, <code>o.structureDM_PRI_PT</code>,
+ *       <code>o.structureDM_SEC_PT</code>, <code>o.reserveDM_PT</code>, <code>o.maintenanceDM_PT</code>.</li>
+ *   <li>Km-like parameters (in sugar domain) converted to Φ-domain via
+ *       <code>cp = 0.5 · c²</code>: <code>o.km_pri</code>, <code>o.km_sec</code>, <code>o.km_res</code>,
+ *       and <code>KM_MTNCE</code>.</li>
+ *   <li>Model kernels in Φ-domain: <code>SourceLoading(Φ,…)</code>,
+ *       <code>dSourceLoading_dcp(Φ,…)</code>, <code>SinkUnloading(Φ,q)</code>,
+ *       <code>dSinkUnloading_dcp(Φ,q)</code>.</li>
+ * </ul></p>
+ *
+ * <p><b>Outputs / side effects</b>
+ * <ul>
+ *   <li>Sets <code>o.sink_source_a</code> and <code>o.sink_source_b</code> (same mass-flow units as <code>j</code>;
+ *       <code>b</code> is “per-Φ” slope). Positive values contribute to unloading (sink), negative to loading (source).</li>
+ *   <li>Clamps invalid potentials and applies small-Φ safeguards for derivative stability.</li>
+ *   <li>Optionally prints a per-organ debug_CT line when <code>debug_CT</code> is true for selected organ classes.</li>
+ * </ul></p>
+ *
+ * <p><b>Definition of the linear terms</b>
+ * <ul>
+ *   <li><b>a (intercept)</b>:
+ *     <code>a = j(Φ₀) − Φ₀ · j′(Φ₀)</code>, evaluated at <code>Φ₀ = o.cpt</code>.
+ *     In code this is the sum over unloading components
+ *     <code>PT · (SinkUnloading(Φ₀,q) − Φ₀ · dSinkUnloading_dcp(Φ₀,q))</code>
+ *     plus the analogous loading term
+ *     <code>o.loading_PT · (SourceLoading(Φ₀,…) − Φ₀ · dSourceLoading_dcp(Φ₀,…))</code>.
+ *   </li>
+ *   <li><b>b (slope)</b>:
+ *     <code>b = j′(Φ₀)</code>, the derivative w.r.t. Φ at <code>Φ₀</code>.
+ *     In code this is the sum over unloading components
+ *     <code>PT · dSinkUnloading_dcp(Φ₀,q)</code> plus the loading derivative
+ *     <code>o.loading_PT · dSourceLoading_dcp(Φ₀,…)</code>.
+ *   </li>
+ * </ul>
+ * This yields the local linear form <code>j(Φ) ≈ a + b · Φ</code> that the transport solver
+ * uses to assemble branch fluxes and update potentials.</p>
+ */
+static void lineariseOrgan(GrowingOrgan o) {
+  if (o == null) return;
+
+  // Basic guards
+  if (Double.isNaN(o.cpb) || o.cpb < 0.0) o.cpb = 1e-5;
+  if (Double.isNaN(o.cpt) || o.cpt < 0.0) o.cpt = 1e-5;
+  // Current state (Φ-domain uses cp = c^2/2)
+  double cp = o.cpt;                           // carbon potential Φ at organ
+  double sugar = sugarFromCp(cp);              // current sugar (used by organ to update PT)
+  
+  
+  //o.calcPTCTRAM(sugar);                        // update organ-specific PT params from sugar
+  o.updateCarbonAllocation(sugar);
+  // --- Source (loading) linearisation: sugar-domain response, a + b * cp.
+  double loadA = 0.0, loadB = 0.0;
+  if (o.loading_PT > 0.0) {
+    double cp_eff = (cp > CT_CP_MIN) ? cp : CT_CP_MIN;
+    double g0 = SourceLoading_fromSugar(cp_eff, sourceLoading_b, sourceLoading_cp);
+    double dg = dSourceLoading_fromSugar_dcp(cp_eff, sourceLoading_b, sourceLoading_cp);
+    loadA = o.loading_PT * (g0 - cp_eff * dg);
+    loadB = o.loading_PT * dg;
+  }
+
+  double kPRI = o.km_pri;
+  double kSEC = o.km_sec;
+  double kRES = o.km_res;
+  double kMNT = KM_MTNCE;
+  double fPRI = SinkUnloading_fromSugar(cp, kPRI);
+  double fSEC = SinkUnloading_fromSugar(cp, kSEC);
+  double fRES = SinkUnloading_fromSugar(cp, kRES);
+  double fMNT = SinkUnloading_fromSugar(cp, kMNT);
+  double dPRI = dSinkUnloading_fromSugar_dcp(cp, kPRI);
+  double dSEC = dSinkUnloading_fromSugar_dcp(cp, kSEC);
+  double dRES = dSinkUnloading_fromSugar_dcp(cp, kRES);
+  double dMNT = dSinkUnloading_fromSugar_dcp(cp, kMNT);
+  double sA_pri = o.structureDM_PRI_PT * (fPRI - cp * dPRI);
+  double sA_sec = o.structureDM_SEC_PT * (fSEC - cp * dSEC);
+  double sA_res = o.reserveDM_PT       * (fRES - cp * dRES);
+  double sA_mnt = o.maintenanceDM_PT   * (fMNT - cp * dMNT);
+  double sB_pri = o.structureDM_PRI_PT * dPRI;
+  double sB_sec = o.structureDM_SEC_PT * dSEC;
+  double sB_res = o.reserveDM_PT       * dRES;
+  double sB_mnt = o.maintenanceDM_PT   * dMNT;
+
+  // --- Exudation guarded via polymorphic getter (only FineRoot returns >0) ---
+	double sA_exu = 0.0, sB_exu = 0.0;
+	double exuPT  = o.getExudationPT();   // mg C per step; 0 for non-root organs
+	if (exuPT > 0.0 && !Double.isNaN(exuPT)) {
+    double fEXU = SinkUnloading_fromSugar(cp, o.km_res);
+    double dEXU = dSinkUnloading_fromSugar_dcp(cp, o.km_res);
+		sA_exu = exuPT * (fEXU - cp * dEXU);
+		sB_exu = exuPT * dEXU;
+	}
+
+	// sums
+	double sinkA = (sA_pri + sA_sec + sA_res + sA_mnt + sA_exu);
+	double sinkB = (sB_pri + sB_sec + sB_res + sB_mnt + sB_exu);
+
+  // Combine sources + sinks, convert units once here
+  o.sink_source_a = mgTogram * (sinkA + loadA);
+  o.sink_source_b = mgTogram * (sinkB + loadB);
+
+  if (debug_CT && (o instanceof Trunk || o instanceof Cordon || o instanceof StructuralRoot || o instanceof FruitService)) {
+    println(o.getClass().getSimpleName()
+      + " loadPT=" + o.loading_PT
+      + " priPT="  + o.structureDM_PRI_PT
+      + " secPT="  + o.structureDM_SEC_PT
+      + " resPT="  + o.reserveDM_PT
+      + " mntPT="  + o.maintenanceDM_PT
+      + " cp="     + cp
+      + " | loadA=" + loadA + " loadB=" + loadB
+      + " | priA="  + sA_pri + " priB=" + sB_pri
+      + " | secA="  + sA_sec + " secB=" + sB_sec
+      + " | resA="  + sA_res + " resB=" + sB_res
+      + " | mntA="  + sA_mnt + " mntB=" + sB_mnt
+      + " | A=" + (sinkA + loadA)
+      + " | B=" + (sinkB + loadB));
+  }
+}
+
+
+/* Carbon Dynamics Phases defined as groups --------------------------------- */
+
+//group Linearise: // linearise equations for sinks/sources 
+//left to right
+/**
+ * Linearises the sink/source relationships for all {@link GrowingOrgan} instances in the graph.
+ * <p>
+ * This method:
+ * <ul>
+ *   <li>Resets diagnostic accumulators for A/B coefficients and fluxes.</li>
+ *   <li>Invokes {@link #lineariseOrgan(GrowingOrgan)} on each organ to compute per-organ
+ *       linearised coefficients for sink and source terms.</li>
+ *   <li>Accumulates totals per organ type for debugging and diagnostics.</li>
+ *   <li>Optionally prints the per-class totals if {@code debug_CT} is enabled.</li>
+ * </ul>
+ * The linearisation results are stored in each organ's {@code sink_source_a} and {@code sink_source_b}
+ * fields, and also copied to {@code branch_flux_a} and {@code branch_flux_b}.
+ */
+static void linearise(PlantBase pb, CarbonTransportSolveContext ctx) [
+    {
+        ctx.leafA = ctx.leafB = ctx.leafJ = 0.0;
+        ctx.petioleA = ctx.petioleB = ctx.petioleJ = 0.0;
+        ctx.shootA = ctx.shootB = ctx.shootJ = 0.0;
+        ctx.fineRootA = ctx.fineRootB = ctx.fineRootJ = 0.0;
+        ctx.structuralRootA = ctx.structuralRootB = ctx.structuralRootJ = 0.0;
+        ctx.fruitA = ctx.fruitB = ctx.fruitJ = 0.0;
+    }
+
+    g:GrowingOrgan, (
+        g.plantNumber == pb.plantNumber
+    ) ::> {
+    	
+        // Perform per-organ sink/source linearisation
+        lineariseOrgan(g);
+
+        // Store branch fluxes for later use
+        g.branch_flux_a = g.sink_source_a;
+        g.branch_flux_b = g.sink_source_b;
+
+        // Accumulate diagnostics by organ type
+        double jTerm = g.sink_source_a + g.sink_source_b * g.cpt;
+
+        if (g instanceof Leaf) {
+            ctx.leafA += g.sink_source_a; ctx.leafB += g.sink_source_b; ctx.leafJ += jTerm;
+        } else if (g instanceof Petiole) {
+            ctx.petioleA += g.sink_source_a; ctx.petioleB += g.sink_source_b; ctx.petioleJ += jTerm;
+        } else if (g instanceof Internode || g instanceof Cordon || g instanceof Trunk) {
+            ctx.shootA += g.sink_source_a; ctx.shootB += g.sink_source_b; ctx.shootJ += jTerm;
+        } else if (g instanceof FineRoot) {
+            ctx.fineRootA += g.sink_source_a; ctx.fineRootB += g.sink_source_b; ctx.fineRootJ += jTerm;
+        } else if (g instanceof StructuralRoot) {
+            ctx.structuralRootA += g.sink_source_a; ctx.structuralRootB += g.sink_source_b; ctx.structuralRootJ += jTerm;
+        } else if (g instanceof FruitService) {
+            ctx.fruitA += g.sink_source_a; ctx.fruitB += g.sink_source_b; ctx.fruitJ += jTerm;
+        }
+    }
+
+    {
+        if (debug_CT) {
+            println(
+                "DEBUG A/B by class   A            B            j\n" +
+                "Leaf:        " + ctx.leafA + "  " + ctx.leafB + "  " + ctx.leafJ + "\n" +
+                "Petiole:     " + ctx.petioleA + "  " + ctx.petioleB + "  " + ctx.petioleJ + "\n" +
+                "Shoot(core): " + ctx.shootA + "  " + ctx.shootB + "  " + ctx.shootJ + "\n" +
+                "FineRoot:    " + ctx.fineRootA + "  " + ctx.fineRootB + "  " + ctx.fineRootJ + "\n" +
+                "StrRoot:     " + ctx.structuralRootA + "  " + ctx.structuralRootB + "  " + ctx.structuralRootJ + "\n" +
+                "Fruit:       " + ctx.fruitA + "  " + ctx.fruitB + "  " + ctx.fruitJ
+            );
+        }
+    }
+]
+
+
+/* -------------------------------------------------------------------------- */
+//UpdateBranchFlux:	
+//backward transport, folding all the carbon flux
+/* -------------------------------------------------------------------------- */
+// UpdateBranchFlux:
+// Backward transport, folding all the carbon flux
+
+/**
+ * Propagate branch fluxes upstream along each axis (shoot) by folding from
+ * terminal {@code Internode}s toward the plant base, aggregating contributions
+ * from local sinks and multiple child organs (petioles, fruits, and lateral
+ * internodes). Cordon and Trunk nodes are covered implicitly because they
+ * subclass {@code Internode}.
+ *
+ * <p><b>Purpose</b>:
+ * Compute per-axis carbon transport terms {@code branch_flux_a} and
+ * {@code branch_flux_b} by:
+ * <ol>
+ *   <li>Seeding the deepest internode in each order with its own sink,
+ *       plus all child petiole/fruit fluxes;</li>
+ *   <li>Walking upstream via {@code getPredecessor()}, accumulating the
+ *       downstream branch (from the node just processed) plus local child
+ *       organ fluxes at each upstream internode (including Cordon/Trunk).</li>
+ * </ol>
+ *
+ * <p><b>Key features</b>:
+ * <ul>
+ *   <li>Performs per-order, per-rank folding of internodes.</li>
+ *   <li>Handles structural root folding layer-by-layer via parent links.</li>
+ *   <li>Combines both shoot and root carbon fluxes at the PlantBase.</li>
+ *   <li>Uses {@code foldTick} to prevent multiple writes within one iteration.</li>
+ * </ul>
+ *
+ * <p><b>Integration</b>:
+ * Call this after all sink/source terms are computed for the current time step
+ * and before any reporting or forward transport operations.
+ * 
+ * @since 2025-08
+ */
+
+// Add a global flag to control debug_CT output
+
+
+static int foldTick = 0;
+static void updateBranchFlux(PlantBase pb, CarbonTransportSolveContext ctx) [
+   {
+		  long scopedOrganCount = count((* g:GrowingOrgan, (
+		    g.plantNumber == pb.plantNumber
+		  ) *));
+		  if (scopedOrganCount > 0) {
+		    int persistedFoldStep = max((* g:GrowingOrgan, (
+		      g.plantNumber == pb.plantNumber
+		    ) *)[lastFoldStep]);
+		    if (foldTick < persistedFoldStep) foldTick = persistedFoldStep;
+		  }
+		  ctx.foldStep = ++foldTick;
+		}
+
+
+		p:Petiole (-->){1,5} l:Leaf, (
+		  p.plantNumber == pb.plantNumber &&
+		  l.plantNumber == pb.plantNumber
+		) ::> {
+		  if (l.lastFoldStep == ctx.foldStep) {
+			if (debug_CT)
+				println("WARN(FOLD): double write Leaf id=" + l.getId());
+		  } else {
+			p.branch_flux_a += l.branch_flux_a;
+			p.branch_flux_b += l.branch_flux_b;
+			l.lastFoldStep = ctx.foldStep;     // mark leaf as folded this tick
+		  }
+
+		  if (p.lastFoldStep == ctx.foldStep) {
+			if (debug_CT) println("WARN(FOLD): double write Petiole id=" + p.getId());
+		  }
+		  p.lastFoldStep = ctx.foldStep;       // petiole participates this tick
+		  p.Update_Branch_Flux();
+		}
+
+		p:Petiole (-->){1,5} l:Leaf, (
+		  p.rank != l.rank &&
+		  p.plantNumber == pb.plantNumber &&
+		  l.plantNumber == pb.plantNumber
+		) ::> {
+	  if (debug_CT) {
+		println("WARN(CT-LEAF): Petiole-Leaf rank mismatch"
+			+ " petioleId=" + p.getId()
+			+ " petioleRank=" + p.rank
+			+ " leafId=" + l.getId()
+			+ " leafRank=" + l.rank
+			+ " leafType=" + l.organType
+			+ " leafParentID=" + l.parentID
+			+ " petioleParentID=" + p.parentID);
+	  }
+	}
+
+
+  // ---- INTERNODE FOLD (level-based, no double counting) ----
+  {
+    long scopedInternodeCount = count((* it:Internode, (
+      it.plantNumber == pb.plantNumber
+    ) *));
+    if (scopedInternodeCount > 0) {
+    int minOrder = min((* it:Internode, (
+      it.plantNumber == pb.plantNumber
+    ) *)[order]);
+    int maxOrder = max((* it:Internode, (
+      it.plantNumber == pb.plantNumber
+    ) *)[order]);
+    
+    for (int o = maxOrder; o >= minOrder; o--) {
+      if (count((* it:Internode, (
+        it.order == o &&
+        it.plantNumber == pb.plantNumber
+      ) *)) == 0) continue;
+
+      int minRank = min((* it:Internode, (
+        it.order == o &&
+        it.plantNumber == pb.plantNumber
+      ) *)[rank]);
+      int maxRank = max((* it:Internode, (
+        it.order == o &&
+        it.plantNumber == pb.plantNumber
+      ) *)[rank]);
+
+      for (int r = maxRank; r >= minRank; r--) {
+        [
+          nd:Internode, (
+            nd.order == o && nd.rank == r &&
+            nd.plantNumber == pb.plantNumber
+          ) ::> {
+            if (nd.lastFoldStep == ctx.foldStep && debug_CT) {
+              println("WARN(FOLD): double write Internode id=" + nd.getId()
+                      + " order=" + o + " rank=" + r);
+            }
+            nd.lastFoldStep = ctx.foldStep;
+
+            double sumA = nd.sink_source_a;
+            double sumB = nd.sink_source_b;
+            int k, n;
+
+            n = nd.getChildInternodeCount();
+            for (k = 0; k < n; k++) {
+              long cid = nd.getChildInternodeIdAt(k);
+              Internode ch = nd.getInternode(cid);
+              if (ch != null &&
+                  ch.plantNumber == pb.plantNumber) {
+                sumA += ch.branch_flux_a;
+                sumB += ch.branch_flux_b;
+                if (ch.lastFoldStep != ctx.foldStep && debug_CT) {
+                  println("ERROR(FOLD): child int id=" + ch.getId()
+                          + " not folded before parent id=" + nd.getId()
+                          + " (order=" + o + " rank=" + r + ")");
+                }
+              }
+            }
+
+           // Petioles
+			n = nd.getChildPetioleCount();
+			for (k = 0; k < n; k++) {
+			  long pid = nd.getChildPetioleIdAt(k);
+			  Petiole p = nd.getPetiole(pid);
+				  if (p != null &&
+				      p.plantNumber == pb.plantNumber) {
+				sumA += p.branch_flux_a;
+				sumB += p.branch_flux_b;
+					if (p.lastFoldStep != ctx.foldStep && debug_CT) {
+				  println("WARN(FOLD): petiole not stamped before parent id=" + nd.getId());
+				}
+					p.lastFoldStep = ctx.foldStep;
+			  }
+			}
+			
+			// Fruits
+			n = nd.getChildFruitCount();
+			for (k = 0; k < n; k++) {
+			  long fid = nd.getChildFruitIdAt(k);
+			  FruitService f = nd.getFruit(fid);
+				  if (f != null &&
+				      f.plantNumber == pb.plantNumber) {
+				sumA += f.branch_flux_a;
+				sumB += f.branch_flux_b;
+					f.lastFoldStep = ctx.foldStep;
+			  }
+			}
+			
+			// Flowers
+			n = nd.getChildFlowerCount();
+			for (k = 0; k < n; k++) {
+			  long fid = nd.getChildFlowerIdAt(k);
+			  Flower fl = nd.getFlower(fid);
+				  if (fl != null &&
+				      fl.plantNumber == pb.plantNumber) {
+				sumA += fl.branch_flux_a;
+				sumB += fl.branch_flux_b;
+					fl.lastFoldStep = ctx.foldStep;
+			  }
+			}
+			
+			nd.branch_flux_a = sumA;
+			nd.branch_flux_b = sumB;
+				nd.lastFoldStep = ctx.foldStep;   // stamp this internode itself
+			nd.Update_Branch_Flux();
+			
+
+          }
+        ]
+      }
+    }
+    }
+  }
+	
+		sd:StructuralRoot sdr:FineRoot,
+		(sdr.parentID == sd.getId()
+		 && sd.frID == sdr.getId()
+			 && sd.plantNumber == pb.plantNumber
+			 && sdr.plantNumber == pb.plantNumber
+			 && sd.ID == sdr.ID) ::> {
+		  sd.branch_flux_a = sd.sink_source_a + sdr.branch_flux_a;
+		  sd.branch_flux_b = sd.sink_source_b + sdr.branch_flux_b;
+			  sdr.lastFoldStep = ctx.foldStep;   // mark terminal
+	  if (debug_CT) println("sd. " + sd.nodeNumber + " sd. " + sd.branch_flux_a);
+		  sd.lastFoldStep = ctx.foldStep;    // this SR participated too
+	  sd.Update_Branch_Flux();
+	}
+	
+		sd:StructuralRoot,
+		( sd.plantNumber == pb.plantNumber &&
+		  sd.layer == max((* it:StructuralRoot,
+							(it.plantNumber == pb.plantNumber &&
+							 it.gridX == sd.gridX &&
+							 it.gridY == sd.gridY) *)[layer]) ) ::> {
+	
+	  StructuralRoot cur = sd;
+	  while (cur != null) {
+		Organ po = cur.getParent();
+		if (po == null) break;
+	
+			if (po instanceof StructuralRoot) {
+			  StructuralRoot par = (StructuralRoot) po;
+			  if (par.plantNumber != pb.plantNumber) break;
+			  par.branch_flux_a += cur.branch_flux_a;
+			  par.branch_flux_b += cur.branch_flux_b;
+			  cur.lastFoldStep = ctx.foldStep;   // child SR stamped
+			  par.Update_Branch_Flux();
+			  par.lastFoldStep = ctx.foldStep;   // parent SR stamped
+		  cur = par;
+		  continue;
+		}
+		break;
+	  }
+	}
+
+
+
+
+		  {
+	    StructuralRoot st =  pb.getChildStructuralRoot();
+	    if (st != null && (st.plantNumber != pb.plantNumber)) st = null;
+	    if(debug_CT) println((st != null) ? ("st: " + st.layer) : "st: none");
+    double sdlA = (st!=null) ? st.branch_flux_a : 0.0;
+    double sdlB = (st!=null) ? st.branch_flux_b : 0.0;
+
+	    Internode tr = pb.getChildInternode();
+	    if (tr != null && (tr.plantNumber != pb.plantNumber)) tr = null;
+
+    double sdrA = (tr!=null) ? tr.branch_flux_a : 0.0;
+    double sdrB = (tr!=null) ? tr.branch_flux_b : 0.0;
+
+    pb.branch_flux_a = sdlA + sdrA;
+    pb.branch_flux_b = sdlB + sdrB;
+
+    if (debug_CT) {
+      println("pb " + pb.branch_flux_a + " sdl " + sdlA + " sdr " + sdrA);
+      println("pb " + pb.branch_flux_b + " sdl " + sdlB + " sdr " + sdrB);
+	      long totalF = count((* g:GrowingOrgan, (
+	        g.plantNumber == pb.plantNumber
+	      ) *));
+	      long foldedF = count((* g:GrowingOrgan, (
+	        g.lastFoldStep == ctx.foldStep &&
+	        g.plantNumber == pb.plantNumber
+	      ) *));
+	      println("FOLD COVERAGE: " + foldedF + "/" + totalF);
+	      long nFlower = count((* f:Flower, (
+	        f.plantNumber == pb.plantNumber
+	      ) *));
+	      long nFlowerFolded = count((* f:Flower, (
+	        f.lastFoldStep == ctx.foldStep &&
+	        f.plantNumber == pb.plantNumber
+	      ) *));
+      println("CT FLOWER FOLD COVERAGE: flower=" + nFlowerFolded + "/" + nFlower);
+    }
+  }
+
+	  f:Flower, (
+	    f.plantNumber == pb.plantNumber
+	  ) ::> {
+    if (debug_CT) {
+      if (f.parentID <= 0) {
+        println("WARN(CT-FLOWER): Flower has no transport parent"
+          + " flowerId=" + f.getId()
+          + " rank=" + f.rank
+          + " order=" + f.order
+          + " organType=" + f.organType);
+      } else {
+        Organ flowerParent = f.getParent();
+        if (flowerParent == null) {
+          println("WARN(CT-FLOWER): Flower parent lookup failed"
+            + " flowerId=" + f.getId()
+            + " parentID=" + f.parentID);
+        } else if (!(flowerParent instanceof Internode)) {
+          println("WARN(CT-FLOWER): Flower parent is not transport axis"
+            + " flowerId=" + f.getId()
+            + " parentID=" + f.parentID
+            + " parentClass=" + flowerParent.getClass().getName());
+        } else {
+          Internode axis = (Internode) flowerParent;
+          if (axis.plantNumber != pb.plantNumber) {
+            println("WARN(CT-FLOWER): Flower parent belongs to another plant"
+              + " flowerId=" + f.getId()
+              + " parentID=" + axis.getId());
+          } else if (!axis.hasChildFlowerId(f.getId())) {
+            println("WARN(CT-FLOWER): Parent missing childFlowerId"
+              + " flowerId=" + f.getId()
+              + " parentID=" + axis.getId()
+              + " flowerRank=" + f.rank
+              + " flowerOrder=" + f.order);
+          }
+        }
+      }
+    }
+  }
+  
+]
+
+
+
+/*---------------------------------------------------------------------------*/
+
+//group UpdateCarbonPotentialUnfold:
+
+/**
+ * UpdateCarbonPotential: UNFOLD from plant base to all child organs
+ * 
+ * <p><b>Purpose:</b> Calculates the carbon potential (cpb/cpt) of all transport-linked organs
+ * from the source (PlantBase) outward to sinks. Each organ's cpt is computed from its upstream cpb
+ * using its flux values and resistance parameters (r, xp), enforcing directionality and conservation.</p>
+ *
+ * <p><b>Method:</b>
+ * <ul>
+ *   <li>PlantBase is seeded with cp = -A/B.</li>
+ *   <li>Trunk and basal StructuralRoot are initialized from PB.cpt.</li>
+ *   <li>StructuralRoots unfold by layer (deep to surface), via parent–child link.</li>
+ *   <li>Shoots unfold from small → large internode order, rank-wise, using child lists.</li>
+ *   <li>Petioles and Fruits are pushed similarly from Internode parent.</li>
+ *   <li>Leaf cp is synced from petiole.</li>
+ * </ul></p>
+ *
+ * <p><b>Debug control:</b> All output respects a global <code>debug_CT</code> flag.</p>
+ *
+ * @since 2025-08
+ */
+static int unfoldTick = 0;            // monotonic counter
+
+static boolean isFiniteCarbonValue(double v) {
+    return !Double.isNaN(v) && !Double.isInfinite(v);
+}
+
+static boolean isValidPhi(double phi) {
+    return isFiniteCarbonValue(phi) && phi >= CT_PHI_FLOOR;
+}
+
+static double safePhi(double value) {
+    return isValidPhi(value) ? value : CT_PHI_FLOOR;
+}
+
+static double validPlantBasePhiOrFloor(double phi) {
+    if (!isValidPhi(phi)) return CT_PHI_FLOOR;
+    double sugar = sugarFromCp(phi);
+    return (isFiniteCarbonValue(sugar) && sugar >= 0.0) ? phi : CT_PHI_FLOOR;
+}
+
+static double retainPlantBasePhi(PlantBase pb, double fallbackPhi, int reason) {
+    pb.ctPlantBaseFallbackUsed = 1;
+    pb.ctPlantBaseFallbackReason = reason;
+    pb.ctPlantBaseFallbackCount++;
+    return fallbackPhi;
+}
+
+static double solvePlantBasePhi(double branchA, double branchB,
+        double previousPhi, PlantBase pb) {
+    double fallbackPhi = validPlantBasePhiOrFloor(previousPhi);
+    pb.ctPlantBaseFallbackUsed = 0;
+    pb.ctPlantBaseFallbackReason = 0;
+    pb.ctPlantBaseDenominator = branchB;
+
+    if (!isFiniteCarbonValue(branchA) || !isFiniteCarbonValue(branchB)) {
+        return retainPlantBasePhi(pb, fallbackPhi, 1);
+    }
+    if (Math.abs(branchB) <= CT_PB_B_ABS_MIN) {
+        return retainPlantBasePhi(pb, fallbackPhi, 2);
+    }
+
+    // Divide only after both folded coefficients and the denominator are accepted.
+    double candidate = -branchA / branchB;
+    if (!isValidPhi(candidate)) {
+        return retainPlantBasePhi(pb, fallbackPhi, 3);
+    }
+
+    double sugar = sugarFromCp(candidate);
+    if (!isFiniteCarbonValue(sugar) || sugar < 0.0) {
+        return retainPlantBasePhi(pb, fallbackPhi, 4);
+    }
+    return candidate;
+}
+
+static void applyGuardedPlantBaseCarbonBoundary(PlantBase pb) {
+    double previousPhi = pb.cpt;
+    pb.cpb = solvePlantBasePhi(
+        pb.branch_flux_a, pb.branch_flux_b, previousPhi, pb);
+    pb.cpt = pb.cpb;
+    pb.j = pb.branch_flux_a + pb.branch_flux_b * pb.cpt;
+    pb.ctPlantBaseResidual = pb.j;
+    pb.sugarConcentration_phloem = sugarFromCp(pb.cpt);
+    pb.sugarConcentration_phloem_pre = pb.sugarConcentration_phloem;
+}
+
+static void updateCarbonPotential(PlantBase pb, CarbonTransportSolveContext ctx)
+[
+  {
+    long scopedOrganCount = count((* g:GrowingOrgan, (
+      g.plantNumber == pb.plantNumber
+    ) *));
+    if (scopedOrganCount > 0) {
+      int persistedUnfoldStep = max((* g:GrowingOrgan, (
+        g.plantNumber == pb.plantNumber
+      ) *)[lastUnfoldStep]);
+      if (unfoldTick < persistedUnfoldStep) unfoldTick = persistedUnfoldStep;
+    }
+    ctx.unfoldStep = ++unfoldTick;
+  }
+
+  {
+    applyGuardedPlantBaseCarbonBoundary(pb);
+    //println("pb.cpt: " + pb.cpt + " pb.sugarConcentration_phloem: " + pb.sugarConcentration_phloem);
+    if (debug_CT) println("PB A=" + pb.branch_flux_a + " B=" + pb.branch_flux_b + " cpt=" + pb.cpt + " j=" + pb.j);
+  }
+
+// --- UNFOLD from PlantBase to Trunk + Structural-Root tree (top-down) ---
+{
+  // 1) PlantBase → basal StructuralRoot (seed) and Trunk
+  StructuralRoot s0 = pb.getChildStructuralRoot();
+  if (s0 != null && (s0.plantNumber != pb.plantNumber)) s0 = null;
+  if (s0 != null) {
+    s0.cpb = pb.cpt;
+    s0.cpt = safePhi(s0.cpb * (1 - s0.branch_flux_b * s0.r) - s0.branch_flux_a * s0.r - s0.xp);
+    if (debug_CT) println("SR-UNFOLD: basal id=" + s0.getId() + " layer=" + s0.layer + " cpb=" + s0.cpb + " cpt=" + s0.cpt);
+    if (s0.lastUnfoldStep == ctx.unfoldStep && debug_CT) println("WARN: double write SR (basal) id=" + s0.getId());
+    s0.lastUnfoldStep = ctx.unfoldStep;
+
+    // 2) Top-down traversal of the structural-root tree
+    //    (DFS using raw ArrayList for Java 1.5 compatibility)
+    java.util.ArrayList stack = new java.util.ArrayList();
+    stack.add(s0);
+
+    while (!stack.isEmpty()) {
+      StructuralRoot parent = (StructuralRoot) stack.remove(stack.size() - 1);
+
+      int n = parent.getChildStructuralRootCount();
+      for (int k = 0; k < n; k++) {
+        long cid = parent.getChildStructuralRootIdAt(k);
+        StructuralRoot ch = parent.getStructuralRoot(cid);
+        if (ch == null ||
+            ch.plantNumber != pb.plantNumber) continue;
+
+        ch.cpb = parent.cpt;
+        ch.cpt = safePhi(ch.cpb * (1 - ch.branch_flux_b * ch.r) - ch.branch_flux_a * ch.r - ch.xp);
+
+        if (debug_CT) {
+          println("SR-UNFOLD: parent id=" + parent.getId() + " L" + parent.layer
+                + " -> child id=" + ch.getId() + " L" + ch.layer
+                + " | cpb=" + ch.cpb + " cpt=" + ch.cpt);
+        }
+        if (ch.lastUnfoldStep == ctx.unfoldStep && debug_CT) println("WARN: double write SR id=" + ch.getId());
+        ch.lastUnfoldStep = ctx.unfoldStep;
+
+        stack.add(ch);
+      }
+    }
+  } else if (debug_CT) {
+    println("SR-UNFOLD: no basal StructuralRoot under PlantBase.");
+  }
+
+  // Trunk unfold stays as before
+  Internode tr = pb.getChildInternode();
+  if (tr != null && (tr.plantNumber != pb.plantNumber)) tr = null;
+  if (tr != null) {
+    tr.cpb = pb.cpt;
+    tr.cpt = safePhi(tr.cpb * (1 - tr.branch_flux_b * tr.r) - tr.branch_flux_a * tr.r - tr.xp);
+    if (debug_CT) println("unfolding trunk");
+    if (tr.lastUnfoldStep == ctx.unfoldStep && debug_CT) println("WARN: double write trunk id=" + tr.getId());
+    tr.lastUnfoldStep = ctx.unfoldStep;
+  }
+}
+
+// --- UNFOLD: StructuralRoot → FineRoot (terminal) ---
+	sd:StructuralRoot sdr:FineRoot,
+	(sdr.parentID == sd.getId()
+	 && sd.frID == sdr.getId()
+	 && sd.plantNumber == pb.plantNumber
+	 && sdr.plantNumber == pb.plantNumber
+	 && sd.ID == sdr.ID) ::> {
+	  // FineRoot takes cpb from its parent StructuralRoot cpt
+	  sdr.cpb = sd.cpt;
+
+  // Standard potential update: cpt = cpb*(1 - B*r) - A*r - xp (clamped)
+  sdr.cpt = safePhi(sdr.cpb * (1 - sdr.branch_flux_b * sdr.r)
+                            - sdr.branch_flux_a * sdr.r
+                            - sdr.xp);
+
+  if (debug_CT) {
+    println("FR-UNFOLD: SR id=" + sd.getId() + " L" + sd.layer
+          + " -> FR id=" + sdr.getId()
+          + " | cpb=" + sdr.cpb + " cpt=" + sdr.cpt);
+  }
+
+  // Double-write guard (same pattern as trunk/internodes)
+  if (sdr.lastUnfoldStep == ctx.unfoldStep && debug_CT) {
+    println("WARN: double write FineRoot id=" + sdr.getId());
+  }
+  sdr.lastUnfoldStep = ctx.unfoldStep;
+}
+
+
+//unfolding the shoot
+  {
+    long scopedInternodeCount = count((* it:Internode, (
+      it.plantNumber == pb.plantNumber
+    ) *));
+    if (scopedInternodeCount > 0) {
+    int minOrder = min((* it:Internode, (
+      it.plantNumber == pb.plantNumber
+    ) *)[order]);
+    int maxOrder = max((* it:Internode, (
+      it.plantNumber == pb.plantNumber
+    ) *)[order]);
+    for (int o = minOrder; o <= maxOrder; o++) {
+      if (count((* it:Internode, (
+        it.order == o &&
+        it.plantNumber == pb.plantNumber
+      ) *)) == 0) continue;
+      int minRank = min((* it:Internode, (
+        it.order == o &&
+        it.plantNumber == pb.plantNumber
+      ) *)[rank]);
+      int maxRank = max((* it:Internode, (
+        it.order == o &&
+        it.plantNumber == pb.plantNumber
+      ) *)[rank]);
+      for (int r = minRank; r <= maxRank; r++) {
+        [ parent:Internode, (
+          parent.order == o && parent.rank == r &&
+          parent.plantNumber == pb.plantNumber
+        ) ::> {
+          if (debug_CT) println("O" + o + " rank " + r + " id=" + parent.getId() + " cpb=" + parent.cpb + " cpt=" + parent.cpt);
+          int k, n;
+
+          n = parent.getChildInternodeCount();
+          for (k = 0; k < n; k++) {
+            long id = parent.getChildInternodeIdAt(k);
+            Internode ch = parent.getInternode(id);
+            if (ch != null && ch.parentID == parent.getId() &&
+                ch.plantNumber == pb.plantNumber) {
+              if (ch.lastUnfoldStep == ctx.unfoldStep && debug_CT) println("WARN: double write Internode id=" + ch.getId());
+              ch.lastUnfoldStep = ctx.unfoldStep;
+              ch.cpb = parent.cpt;
+              ch.cpt = safePhi(ch.cpb * (1 - ch.branch_flux_b * ch.r) - ch.branch_flux_a * ch.r - ch.xp);
+              if (debug_CT) println("  -> child int id=" + ch.getId() + " cpb=" + ch.cpb + " cpt=" + ch.cpt);
+            }
+          }
+
+          n = parent.getChildPetioleCount();
+          for (k = 0; k < n; k++) {
+            Petiole p = parent.getPetiole(parent.getChildPetioleIdAt(k));
+            if (p != null &&
+                p.plantNumber == pb.plantNumber) {
+              if (p.lastUnfoldStep == ctx.unfoldStep && debug_CT) println("WARN: double write Petiole id=" + p.getId());
+              p.lastUnfoldStep = ctx.unfoldStep;
+              p.cpb = parent.cpt;
+              p.cpt = safePhi(p.cpb * (1 - p.branch_flux_b * p.r) - p.branch_flux_a * p.r - p.xp);
+              if (debug_CT) println("  -> child petiole id=" + p.getId() + " cpb=" + p.cpb + " cpt=" + p.cpt);
+            }
+          }
+
+          n = parent.getChildFruitCount();
+          for (k = 0; k < n; k++) {
+            FruitService f = parent.getFruit(parent.getChildFruitIdAt(k));
+            if (f != null &&
+                f.plantNumber == pb.plantNumber) {
+              if (f.lastUnfoldStep == ctx.unfoldStep && debug_CT) println("WARN: double write Fruit id=" + f.getId());
+              f.lastUnfoldStep = ctx.unfoldStep;
+              f.cpb = parent.cpt;
+              f.cpt = safePhi(f.cpb);
+              if (debug_CT) 
+              	  println("  -> child fruit id=" + f.getId() + " cpb=" + f.cpb + " cpt=" + f.cpt);
+            }
+          }
+          
+          n = parent.getChildFlowerCount();
+          for (k = 0; k < n; k++) {
+            Flower fl = parent.getFlower(parent.getChildFlowerIdAt(k));
+            if (fl != null &&
+                fl.plantNumber == pb.plantNumber) {
+              if (fl.lastUnfoldStep == ctx.unfoldStep && debug_CT) println("WARN: double write Flower id=" + fl.getId());
+              fl.lastUnfoldStep = ctx.unfoldStep;
+              fl.cpb = parent.cpt;
+              fl.cpt = safePhi(fl.cpb * (1 - fl.branch_flux_b * fl.r) - fl.branch_flux_a * fl.r - fl.xp);
+              if (debug_CT) println("  -> child flower id=" + fl.getId() + " cpb=" + fl.cpb + " cpt=" + fl.cpt);
+            }
+          }
+          
+        } ]
+      }
+    }
+    }
+  }
+
+	sd:Petiole (-->){1,5} sdr:Leaf, (
+	  sd.rank == sdr.rank &&
+	  sd.plantNumber == pb.plantNumber &&
+	  sdr.plantNumber == pb.plantNumber
+	) ::> {
+	  sd.cpb = safePhi(sd.cpb);
+	  sd.cpt = safePhi(sd.cpt);
+	
+	  sdr.cpb = sd.cpt;
+	  sdr.cpt = sdr.cpb;
+	  
+	  if (sdr.lastUnfoldStep == ctx.unfoldStep && debug_CT) {
+		println("WARN: double write Leaf id=" + sdr.getId());
+	  }
+	  sdr.lastUnfoldStep = ctx.unfoldStep;
+	}
+
+	p:Petiole (-->){1,5} l:Leaf, (
+	  p.rank != l.rank &&
+	  p.plantNumber == pb.plantNumber &&
+	  l.plantNumber == pb.plantNumber
+	) ::> {
+	  if (debug_CT) {
+		println("WARN(CT-LEAF): Petiole-Leaf rank mismatch"
+			+ " petioleId=" + p.getId()
+			+ " petioleRank=" + p.rank
+			+ " leafId=" + l.getId()
+			+ " leafRank=" + l.rank
+			+ " leafType=" + l.organType
+			+ " leafParentID=" + l.parentID
+			+ " petioleParentID=" + p.parentID);
+	  }
+	}
+
+  {
+    if (debug_CT) 
+    {
+      long total = count((* g:GrowingOrgan, (
+        g.plantNumber == pb.plantNumber
+      ) *));
+      long unfolded = count((* g:GrowingOrgan, (
+        g.lastUnfoldStep == ctx.unfoldStep &&
+        g.plantNumber == pb.plantNumber
+      ) *));
+      println("UNFOLD COVERAGE: " + unfolded + "/" + total);
+      long nLeaf = count((* l:Leaf, (
+        l.plantNumber == pb.plantNumber
+      ) *));
+      long nLeafUnfolded = count((* l:Leaf, (
+        l.lastUnfoldStep == ctx.unfoldStep &&
+        l.plantNumber == pb.plantNumber
+      ) *));
+      long nRosetteLeaf = count((* l:Leaf, (
+        "rosetteLeaf".equals(l.organType) &&
+        l.plantNumber == pb.plantNumber
+      ) *));
+      long nRosetteLeafUnfolded = count((* l:Leaf, (
+        "rosetteLeaf".equals(l.organType) &&
+        l.lastUnfoldStep == ctx.unfoldStep &&
+        l.plantNumber == pb.plantNumber
+      ) *));
+      println("CT LEAF UNFOLD COVERAGE: leaf=" + nLeafUnfolded + "/" + nLeaf
+        + " rosette=" + nRosetteLeafUnfolded + "/" + nRosetteLeaf);
+      long nFlower = count((* f:Flower, (
+        f.plantNumber == pb.plantNumber
+      ) *));
+      long nFlowerUnfolded = count((* f:Flower, (
+        f.lastUnfoldStep == ctx.unfoldStep &&
+        f.plantNumber == pb.plantNumber
+      ) *));
+      println("CT FLOWER UNFOLD COVERAGE: flower=" + nFlowerUnfolded + "/" + nFlower);
+  	}
+}
+
+	l:Leaf, (
+	  l.lastUnfoldStep != ctx.unfoldStep &&
+	  l.plantNumber == pb.plantNumber
+	) ::> {
+	  if (debug_CT) {
+		println("WARN(CT-LEAF): Leaf not unfolded"
+			+ " leafId=" + l.getId()
+			+ " rank=" + l.rank
+			+ " organType=" + l.organType
+			+ " parentID=" + l.parentID);
+	  }
+	}
+
+	f:Flower, (
+	  f.plantNumber == pb.plantNumber
+	) ::> {
+	  if (debug_CT) {
+		if (f.parentID <= 0) {
+		  println("WARN(CT-FLOWER): Flower has no transport parent"
+			+ " flowerId=" + f.getId()
+			+ " rank=" + f.rank
+			+ " order=" + f.order
+			+ " organType=" + f.organType);
+		} else {
+		  Organ flowerParent = f.getParent();
+		  if (flowerParent == null) {
+			println("WARN(CT-FLOWER): Flower parent lookup failed"
+			  + " flowerId=" + f.getId()
+			  + " parentID=" + f.parentID);
+		  } else if (!(flowerParent instanceof Internode)) {
+			println("WARN(CT-FLOWER): Flower parent is not transport axis"
+			  + " flowerId=" + f.getId()
+			  + " parentID=" + f.parentID
+			  + " parentClass=" + flowerParent.getClass().getName());
+			  } else {
+				Internode axis = (Internode) flowerParent;
+				if (axis.plantNumber != pb.plantNumber) {
+				  println("WARN(CT-FLOWER): Flower parent belongs to another plant"
+					+ " flowerId=" + f.getId()
+					+ " parentID=" + axis.getId());
+				} else if (!axis.hasChildFlowerId(f.getId())) {
+			  println("WARN(CT-FLOWER): Parent missing childFlowerId"
+				+ " flowerId=" + f.getId()
+				+ " parentID=" + axis.getId()
+				+ " flowerRank=" + f.rank
+				+ " flowerOrder=" + f.order);
+			}
+		  }
+		}
+		if (Double.isNaN(f.cpt) || Double.isInfinite(f.cpt) || f.cpt < 0.0) {
+		  println("WARN(CT-FLOWER): Invalid flower cpt"
+			+ " flowerId=" + f.getId()
+			+ " cpt=" + f.cpt
+			+ " parentID=" + f.parentID);
+		}
+	  }
+	}
+
+]
+
+/** --------------------------------------------------------------------------
+ * UpdateFlow — one Newton step that updates each organ’s linearized
+ * source/sink flux j using the current local carbon potential (cpt).
+ *
+ * <p><b>What it does</b>
+ * <ul>
+ *   <li>For every GrowingOrgan <code>sd</code>, computes the new flux
+ *       <code>new_j = sd.sink_source_a + sd.sink_source_b * sd.cpt</code>,
+ *       i.e. the first-order (Taylor) linearization of the Michaelis–Menten
+ *       sink/source function with respect to carbon potential Φ (stored here
+ *       as <code>cpt</code> at the “top” side of the transport segment).</li>
+ *   <li>Saves the residual <code>sd.err = new_j - sd.j</code> and accumulates
+ *       it into the per-call convergence residual.</li>
+ *   <li>Applies a small-current threshold <code>EPSILON</code> and clamps
+ *       near-zero fluxes to 0 for numerical stability.</li>
+ *   <li>Guards against invalid carbon potentials: if <code>cpt &lt; 0</code> or
+ *       NaN/Inf, reset to a small positive value.</li>
+ *   <li>Calls <code>derive()</code> to update derived state after flux changes.</li>
+ * </ul>
+ *
+ * <p><b>Sign & units</b>
+ * <ul>
+ *   <li><code>sd.j</code> is the net <em>mass carbon transport</em> for that organ
+ *       (gC·h⁻¹). Convention: <em>positive</em> j = unloading from phloem to the organ
+ *       (sink); <em>negative</em> j = loading from organ to phloem (source).</li>
+ *   <li><code>sd.sink_source_a</code>, <code>sd.sink_source_b</code> are the linear
+ *       coefficients a, b from the Taylor expansion of the sink/source law
+ *       around Φ₀, i.e. <code>j ≈ a + b Φ</code>.</li>
+ * </ul>
+ *
+ * <p><b>Background</b>
+ * In the coupled phloem/xylem transport (CT) model, we solve mass flux
+ * using the “carbon potential” Φ ≝ c²/2 so that the transport law is linear
+ * in dΦ/dx. Organs’ nonlinear sink/source laws are linearized as
+ * <code>j = a + b Φ</code> for each iteration of the global solve.
+ * See: definition of Φ and j, transport equation, and linearization of
+ * sink functions with a and b. 
+ * -------------------------------------------------------------------------- */
+static void updateFlow(PlantBase pb, CarbonTransportSolveContext ctx)
+[
+  sd:GrowingOrgan, (
+    sd.plantNumber == pb.plantNumber
+  ) ::>
+  {
+    double new_j = 0.0;
+
+    if (sd.cpt >= 0.0 && !Double.isNaN(sd.cpt) && !Double.isInfinite(sd.cpt)) {
+      // Linearized sink/source: j = a + b * Φ (Φ stored as cpt here)
+      new_j = sd.sink_source_a + sd.sink_source_b * sd.cpt;
+
+      // Residual for this organ and accumulate absolute error
+      sd.err = new_j - sd.j;
+      ctx.convergenceError += Math.abs(sd.err);
+      // Threshold very small currents for stability
+      if (Math.abs(new_j) < EPSILON) {
+        sd.j = 0.0;
+      } else {
+        sd.j = new_j;
+      }
+    } else {
+      // Invalid Φ: reset and penalize residual to keep the solver progressing
+      sd.cpt = 1e-5;
+      sd.err = 1.0;
+      ctx.convergenceError += 1.0;
+    }
+
+    
+    if (debug_CT) {
+      println(
+        "sd." + sd.nodeNumber +
+        " j="   + sd.j +
+        " cpt=" + sd.cpt +
+        " cpb=" + sd.cpb +
+        " sink_a=" + sd.sink_source_a +
+        " sink_b=" + sd.sink_source_b
+      );
+    }
+  }
+
+  
+ {
+  if (debug_CT) {
+ //if(true) {
+    println(
+      "Iter " + ctx.iterationCount +
+      " | sumj=" + sum((* g:GrowingOrgan, (
+        g.plantNumber == pb.plantNumber
+      ) *)[j]) +
+      " | sum|j|=" + sum(Math.abs((* g:GrowingOrgan, (
+        g.plantNumber == pb.plantNumber
+      ) *)[j])) +
+      " | internode=" + sum((* g:Internode, (
+        g.plantNumber == pb.plantNumber
+      ) *)[j]) +
+      " | structuralRoot=" + sum((* g:StructuralRoot, (
+        g.plantNumber == pb.plantNumber
+      ) *)[j]) +
+      " | Leaf=" + sum((* g:Leaf, (
+        g.plantNumber == pb.plantNumber
+      ) *)[j]) +
+      " | Fruit=" + sum((* g:FruitService, (
+        g.plantNumber == pb.plantNumber
+      ) *)[j])
+    );
+    
+   // After updateFlow() + convergence, add:
+
+  double sumJ = sum((* g:GrowingOrgan, (
+    g.plantNumber == pb.plantNumber
+  ) *)[j]);
+  double pbJ  = pb.j;
+  double net  = sumJ + pbJ;
+
+  println("CLOSURE CHECK  sum(j_organs)=" + sumJ
+        + "  pb.j=" + pbJ
+        + "  net=" + net);
+ 
+  }
+ }
+]
+
+
+/**
+ * Refresh transport resistances and related parameters per organ.
+ *
+ * <p>Derives phloem carbon concentration {@code c = sqrt(2*cpt)} and invokes
+ * {@code updateCTRs(c)} to refresh local resistance {@code r}, osmotic terms, and
+ * any transport coefficients dependent on concentration.</p>
+ *
+ * @implNote The method name is kept as {@code updateResistence()} for backward compatibility.
+ * @since 2025-08
+ */
+
+
+static void updateResistence(PlantBase pb)
+[
+ 
+	 g:GrowingOrgan, (
+	   g.plantNumber == pb.plantNumber
+	 ) ::>
+	{
+	  double carbon = Math.sqrt(2.0 * g.cpt);	
+	  g.updateCTRs(carbon);
+	  //test xp
+	 // g.xp = 0;
+	}
+	
+]
+/**
+ * Update organ-level carbon status after the transport solve.
+ *
+ * <p><b>Actions</b>
+ * <ul>
+ *   <li>Compute phloem carbon concentration and sugar units from {@code cpt}.</li>
+ *   <li>Re-evaluate loading, leakage, and unloading terms in sugar space.</li>
+ *   <li>Store {@code Cflux = j / mgTogram} for reporting (guard NaN).</li>
+ *   <li>Refresh transport coefficients via {@code updateCTRs(carbon)}.</li>
+ *   <li>Compute Munch counter flow {@code Mcf} using branch flux and local concentration.</li>
+ * </ul></p>
+ *
+ * <p><b>Guards</b> — NaNs in branch flux or Mcf are replaced with small defaults.</p>
+ *
+ * @since 2025-08
+ */
+
+static void updateCarbonStatus(PlantBase pb)
+[
+	//group develop 
+	//{ double maxCp = max((*S *)[cpb]);}
+	 
+	 g:GrowingOrgan, (
+	   g.plantNumber == pb.plantNumber
+	 ) ::> {
+		  double carbon = Math.sqrt(2.0 * g.cpt);
+		  double sugar = convertPhloemCtoSugar(carbon);
+		  
+		  g.updateCarbonAllocation(sugar);
+		  
+		  g.Cflux = g.j * 1/mgTogram;	
+		  if(Double.isNaN(g.Cflux)) g.Cflux = 1e-6;
+		  //  s.cpt = s.cpb = maxCp;
+		   
+		  //s.cpb = s.cpt = max();  
+		  g.updateCTRs(carbon);
+		
+		  // Effect of phloem flux on hydraulic flow: Munch counter flow (following Equation 5) 
+		  //checked the original code McF do use cpb in the calculation. 
+		  double branchj = g.branch_flux_a + g.branch_flux_b * g.cpb;
+		  if(Double.isNaN(branchj)) { branchj = 1e-5;}
+		 
+		  g.Mcf = MolalVolumeSucrose * branchj - branchj / carbon;
+		 
+		  if(Double.isNaN(g.Mcf)) g.Mcf = 0;
+		}
+		
+	 {
+	 	pb.updateCarbonPartition();
+	 }
+		
+		
+]
+
+
+/**
+ * Write compact carbon-transport mass-balance diagnostics for each solved step.
+ *
+ * <p>Flux columns are diagnostic-only sums of solved organ fluxes: loading is
+ * the absolute value of negative source fluxes and unloading is the sum of
+ * positive sink fluxes. No explicit storage/boundary term is available here,
+ * so netFluxResidual is reported as totalLoading - totalUnloading.</p>
+ */
+static void writeCtMassBalanceDiagnostics(PlantBase pb, int iterationCount, double convergenceError) {
+  long organCount = count((* gCount:GrowingOrgan, (
+    gCount.plantNumber == pb.plantNumber
+  ) *));
+  double totalLoading = Math.abs(sum((* gLoad:GrowingOrgan, (
+    gLoad.j < 0.0 &&
+    gLoad.plantNumber == pb.plantNumber
+  ) *)[j]));
+  double totalUnloading = sum((* gUnload:GrowingOrgan, (
+    gUnload.j > 0.0 &&
+    gUnload.plantNumber == pb.plantNumber
+  ) *)[j]);
+  double netFluxResidual = totalLoading - totalUnloading;
+  double relativeFluxResidual = Math.abs(netFluxResidual)
+      / Math.max(Math.max(Math.abs(totalLoading), Math.abs(totalUnloading)), 1e-12);
+
+  double minCp = 0.0;
+  double maxCp = 0.0;
+  double meanCp = 0.0;
+  double minSugar = 0.0;
+  double maxSugar = 0.0;
+  double meanSugar = 0.0;
+  if (organCount > 0) {
+    minCp = min((* gMin:GrowingOrgan, (
+      gMin.plantNumber == pb.plantNumber
+    ) *)[cpt]);
+    maxCp = max((* gMax:GrowingOrgan, (
+      gMax.plantNumber == pb.plantNumber
+    ) *)[cpt]);
+    meanCp = mean((* gMean:GrowingOrgan, (
+      gMean.plantNumber == pb.plantNumber
+    ) *)[cpt]);
+    minSugar = sugarFromCp(minCp);
+    maxSugar = sugarFromCp(maxCp);
+    // Diagnostic mean sugar is computed from mean Phi to keep this source-only patch
+    // compatible with older RGG aggregate-expression parsing.
+    meanSugar = sugarFromCp(meanCp);
+  }
+
+  CarbonTransportMassBalanceDiagnosticOutputData row =
+      new CarbonTransportMassBalanceDiagnosticOutputData();
+  row.timestamp = timestamp;
+  row.step = step;
+  row.year = year;
+  row.dayOfYear = dayOfYear;
+  row.hourOfDay = hourOfDay;
+  row.scenario = scenario;
+  row.simuuid = simUUID;
+  row.plantNumber = pb.plantNumber;
+  row.fieldInstanceId = pb.fieldInstanceId;
+  row.day = day;
+  row.hour = hourOfDay;
+  row.useCPStyleCTResponse = true;
+  row.iterationCount = iterationCount;
+  row.convergenceError = convergenceError;
+  row.totalLoading = totalLoading;
+  row.totalUnloading = totalUnloading;
+  row.netFluxResidual = netFluxResidual;
+  row.relativeFluxResidual = relativeFluxResidual;
+  row.minCp = minCp;
+  row.maxCp = maxCp;
+  row.meanCp = meanCp;
+  row.minSugar = minSugar;
+  row.maxSugar = maxSugar;
+  row.meanSugar = meanSugar;
+  row.ctPlantBaseFallbackUsed = pb.ctPlantBaseFallbackUsed;
+  row.ctPlantBaseFallbackReason = pb.ctPlantBaseFallbackReason;
+  row.ctPlantBaseFallbackCount = pb.ctPlantBaseFallbackCount;
+  row.ctPlantBaseResidual = pb.ctPlantBaseResidual;
+  row.ctPlantBaseDenominator = pb.ctPlantBaseDenominator;
+  DiagnosticTableCoordinator.writeCarbonTransportMassBalance(row);
+}
+
+/**
+ * Execute one full carbon-transport solve for the current time step.
+ *
+ * <p><b>Sequence</b>
+ * <ol>
+ *   <li>{@link #linearise(PlantBase, CarbonTransportSolveContext)} — per-organ (a,b)</li>
+ *   <li>{@link #updateBranchFlux(PlantBase, CarbonTransportSolveContext)} — fold to branch (a,b)</li>
+ *   <li>{@link #updateCarbonPotential(PlantBase, CarbonTransportSolveContext)} — unfold cp across the plant graph</li>
+ *   <li>{@link #updateFlow(PlantBase, CarbonTransportSolveContext)} — update j and residuals</li>
+ *   <li>{@link #updateResistence(PlantBase)} — refresh transport coefficients</li>
+ *   <li>Repeat steps 1–5 while the residual exceeds {@code MAXERROR} and the
+ *       iteration count is at most 20; print diagnostics if {@code printFlag}.</li>
+ *   <li>{@link #updateCarbonStatus(PlantBase)} — final per-organ status & Mcf.</li>
+ * </ol></p>
+ *
+ * <p><b>Convergence control</b>
+ * <ul>
+ *   <li>The per-call convergence error is the sum of absolute per-organ residuals.</li>
+ *   <li>{@code MAXERROR} and the per-call iteration count bound the iteration.</li>
+ *   <li>On excessive passes (e.g., 200), fallback assigns {@code j = a + b·cpt}
+ *       and stops the run safely.</li>
+ * </ul></p>
+ *
+ * <p><b>Scope</b> — Only organs matching the supplied plant identity are read or updated.</p>
+ *
+ * @since 2025-08
+ */
+
+static void updateC_Transport(PlantBase pb)
+{
+		if (pb == null) {
+			throw new IllegalArgumentException("Carbon transport requires a PlantBase instance.");
+		}
+		CarbonTransportSolveContext ctx = new CarbonTransportSolveContext();
+
+		//waterFlowEst();
+		//waterPotential();
+		linearise(pb, ctx);
+		updateBranchFlux(pb, ctx);
+		updateCarbonPotential(pb, ctx);
+		updateFlow(pb, ctx);
+		updateResistence(pb);
+		//
+		while((ctx.convergenceError > MAXERROR ) && ctx.iterationCount <= 20)
+		{
+			ctx.iterationCount++;
+			ctx.convergenceError = 0.0;
+			linearise(pb, ctx);
+			updateBranchFlux(pb, ctx);
+			updateCarbonPotential(pb, ctx);
+			updateFlow(pb, ctx);
+			updateResistence(pb);
+			if (debug && printFlag) { println("error_count " + ctx.iterationCount + " Serror " + ctx.convergenceError); }
+			if (debug && printFlag) {
+				double sumFlux = sum((* gFlux:GrowingOrgan, (
+				  gFlux.plantNumber == pb.plantNumber
+				) *)[j]);
+				double sumAbsFlux = sum(Math.abs((* gAbsFlux:GrowingOrgan, (
+				  gAbsFlux.plantNumber == pb.plantNumber
+				) *)[j]));
+				println("sumFlux " + sumFlux);
+				println("RelativeError " + ((sumAbsFlux > 0.0) ? sumFlux / sumAbsFlux : 0.0));
+			}
+
+			if (ctx.iterationCount > 20) // too many passes?
+	        {	// report problem
+	        [
+	         sd:GrowingOrgan, (
+	           sd.err > MAXERROR &&
+	           sd.plantNumber == pb.plantNumber
+	         ) ::>
+         {
+			sd.j = sd.sink_source_a + sd.sink_source_b * sd.cpt; 
+         	 //if (printFlag) { println("rank " + sd.rank  + " j " + sd.j + " cpt " + sd.cpt + " err " + sd.err); }
+		 }
+		]
+		 if (debug && printFlag) { println("carbon transport does not convergening well"); }
+		 
+		 //continueRunning = false;
+		 
+		// break;
+        }
+      
+
+		}
+		updateCarbonStatus(pb);
+		if(outputCarbonTransportDiagnostics) {
+			writeCtMassBalanceDiagnostics(pb, ctx.iterationCount, ctx.convergenceError);
+		}
+
+
+	}
+
+
+
+
+/**
+ * Utilities for coupling xylem pull with phloem transport in the linearised
+ * carbon-potential (Φ) framework.
+ *
+ * <h3>Conventions</h3>
+ * <ul>
+ *   <li>Local linearisation: {@code j ≈ a + b·Φ} at the distal (downstream) end of a segment.</li>
+ *   <li>Potential drop across one segment: {@code Φ_top = Φ_bot − r·j − x_p}.</li>
+ *   <li><b>This class stores</b> {@code x_p ≥ 0} as an extra drop (magnitude only).</li>
+ *   <li>If you instead store Alla’s signed pull {@code x_p^{(−)} ≤ 0}, use the notes under each method.</li>
+ * </ul>
+ */
+  /**
+   * Exact <b>UNFOLD</b>: compute the top potential {@code cpt} from the bottom potential {@code cpb}
+   * through one transport segment with resistance {@code r}, distal linearisation {@code (a,b)},
+   * and xylem pull magnitude {@code x_p ≥ 0}.
+   *
+   * <p><b>Governing relations</b></p>
+   * <pre>
+   * j = a + b·cpt
+   * cpt = cpb − r·j − x_p
+   * </pre>
+   *
+   * <p><b>Derivation</b></p>
+   * Substitute the first into the second:
+   * <pre>
+   * cpt = cpb − r·(a + b·cpt) − x_p
+   * (1 + b·r)·cpt = cpb − a·r − x_p
+   * </pre>
+   * Hence the exact unfold:
+   * <pre>
+   * cpt = (cpb − a·r − x_p) / (1 + b·r)
+   * </pre>
+   *
+   * <p><b>Alla’s convention (optional)</b> — if you store {@code x_p^{(−)} ≤ 0} (signed pull),
+   * pass {@code x_p = -x_p^{(−)}} here, or use the equivalent form
+   * {@code cpt = (cpb − a·r − x_p^{(−)})/(1 + b·r)}.</p>
+   *
+   * @param cpb bottom carbon potential Φ (segment inlet)
+   * @param a   distal intercept of j–Φ linearisation (units of flux)
+   * @param b   distal slope of j–Φ linearisation (per-Φ)
+   * @param r   segment phloem resistance (Φ per unit flux)
+   * @param xp  xylem-pull magnitude (extra drop) {@code x_p ≥ 0}
+   * @return    top carbon potential Φ: {@code cpt = (cpb − a·r − x_p)/(1 + b·r)}
+   */
+   //not sure why but actually the first order expansion works better than the exact form
+   //maybe due to the whole method is using linear operation
+  public static double unfoldPhi(double cpb, double a, double b, double r, double xp) {
+    return (cpb - a * r - xp) / (1.0 + b * r);
+  }
+
+  /**
+   * Exact <b>FOLD</b>: map distal linear coefficients {@code (a,b)} through one segment
+   * to an upstream view {@code (a', b')} such that {@code j = a' + b'·cpb}.
+   *
+   * <p><b>Derivation</b></p>
+   * Start with {@code j = a + b·cpt} and plug the exact unfold:
+   * <pre>
+   * j = a + b·(cpb − a·r − x_p)/(1 + b·r)
+   *   = [a + b·cpb − b·x_p] / (1 + b·r)
+   *   = a' + b'·cpb
+   * </pre>
+   * Therefore,
+   * <pre>
+   * a' = (a − b·x_p) / (1 + b·r)
+   * b' =  b         / (1 + b·r)
+   * </pre>
+   *
+   * <p><b>Sanity check</b> — With these {@code a', b'} and the unfold above,
+   * {@code a + b·cpt ≡ a' + b'·cpb} (identity), which preserves mass balance and improves stability.</p>
+   *
+   * <p><b>Alla’s convention (optional)</b> — if you store {@code x_p^{(−)} ≤ 0}, use
+   * {@code a' = (a + b·x_p^{(−)})/(1 + b·r)} (the “plus” seen in her code), with the same {@code b'}.</p>
+   *
+   * @param a  distal intercept
+   * @param b  distal slope
+   * @param r  segment resistance
+   * @param xp xylem-pull magnitude (extra drop) {@code x_p ≥ 0}
+   * @return   a 2-element array {@code [a', b']} (upstream coefficients)
+   */
+  public static double[] foldCoeffs(double a, double b, double r, double xp) {
+    double denom = 1.0 + b * r;
+    double aPrime = (a - b * xp) / denom;
+    double bPrime =  b / denom;
+    return new double[] { aPrime, bPrime };
+  }

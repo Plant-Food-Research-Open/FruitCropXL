@@ -1,0 +1,701 @@
+import static outputTables.*;
+import static java.lang.Math.*;
+import static extraTools.*;
+import static modelOptions.*;
+import static initialConditions.*;
+import static globalParameters.*;
+import static simRunBase.*;
+import static main.*;
+import static initiationOptimalCanopyArchitecture.*;
+import java.io.Serializable;
+
+import java.util.Arrays;
+import java.util.ArrayList;
+import java.util.List;
+import de.grogra.pf.ui.Context;
+import de.grogra.graph.impl.GraphManager;
+import de.grogra.util.Lock;
+import de.grogra.pf.ui.util.LockProtectedCommand;
+import de.grogra.pf.ui.JobManager;
+import de.grogra.graph.impl.Edge;
+import de.grogra.persistence.Transaction;
+import de.grogra.graph.Graph;
+import de.grogra.pf.ui.Command;
+import de.grogra.imp.IMPWorkbench;
+import de.grogra.pf.registry.Registry;
+import de.grogra.pf.ui.Workbench;
+import de.grogra.pf.ui.JobManager;
+import de.grogra.rgg.Library;
+
+// FIXME: missing variables (e.g: dLayer), check if private static is still accessible here
+public class SimRunOptimalCanopyArchitecture extends SimRunService implements Serializable {
+	public void simRun() {
+		keepTable = false;	
+		mainInstance.resetGraph();
+		
+		commandLineArgs = new CommandLineArgs();
+		String scenarioNum = commandLineArgs.getRawProperty("scenario");
+		if(optimalCanopyUseLegacyScenarioPreset && scenarioNum == null) {
+			throw new IllegalArgumentException(
+				"Legacy optimal-canopy preset mode requires a scenario number."
+		);
+		}
+		
+		if(scenarioNum != null) {
+			scenario = Integer.parseInt(scenarioNum);
+		}
+		if(optimalCanopyUseLegacyScenarioPreset) {
+		cloneX = 4;
+		cloneY = 4;
+	
+			
+		//Default simulations will be run with small shoots for various scenarios,
+		//with the 10 cm distance between the shoot as the industry more familiar with this distance.
+		/* 		Few additional simulations
+			1.	comparison between north-south, west-east, 135 for 3 tiers system;
+			2.	comparison between big and small shoot for 3 tiers system;
+			3.	comparison between 10 cm and 20 cm shoot distance for 3 tiers system;  
+		*/
+
+		if(scenario == 0) 
+		{
+			//S0 homogeneous canopy
+			rowOrientation = 0; //row orientation. 0 is for east-west, 90 is for south-north. rotate counter clock wise
+			nrRows = 2;
+			nrPlants=8;
+			INDI_ID_A = 10; 
+			borderRows=2;
+			borderPlants=3; 
+			nrStrips= 3;
+			plantDistance = rowDistance;
+			stripDistance = rowDistance;
+			InitiationOptimalCanopyArchitecture.dLayer = true;
+			InitiationOptimalCanopyArchitecture.quadLayer = false;
+		} 
+		if(scenario == 1) 
+		{
+			//S1 Trellis 1, Layer 1
+			//2-cane wide-row, 2.4 meter
+			rowOrientation = 90; 
+			nrRows = 1;
+			nrPlants=8;
+			INDI_ID_A = 10; 
+			borderRows=1;
+			borderPlants=3; 
+			nrStrips= 3;
+			plantDistance = 0.1;
+			rowDistance = 0.2;
+			stripDistance = 2.4;
+			InitiationOptimalCanopyArchitecture.dLayer = false;
+			InitiationOptimalCanopyArchitecture.quadLayer = false;
+		}
+	 	if(scenario == 2) 
+		{
+			//S2 Trellis 1, Layer 2
+			//4-cane wide-row, 2.4 meter
+			rowOrientation = 90;
+			nrRows = 2;
+			nrPlants=8;
+			INDI_ID_A = 10; 
+			borderRows=2;
+			borderPlants=3; 
+			nrStrips= 3;
+			plantDistance = 0.1;
+			rowDistance = 0.2;
+			stripDistance = 2.4;
+			InitiationOptimalCanopyArchitecture.dLayer = true;
+			InitiationOptimalCanopyArchitecture.quadLayer = false;
+		}
+	 	if(scenario == 3) 
+		{
+			//S3 Trellis 2, Layer 1
+			//scott-henry system, wide row
+			rowOrientation = 90;
+			nrRows = 2;
+			nrPlants=8;
+			INDI_ID_A = 10; 
+			borderRows=2;
+			borderPlants=3; 
+			nrStrips= 3;
+			plantDistance = 0.1;
+			rowDistance = 0.2;
+			stripDistance = 2.4;
+			InitiationOptimalCanopyArchitecture.dLayer = false;
+			InitiationOptimalCanopyArchitecture.quadLayer = false;
+		}
+		
+	 	if(scenario == 4) 
+		{
+			//S4 Trellis 1, Layer 2
+			//4-cane narrow-row, 1.4 meter
+			rowOrientation = 90;
+			nrRows = 2;
+			nrPlants=8;
+			INDI_ID_A = 10; 
+			borderRows=2;
+			borderPlants=3; 
+			nrStrips= 3;
+			plantDistance = 0.1;
+			rowDistance = 0.2;
+			stripDistance = 1.4;
+			InitiationOptimalCanopyArchitecture.dLayer = true;
+			InitiationOptimalCanopyArchitecture.quadLayer = false;
+		}
+	 	if(scenario == 5) 
+		{
+			//S5 Trellis 2, Layer 1
+			//scott-henry system, narrow row
+			rowOrientation = 90;
+			nrRows = 2;
+			nrPlants=8;
+			INDI_ID_A = 10; 
+			borderRows=2;
+			borderPlants=3; 
+			nrStrips= 3;
+			plantDistance = 0.1;
+			rowDistance = 0.2;
+			stripDistance = 1.4;
+			InitiationOptimalCanopyArchitecture.dLayer = false;
+			InitiationOptimalCanopyArchitecture.quadLayer = false;
+		}
+			
+	 	if(scenario == 6) 
+		{
+			//S6 Trellis 2, Layer 2
+			//two layers scott-henry system, narrow row
+			rowOrientation = 90;
+			nrRows = 4;
+			nrPlants=8;
+			INDI_ID_A = 10; 
+			borderRows=4;
+			borderPlants=3; 
+			nrStrips= 3;
+			plantDistance = 0.1;
+			rowDistance = 0.2;
+			stripDistance = 1.4;
+			InitiationOptimalCanopyArchitecture.dLayer = true;
+			InitiationOptimalCanopyArchitecture.quadLayer = false;
+		}
+	
+		if(scenario == 7) 
+		{
+			//S7 Trellis 3, Layer 1
+			//narrow row
+			rowOrientation = 90;
+			nrRows = 3;
+			nrPlants=8;
+			INDI_ID_A = 10; 
+			borderRows = 3;
+			borderPlants = 3; 
+			nrStrips = 3;
+			plantDistance = 0.1;
+			rowDistance = 0.2;
+			stripDistance = 1.4;
+			InitiationOptimalCanopyArchitecture.dLayer = false;
+			InitiationOptimalCanopyArchitecture.quadLayer = false;
+		}
+		
+		 if(scenario == 8) 
+		{
+			//S8 Trellis 3, Layer 2
+			//narrow row
+			rowOrientation = 90;
+			nrRows = 6;
+			nrPlants=8;
+			INDI_ID_A = 10; 
+			borderRows = 6;
+			borderPlants=3; 
+			nrStrips = 3;
+			plantDistance = 0.1;
+			rowDistance = 0.2;
+			stripDistance = 1.4;
+			InitiationOptimalCanopyArchitecture.dLayer = true;
+			InitiationOptimalCanopyArchitecture.quadLayer = false;
+		}
+		
+		if(scenario == 9) 
+		{
+			//S7 Trellis 3, Layer 1
+			//narrow row
+			FILE_NAME_MODEL_OPTIONS = "model.options.optimal.canopy.architecture.bigShoot.txt";
+			rowOrientation = 0; //row orientation. 0 is for east-west, 90 is for south-north. rotate counter clock wise
+			nrRows = 3;
+			nrPlants=8;
+			INDI_ID_A = 10; 
+			borderRows = 3;
+			borderPlants = 3; 
+			nrStrips = 3;
+			plantDistance = 0.1;
+			rowDistance = 0.2;
+			stripDistance = 1.4;
+			InitiationOptimalCanopyArchitecture.dLayer = false;
+			InitiationOptimalCanopyArchitecture.quadLayer = false;
+		}
+	 	if(scenario == 10) 
+		{
+			//S8 Trellis 3, Layer 2
+			//narrow row
+			FILE_NAME_MODEL_OPTIONS = "model.options.optimal.canopy.architecture.bigShoot.txt";
+			rowOrientation = 0; //row orientation. 0 is for east-west, 90 is for south-north. rotate counter clock wise
+			nrRows = 6;
+			nrPlants=5;
+			INDI_ID_A = 10; 
+			borderRows = 6;
+			borderPlants=2; 
+			nrStrips = 3;
+			plantDistance = 0.1;
+			rowDistance = 0.2;
+			stripDistance = 1.4;
+			InitiationOptimalCanopyArchitecture.dLayer = true;
+			InitiationOptimalCanopyArchitecture.quadLayer = false;
+		}
+		
+		if(scenario == 11) 
+		{
+			//S11 Trellis 3, Layer 1
+			//wide row big strip distance, and shoot distance
+			FILE_NAME_MODEL_OPTIONS = "model.options.optimal.canopy.architecture.smallShoot.txt";
+			rowOrientation = 0; //row orientation. 0 is for east-west, 90 is for south-north. rotate counter clock wise
+			nrRows = 3;
+			nrPlants=8;
+			INDI_ID_A = 10; 
+			borderRows = 3;
+			borderPlants = 3; 
+			nrStrips = 3;
+			plantDistance = 0.2;
+			rowDistance = 0.2;
+			stripDistance = 2.4;
+			InitiationOptimalCanopyArchitecture.dLayer = false;
+			InitiationOptimalCanopyArchitecture.quadLayer = false;
+		}
+	 	if(scenario == 12) 
+		{
+			//S8 Trellis 3, Layer 2
+			//wide row big strip distance, and shoot distance
+			FILE_NAME_MODEL_OPTIONS = "model.options.optimal.canopy.architecture.smallShoot.txt";
+			rowOrientation = 0; //row orientation. 0 is for east-west, 90 is for south-north. rotate counter clock wise
+			nrRows = 6;
+			nrPlants=8;
+			INDI_ID_A = 10; 
+			borderRows = 6;
+			borderPlants=3; 
+			nrStrips = 3;
+			plantDistance = 0.2;
+			rowDistance = 0.2;
+			stripDistance = 2.4;
+			InitiationOptimalCanopyArchitecture.dLayer = true;
+			InitiationOptimalCanopyArchitecture.quadLayer = false;
+		}
+		if(scenario == 13) 
+		{
+			//S13 Trellis 3, Layer 1
+			//narrow row 135 degree
+			FILE_NAME_MODEL_OPTIONS = "model.options.optimal.canopy.architecture.smallShoot.txt";
+			rowOrientation = 135; //row orientation. 0 is for east-west, 90 is for south-north. rotate counter clock wise
+			nrRows = 3;
+			nrPlants=8;
+			INDI_ID_A = 10; 
+			borderRows = 3;
+			borderPlants = 3; 
+			nrStrips = 3;
+			plantDistance = 0.1;
+			rowDistance = 0.2;
+			stripDistance = 1.4;
+			InitiationOptimalCanopyArchitecture.dLayer = false;
+			InitiationOptimalCanopyArchitecture.quadLayer = false;
+		}
+	 	if(scenario == 14) 
+		{
+			//S14 Trellis 3, Layer 2
+			//narrow row 135 degree
+			FILE_NAME_MODEL_OPTIONS = "model.options.optimal.canopy.architecture.smallShoot.txt";
+			rowOrientation = 135; //row orientation. 0 is for east-west, 90 is for south-north. rotate counter clock wise
+			nrRows = 6;
+			nrPlants=8;
+			INDI_ID_A = 10; 
+			borderRows = 6;
+			borderPlants=3; 
+			nrStrips = 3;
+			plantDistance = 0.1;
+			rowDistance = 0.2;
+			stripDistance = 1.4;
+			InitiationOptimalCanopyArchitecture.dLayer = true;
+			InitiationOptimalCanopyArchitecture.quadLayer = false;
+		}
+		
+		if(scenario == 15) 
+		{
+			//S15 Trellis 3, Layer 1
+			//narrow row, west east
+			FILE_NAME_MODEL_OPTIONS = "model.options.optimal.canopy.architecture.smallShoot.txt";
+			rowOrientation = 0; //row orientation. 0 is for east-west, 90 is for south-north. rotate counter clock wise
+			nrRows = 3;
+			nrPlants=8;
+			INDI_ID_A = 10; 
+			borderRows = 3;
+			borderPlants = 3; 
+			nrStrips = 3;
+			plantDistance = 0.1;
+			rowDistance = 0.2;
+			stripDistance = 1.4;
+			InitiationOptimalCanopyArchitecture.dLayer = false;
+			InitiationOptimalCanopyArchitecture.quadLayer = false;
+		}
+		
+		if(scenario == 16) 
+		{
+			//S16 Trellis 3, Layer 2
+			//narrow row, west east
+			FILE_NAME_MODEL_OPTIONS = "model.options.optimal.canopy.architecture.smallShoot.txt";
+			rowOrientation = 0; //row orientation. 0 is for east-west, 90 is for south-north. rotate counter clock wise
+			nrRows = 6;
+			nrPlants=8;
+			INDI_ID_A = 10; 
+			borderRows = 6;
+			borderPlants=3; 
+			nrStrips = 3;
+			plantDistance = 0.1;
+			rowDistance = 0.2;
+			stripDistance = 1.4;
+			InitiationOptimalCanopyArchitecture.dLayer = true;
+			InitiationOptimalCanopyArchitecture.quadLayer = false;
+		}
+		
+		if(scenario == 17) 
+		{
+			//S17 Trellis 3, Layer 2
+			//narrow row, 45
+			FILE_NAME_MODEL_OPTIONS = "model.options.optimal.canopy.architecture.smallShoot.txt";
+			rowOrientation = 45; //row orientation. 0 is for east-west, 90 is for south-north. rotate counter clock wise
+			nrRows = 6;
+			nrPlants=8;
+			INDI_ID_A = 10; 
+			borderRows = 6;
+			borderPlants=3; 
+			nrStrips = 3;
+			plantDistance = 0.1;
+			rowDistance = 0.2;
+			stripDistance = 1.4;
+			InitiationOptimalCanopyArchitecture.dLayer = true;
+			InitiationOptimalCanopyArchitecture.quadLayer = false;
+		}
+		
+					
+		if(scenario == 18) 
+		{
+			//S18 Trellis 1, Layer 1
+			//2-cane wide-row, 2.4 meter, north south, big shoots
+			FILE_NAME_MODEL_OPTIONS = "model.options.optimal.canopy.architecture.bigShoot.txt";
+			rowOrientation = 90; //row orientation. 0 is for east-west, 90 is for south-north. rotate counter clock wise 
+			nrRows = 1;
+			nrPlants=8;
+			INDI_ID_A = 10; 
+			borderRows=1;
+			borderPlants=3; 
+			nrStrips= 3;
+			plantDistance = 0.1;
+			rowDistance = 0.2;
+			stripDistance = 2.4;
+			InitiationOptimalCanopyArchitecture.dLayer = false;
+			InitiationOptimalCanopyArchitecture.quadLayer = false;
+		}
+	 if(scenario == 19) 
+		{
+			//S2 Trellis 1, Layer 2
+			//4-cane wide-row, 2.4 meter, north south, big shoots
+			FILE_NAME_MODEL_OPTIONS = "model.options.optimal.canopy.architecture.bigShoot.txt";
+			rowOrientation = 90;
+			nrRows = 2;
+			nrPlants=8;
+			INDI_ID_A = 10; 
+			borderRows=2;
+			borderPlants=3; 
+			nrStrips= 3;
+			plantDistance = 0.1;
+			rowDistance = 0.2;
+			stripDistance = 2.4;
+			InitiationOptimalCanopyArchitecture.dLayer = true;
+			InitiationOptimalCanopyArchitecture.quadLayer = false;
+		}
+		
+		if(scenario == 20) 
+		{
+			//S8 Trellis 3, Layer 2
+			//narrow strip distance, and wide shoot distance
+			FILE_NAME_MODEL_OPTIONS = "model.options.optimal.canopy.architecture.smallShoot.txt";
+			rowOrientation = 0; //row orientation. 0 is for east-west, 90 is for south-north. rotate counter clock wise
+			nrRows = 6;
+			nrPlants=4;
+			INDI_ID_A = 10; 
+			borderRows = 6;
+			borderPlants=1; 
+			nrStrips = 3;
+			plantDistance = 0.2;
+			rowDistance = 0.2;
+			stripDistance = 1.4;
+			InitiationOptimalCanopyArchitecture.dLayer = true;
+			cloneX = 30;
+			cloneY = 8;
+			InitiationOptimalCanopyArchitecture.quadLayer = false;
+		}
+		
+		if(scenario == 21) 
+		{
+			//S21 Trellis 3, Layer 2
+			//narrow strip distance, and wide shoot distance
+			FILE_NAME_MODEL_OPTIONS = "model.options.optimal.canopy.architecture.mediumShoot.txt";
+			rowOrientation = 0; //row orientation. 0 is for east-west, 90 is for south-north. rotate counter clock wise
+			nrRows = 6;
+			nrPlants=4;
+			INDI_ID_A = 10; 
+			borderRows = 6;
+			borderPlants=1; 
+			nrStrips = 3;
+			plantDistance = 0.2;
+			rowDistance = 0.2;
+			stripDistance = 1.4;
+			InitiationOptimalCanopyArchitecture.dLayer = true;
+			cloneX = 20;
+			cloneY = 8;
+			InitiationOptimalCanopyArchitecture.quadLayer = false;
+		}
+		
+		if(scenario == 22) 
+		{
+			//BRI 6-cane configuration Trellis 5, Layer 4
+			//wide strip distance, and wide shoot distance 0.3 m
+			//6-cane system like Damian saw at CB, modified: to 2.4m high uprights,divided into 5 tiers, 60 cm per tier 
+			//Every second or third internode on an upright carrying a shoot / spur with double shoot.	
+			FILE_NAME_MODEL_OPTIONS = "model.options.optimal.canopy.architecture.quadLayer.txt";
+			rowOrientation = 90; //row orientation. 0 is for east-west, 90 is for south-north. rotate counter clock wise
+			nrRows = 20;
+			nrPlants= 4;
+			INDI_ID_A=10; 
+			borderRows=0;
+			borderPlants=1; 
+			nrStrips=1;
+			plantDistance = 0.3;
+			rowDistance = 0.08;
+			stripDistance = 2.08;
+			InitiationOptimalCanopyArchitecture.dLayer = false;
+			InitiationOptimalCanopyArchitecture.quadLayer = true;
+			cloneX = 20;
+			cloneY = 20;
+		}
+		
+		if(scenario == 23) 
+		{
+			//BRI 6-cane configuration Trellis 5, Layer 4
+			//wide strip distance, and wide shoot distance 0.3 m
+			//6-cane system like Damian saw at CB, modified: to 2.4m high uprights,divided into 5 tiers, 60 cm per tier 
+			//Every second or third internode on an upright carrying a shoot / spur with double shoot.	
+			FILE_NAME_MODEL_OPTIONS = "model.options.optimal.canopy.architecture.quadLayer.txt";
+			rowOrientation = 0; //row orientation. 0 is for east-west, 90 is for south-north. rotate counter clock wise
+			nrRows = 20;
+			nrPlants= 4;
+			INDI_ID_A=10; 
+			borderRows=0;
+			borderPlants=1; 
+			nrStrips=1;
+			plantDistance = 0.3;
+			rowDistance = 0.08;
+			stripDistance = 2.08;
+			InitiationOptimalCanopyArchitecture.dLayer = false;
+			InitiationOptimalCanopyArchitecture.quadLayer = true;
+			cloneX = 20;
+			cloneY = 20;
+		}
+		
+		if(scenario == 24) 
+		{
+			//BRI 6-cane configuration Trellis 5, Layer 4
+			//wide strip distance, and wide shoot distance 0.3 m
+			//6-cane system like Damian saw at CB, modified: to 2.4m high uprights,divided into 5 tiers, 60 cm per tier 
+			//Every second or third internode on an upright carrying a shoot / spur with double shoot.	
+			FILE_NAME_MODEL_OPTIONS = "model.options.optimal.canopy.architecture.quadLayer.txt";
+			rowOrientation = 0; //row orientation. 0 is for east-west, 90 is for south-north. rotate counter clock wise
+			nrRows = 20;
+			nrPlants= 4;
+			INDI_ID_A=10; 
+			borderRows=0;
+			borderPlants=1; 
+			nrStrips=1;
+			plantDistance = 0.3;
+			rowDistance = 0.08;
+			stripDistance = 1.7;
+			InitiationOptimalCanopyArchitecture.dLayer = false;
+			InitiationOptimalCanopyArchitecture.quadLayer = true;
+			cloneX = 20;
+			cloneY = 20;
+		}
+		
+		
+	
+		if(scenario == 25) 
+		{
+			//BRI 6-cane configuration Trellis 5, Layer 4
+			//wide strip distance, and wide shoot distance 0.3 m
+			//6-cane system like Damian saw at CB, modified: to 1.5m high uprights,divided into 5 tiers, 38 cm per tier 
+			//Every second or third internode on an upright carrying a shoot / spur with double shoot.	
+			FILE_NAME_MODEL_OPTIONS = "model.options.optimal.canopy.architecture.quadLayer.txt";
+			rowOrientation = 90; //row orientation. 0 is for east-west, 90 is for south-north. rotate counter clock wise
+			nrRows = 20;
+			nrPlants= 4;
+			INDI_ID_A=10; 
+			borderRows=0;
+			borderPlants=1; 
+			nrStrips=1;
+			plantDistance = 0.3;
+			rowDistance = 0.08;
+			stripDistance = 2.08;
+			InitiationOptimalCanopyArchitecture.dLayer = false;
+			InitiationOptimalCanopyArchitecture.quadLayer = true;
+			cloneX = 20;
+			cloneY = 20;
+		}
+		
+		if(scenario == 26) 
+		{
+			//BRI 6-cane configuration Trellis 5, Layer 4
+			//wide strip distance, and wide shoot distance 0.3 m
+			//6-cane system like Damian saw at CB, modified: to 2.4m high uprights,divided into 5 tiers, 38 cm per tier 
+			//Every second or third internode on an upright carrying a shoot / spur with double shoot.	
+			FILE_NAME_MODEL_OPTIONS = "model.options.optimal.canopy.architecture.quadLayer.txt";
+			rowOrientation = 0; //row orientation. 0 is for east-west, 90 is for south-north. rotate counter clock wise
+			nrRows = 20;
+			nrPlants= 4;
+			INDI_ID_A=10; 
+			borderRows=0;
+			borderPlants=1; 
+			nrStrips= 1;
+			plantDistance = 0.3;
+			rowDistance = 0.08;
+			stripDistance = 2.08;
+			InitiationOptimalCanopyArchitecture.dLayer = false;
+			InitiationOptimalCanopyArchitecture.quadLayer = true;
+			cloneX = 20;
+			cloneY = 20;
+		}
+		
+		
+		
+		if(scenario == 27) 
+		{
+			//BRI 6-cane configuration Trellis 5, Layer 4
+			//wide strip distance, and wide shoot distance 0.3 m
+			//6-cane system like Damian saw at CB, modified: to 1.5m high uprights,divided into 5 tiers, 38 cm per tier 
+			//Every second or third internode on an upright carrying a shoot / spur with double shoot.	
+			FILE_NAME_MODEL_OPTIONS = "model.options.optimal.canopy.architecture.quadLayer.txt";
+			rowOrientation = 90; //row orientation. 0 is for east-west, 90 is for south-north. rotate counter clock wise
+			nrRows = 20;
+			nrPlants= 4;
+			INDI_ID_A=10; 
+			borderRows=0;
+			borderPlants=1; 
+			nrStrips= 1;
+			plantDistance = 0.3;
+			rowDistance = 0.08;
+			stripDistance = 1.7;
+			InitiationOptimalCanopyArchitecture.dLayer = false;
+			InitiationOptimalCanopyArchitecture.quadLayer = true;
+			cloneX = 20;
+			cloneY = 20;
+		}
+		
+		if(scenario == 28) 
+		{
+			//BRI 6-cane configuration Trellis 5, Layer 4
+			//wide strip distance, and wide shoot distance 0.3 m
+			//6-cane system like Damian saw at CB, modified: to 2.4m high uprights,divided into 5 tiers, 38 cm per tier 
+			//Every second or third internode on an upright carrying a shoot / spur with double shoot.	
+			FILE_NAME_MODEL_OPTIONS = "model.options.optimal.canopy.architecture.quadLayer.txt";
+			rowOrientation = 0; //row orientation. 0 is for east-west, 90 is for south-north. rotate counter clock wise
+			nrRows = 20;
+			nrPlants= 3;
+			INDI_ID_A=10; 
+			borderRows=20;
+			borderPlants=1; 
+			nrStrips= 1;
+			plantDistance = 0.3;
+			rowDistance = 0.08;
+			stripDistance = 1.7;
+			InitiationOptimalCanopyArchitecture.dLayer = false;
+			InitiationOptimalCanopyArchitecture.quadLayer = true;
+			cloneX = 20;
+			cloneY = 20;
+		}
+		
+		if(scenario == 29) 
+		{
+			//BRI 6-cane configuration Trellis 5, Layer 4
+			//wide strip distance, and wide shoot distance 0.3 m
+			//6-cane system like Damian saw at CB, modified: to 2.4m high uprights,divided into 5 tiers, 60 cm per tier 
+			//Every second or third internode on an upright carrying a shoot / spur with double shoot.	
+			FILE_NAME_MODEL_OPTIONS = "model.options.optimal.canopy.architecture.quadLayer.txt";
+			rowOrientation = 90; //row orientation. 0 is for east-west, 90 is for south-north. rotate counter clock wise
+			nrRows = 20;
+			nrPlants= 4;
+			INDI_ID_A=10; 
+			borderRows=0;
+			borderPlants=1; 
+			nrStrips=1;
+			plantDistance = 0.3;
+			rowDistance = 0.08;
+			stripDistance = 1.7;
+			InitiationOptimalCanopyArchitecture.dLayer = false;
+			InitiationOptimalCanopyArchitecture.quadLayer = true;
+			cloneX = 20;
+			cloneY = 20;
+		}
+	
+		//for testing the border row effects. it seems one plant also works well
+		if(scenario == 31) 
+		{
+			FILE_NAME_MODEL_OPTIONS = "model.options.optimal.canopy.architecture.bigShoot.txt";
+			rowOrientation = 90; //row orientation. 0 is for east-west, 90 is for south-north. rotate counter clock wise 
+			nrRows = 1;
+			nrPlants=1;
+			INDI_ID_A = 10; 
+			borderRows=0;
+			borderPlants=0; 
+			nrStrips=2;
+			plantDistance = 0.1;
+			rowDistance = 0.2;
+			stripDistance = 2.4;
+			InitiationOptimalCanopyArchitecture.dLayer = false;
+			cloneX 	= 40;			// number of grid clones along the row 
+			cloneY 	= 10;		
+			InitiationOptimalCanopyArchitecture.quadLayer = false;
+		}
+		
+		if(InitiationOptimalCanopyArchitecture.quadLayer) {
+			optimalCanopyLayoutMode = "legacy_quad";
+		} else if(InitiationOptimalCanopyArchitecture.dLayer) {
+			optimalCanopyLayoutMode = "legacy_dlayer";
+		} else {
+			optimalCanopyLayoutMode = "legacy_single";
+		}
+		} else {
+			InitiationOptimalCanopyArchitecture.dLayer = false;
+			InitiationOptimalCanopyArchitecture.quadLayer = false;
+		}
+
+		charts.CHARTS[0] = 10;
+		
+		if (printFlag) { println(FILE_NAME_MODEL_OPTIONS); }
+		println("Current scenario_" + scenario + " chart number " + charts.CHARTS[0]);		
+				
+		
+		
+		mainInstance.init();
+		derive();
+		mainInstance.runEnd();
+		
+		String name =  splitAndCombine(FILE_NAME_MODEL_OPTIONS);
+		
+	    if (printFlag) { println("Current scenario_" + scenario + "simEnd "); }
+		
+	    String chart0 = PATH_OUTPUT+ name + "_ro" + rowOrientation + "_shootd" + plantDistance + "_s" + scenario +".csv";
+		outputChartData(chart0, 0);
+	}
+}

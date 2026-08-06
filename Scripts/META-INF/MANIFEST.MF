@@ -1,0 +1,412 @@
+
+Name: config/initiationBase.rgg
+Content-Type: text/x-grogra-rgg; charset=US-ASCII
+
+Name: utils/leafShape.rgg
+Content-Type: text/x-grogra-rgg; charset=UTF-8
+
+Name: images/stem.png
+Content-Type: image/png
+
+Name: alterModules/initiation/initiationFieldRandomCanopy.rgg
+Content-Type: text/x-grogra-rgg; charset=UTF-8
+
+Name: alterModules/updates/updatesGrapevine.rgg
+Content-Type: text/x-grogra-rgg; charset=US-ASCII
+
+Name: images/appleLeaf.png
+Content-Type: image/png
+
+Name: utils/socketRun.rgg
+Content-Type: text/x-grogra-rgg; charset=UTF-8
+
+Name: images/Fruit5.png
+Content-Type: image/png
+
+Name: dataModels/AppleSpurBourseDiagnosticOutputData.java
+Content-Type: text/x-java; charset=US-ASCII
+
+Name: images/Fruit3.png
+Content-Type: image/png
+
+Name: images/bourse.png
+Content-Type: image/png
+
+Name: physioFunctions/photosynthesisAndTranspiration.rgg
+Content-Type: text/x-grogra-rgg; charset=US-ASCII
+
+Name: utils/extraTools.rgg
+Content-Type: text/x-grogra-rgg; charset=UTF-8
+
+Name: management/twinningPlanner.rgg
+Content-Type: text/x-grogra-rgg; charset=UTF-8
+
+Name: alterModules/simRun/simRunOptimalCanopyArchitecture.rgg
+Content-Type: text/x-grogra-rgg; charset=US-ASCII
+
+Name: main/charts.rgg
+Content-Type: text/x-grogra-rgg; charset=US-ASCII
+
+Name: organs/absOrgans/interfaces.rgg
+Content-Type: text/x-grogra-rgg; charset=UTF-8
+
+Name: management/pruning.rgg
+Content-Type: text/x-grogra-rgg; charset=US-ASCII
+
+Name: management/budPlanner.rgg
+Content-Type: text/x-grogra-rgg; charset=UTF-8
+
+Name: images/F6D.png
+Content-Type: image/png
+
+Name: images/Fruit1.png
+Content-Type: image/png
+
+Name: images/petiole2.png
+Content-Type: image/png
+
+Name: config/plantParameters.rgg
+Content-Type: text/x-grogra-rgg; charset=US-ASCII
+
+Name: alterModules/develop/developApple.rgg
+Content-Type: text/x-grogra-rgg; charset=US-ASCII
+
+Name: alterModules/fruit/berryComplex.rgg
+Content-Type: text/x-grogra-rgg; charset=UTF-8
+
+Name: alterModules/initiation/initiationOptimalCanopyArchitecture.rgg
+Content-Type: text/x-grogra-rgg; charset=US-ASCII
+
+Name: alterModules/initiation/initiationSingleRoot.rgg
+Content-Type: text/x-grogra-rgg; charset=US-ASCII
+
+Name: dataModels/AppleLeafAxisDiagnosticOutputData.java
+Content-Type: text/x-java; charset=US-ASCII
+
+Name: alterModules/initiation/initiationVirtualFruit.rgg
+Content-Type: text/x-grogra-rgg; charset=US-ASCII
+
+Name: physioFunctions/carbonAllocation.rgg
+Content-Type: text/x-grogra-rgg; charset=UTF-8
+
+Name: images/etamine1.png
+Content-Type: image/png
+
+Name: alterModules/initiation/initiationBerryPopulation.rgg
+Content-Type: text/x-grogra-rgg; charset=US-ASCII
+
+Name: physioFunctions/plantHydraulics.rgg
+Content-Type: text/x-grogra-rgg; charset=UTF-8
+
+Name: organs/absOrgans/absOrgan.rgg
+Content-Type: text/x-grogra-rgg; charset=UTF-8
+
+Name: main/outputTables.rgg
+Content-Type: text/x-grogra-rgg; charset=US-ASCII
+
+Name: alterModules/initiation/initiationStandard.rgg
+Content-Type: text/x-grogra-rgg; charset=US-ASCII
+
+Name: config/simRunBase.rgg
+Content-Type: text/x-grogra-rgg; charset=US-ASCII
+
+Name: alterModules/buds/budApple.rgg
+Content-Type: text/x-grogra-rgg; charset=US-ASCII
+
+Name: alterModules/fruit/berrySimple.rgg
+Content-Type: text/x-grogra-rgg; charset=UTF-8
+
+Name: utils/validation.rgg
+Content-Type: text/x-grogra-rgg; charset=UTF-8
+
+Name: management/budPlannerT1.rgg
+Content-Type: text/x-grogra-rgg; charset=UTF-8
+
+Name: organs/absOrgans/budBase.rgg
+Content-Type: text/x-grogra-rgg; charset=UTF-8
+
+Name: images/Pet1down.png
+Content-Type: image/png
+
+Name: alterModules/buds/budGrapevine.rgg
+Content-Type: text/x-grogra-rgg; charset=US-ASCII
+
+Name: dataModels/CarbonTransportMassBalanceDiagnosticOutputData.java
+Content-Type: text/x-java; charset=US-ASCII
+
+Name: organs/rootSystem/fineRoot.rgg
+Content-Type: text/x-grogra-rgg; charset=UTF-8
+
+Name: alterModules/fruit/berryYield.rgg
+Content-Type: text/x-grogra-rgg; charset=UTF-8
+
+Name: images/Rosette1t.png
+Content-Type: image/png
+
+Name: alterModules/initiation/initiationArchReader.rgg
+Content-Type: text/x-grogra-rgg; charset=UTF-8
+
+Name: images/petiole1.png
+Content-Type: image/png
+
+Name: utils/CacheManager.java
+Content-Type: text/x-java; charset=UTF-8
+
+Name: dataModels/PlantLevelOutputData.java
+Content-Type: text/x-java; charset=US-ASCII
+
+Name: alterModules/fruit/virtualFruit.rgg
+Content-Type: text/x-grogra-rgg; charset=UTF-8
+
+Name: organs/shoot.rgg
+Content-Type: text/x-grogra-rgg; charset=US-ASCII
+
+Name: main/diagnosticTables.rgg
+Content-Type: text/x-grogra-rgg; charset=US-ASCII
+
+Name: main/readme.txt
+Content-Type: text/plain; charset=UTF-8
+
+Name: physioFunctions/structuralVariation.rgg
+Content-Type: text/x-grogra-rgg; charset=US-ASCII
+
+Name: images/Rosette1d.png
+Content-Type: image/png
+
+Name: main/developBase.rgg
+Content-Type: text/x-grogra-rgg; charset=US-ASCII
+
+Name: alterModules/simRun/simRunBerryPopulation.rgg
+Content-Type: text/x-grogra-rgg; charset=US-ASCII
+
+Name: config/modelOptions.rgg
+Content-Type: text/x-grogra-rgg; charset=US-ASCII
+
+Name: utils/fieldCanopyReader.rgg
+Content-Type: text/x-grogra-rgg; charset=UTF-8
+
+Name: dataModels/AppleFlowerTimingDiagnosticOutputData.java
+Content-Type: text/x-java; charset=US-ASCII
+
+Name: dataModels/ActualLeafSummaryDiagnosticOutputData.java
+Content-Type: text/x-java; charset=US-ASCII
+
+Name: management/budPlannerConfig.rgg
+Content-Type: text/x-grogra-rgg; charset=UTF-8
+
+Name: project.gs
+Content-Type: application/x-grogra-registry+xml
+
+Name: alterModules/Flowers/flowerApple.rgg
+Content-Type: text/x-grogra-rgg; charset=US-ASCII
+
+Name: utils/BasicMinervaHelper.java
+Content-Type: text/x-java; charset=UTF-8
+
+Name: images/Fruit6.png
+Content-Type: image/png
+
+Name: utils/dataset.rgg
+Content-Type: text/x-grogra-rgg; charset=UTF-8
+
+Name: physioFunctions/phenology.rgg
+Content-Type: text/x-grogra-rgg; charset=US-ASCII
+
+Name: images/Pedoncule2.png
+Content-Type: image/png
+
+Name: organs/baseModules/fieldBase.rgg
+Content-Type: text/x-grogra-rgg; charset=UTF-8
+
+Name: physioFunctions/lightInterception/lightInterception.rgg
+Content-Type: text/x-grogra-rgg; charset=UTF-8
+
+Name: images/Petiole.png
+Content-Type: image/png
+
+Name: images/Pet2down.png
+Content-Type: image/png
+
+Name: physioFunctions/lightInterception/LightInterceptionResult.java
+Content-Type: text/x-java; charset=UTF-8
+
+Name: config/initialConditions.rgg
+Content-Type: text/x-grogra-rgg; charset=US-ASCII
+
+Name: graph.xml
+Content-Type: application/x-grogra-graph+xml
+
+Name: alterModules/develop/developGrapevineStructuralVariation.rgg
+Content-Type: text/x-grogra-rgg; charset=US-ASCII
+
+Name: images/Pet3top.png
+Content-Type: image/png
+
+Name: alterModules/updates/updatesVirtualFruit.rgg
+Content-Type: text/x-grogra-rgg; charset=US-ASCII
+
+Name: images/Pet2top.png
+Content-Type: image/png
+
+Name: organs/rootSystem/structuralRoot.rgg
+Content-Type: text/x-grogra-rgg; charset=UTF-8
+
+Name: images/Fruit4.png
+Content-Type: image/png
+
+Name: images/Pet1top.png
+Content-Type: image/png
+
+Name: images/Fruit2.png
+Content-Type: image/png
+
+Name: utils/validationTests.rgg
+Content-Type: text/x-grogra-rgg; charset=UTF-8
+
+Name: alterModules/initiation/initiationSingleLeaf.rgg
+Content-Type: text/x-grogra-rgg; charset=US-ASCII
+
+Name: management/budReflectionUtils.rgg
+Content-Type: text/x-grogra-rgg; charset=UTF-8
+
+Name: management/shootPositioning.rgg
+Content-Type: text/x-grogra-rgg; charset=US-ASCII
+
+Name: images/etamine2.png
+Content-Type: image/png
+
+Name: main/updatesBase.rgg
+Content-Type: text/x-grogra-rgg; charset=US-ASCII
+
+Name: alterModules/simRun/simRunStandard.rgg
+Content-Type: text/x-grogra-rgg; charset=US-ASCII
+
+Name: dataModels/FieldLevelOutputData.java
+Content-Type: text/x-java; charset=UTF-8
+
+Name: main/tricks.txt
+Content-Type: text/plain; charset=UTF-8
+
+Name: physioFunctions/carbonTransport.rgg
+Content-Type: text/x-grogra-rgg; charset=US-ASCII
+
+Name: organs/canopy.rgg
+Content-Type: text/x-grogra-rgg; charset=US-ASCII
+
+Name: alterModules/updates/updatesBerryPopulation.rgg
+Content-Type: text/x-grogra-rgg; charset=US-ASCII
+
+Name: alterModules/initiation/initiationStructuralVariation.rgg
+Content-Type: text/x-grogra-rgg; charset=US-ASCII
+
+Name: images/grapevine-bark.png
+Content-Type: image/png
+
+Name: utils/RequestHandler.java
+Content-Type: text/x-java; charset=US-ASCII
+
+Name: dataModels/MeanFruitOutputData.java
+Content-Type: text/x-java; charset=UTF-8
+
+Name: images/F6T.png
+Content-Type: image/png
+
+Name: organs/baseModules/plantBase.rgg
+Content-Type: text/x-grogra-rgg; charset=UTF-8
+
+Name: main/main.rgg
+Content-Type: text/x-grogra-rgg; charset=UTF-8
+
+Name: environment/environment.rgg
+Content-Type: text/x-grogra-rgg; charset=US-ASCII
+
+Name: dataModels/LeafExpansionDiagnosticOutputData.java
+Content-Type: text/x-java; charset=US-ASCII
+
+Name: dataModels/AppleFlowerToFruitDiagnosticOutputData.java
+Content-Type: text/x-java; charset=US-ASCII
+
+Name: alterModules/updates/updatesApple.rgg
+Content-Type: text/x-grogra-rgg; charset=US-ASCII
+
+Name: organs/rootSystem/rootSystem.rgg
+Content-Type: text/x-grogra-rgg; charset=UTF-8
+
+Name: physioFunctions/leafAngleOptimization.rgg
+Content-Type: text/x-grogra-rgg; charset=US-ASCII
+
+Name: utils/aggregatedRoot.rgg
+Content-Type: text/x-grogra-rgg; charset=US-ASCII
+
+Name: utils/archReader.rgg
+Content-Type: text/x-grogra-rgg; charset=US-ASCII
+
+Name: alterModules/simRun/simRunIdealVine.rgg
+Content-Type: text/x-grogra-rgg; charset=US-ASCII
+
+Name: environment/soil.rgg
+Content-Type: text/x-grogra-rgg; charset=US-ASCII
+
+Name: management/fruitPlanner.rgg
+Content-Type: text/x-grogra-rgg; charset=UTF-8
+
+Name: images/F8T.png
+Content-Type: image/png
+
+Name: images/Pet3down.png
+Content-Type: image/png
+
+Name: alterModules/updates/updatesSingleRoot.rgg
+Content-Type: text/x-grogra-rgg; charset=US-ASCII
+
+Name: alterModules/initiation/initiationArchReaderGPU.rgg
+Content-Type: text/x-grogra-rgg; charset=US-ASCII
+
+Name: dataModels/WaterFluxSolverOutputData.java
+Content-Type: text/x-java; charset=UTF-8
+
+Name: organs/absOrgans/flowerBase.rgg
+Content-Type: text/x-grogra-rgg; charset=UTF-8
+
+Name: organs/leaf.rgg
+Content-Type: text/x-grogra-rgg; charset=US-ASCII
+
+Name: images/Pedoncule.png
+Content-Type: image/png
+
+Name: config/globalParameters.rgg
+Content-Type: text/x-grogra-rgg; charset=UTF-8
+
+Name: management/leafPlanner.rgg
+Content-Type: text/x-grogra-rgg; charset=UTF-8
+
+Name: utils/tasks.rgg
+Content-Type: text/x-grogra-rgg; charset=UTF-8
+
+Name: images/Fruit7.png
+Content-Type: image/png
+
+Name: images/Sepale.png
+Content-Type: image/png
+
+Name: organs/absOrgans/fruitBase.rgg
+Content-Type: text/x-grogra-rgg; charset=UTF-8
+
+Name: alterModules/develop/developGrapevine.rgg
+Content-Type: text/x-grogra-rgg; charset=US-ASCII
+
+Name: management/budPlannerT0.rgg
+Content-Type: text/x-grogra-rgg; charset=UTF-8
+
+Name: utils/tests.rgg
+Content-Type: text/x-grogra-rgg; charset=UTF-8
+
+Name: alterModules/initiation/initiationStandardGridClone.rgg
+Content-Type: text/x-grogra-rgg; charset=UTF-8
+
+Name: organs/baseModules/shootBase.rgg
+Content-Type: text/x-grogra-rgg; charset=UTF-8
+
+Name: utils/server.rgg
+Content-Type: text/x-grogra-rgg; charset=UTF-8
+

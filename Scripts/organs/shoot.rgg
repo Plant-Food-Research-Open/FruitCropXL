@@ -1,0 +1,2248 @@
+import java.util.Arrays;
+import org.apache.commons.math3.analysis.function.*;
+import org.apache.commons.math3.exception.NoBracketingException;
+import org.apache.commons.math3.exception.TooManyEvaluationsException;
+import org.apache.commons.math3.exception.NumberIsTooLargeException;
+import org.apache.commons.math3.geometry.euclidean.threed.Vector3D;
+import org.apache.commons.math3.geometry.euclidean.threed.Rotation;
+
+import static main.*;
+import static archReader.*;
+import static plantBase.*;
+import static carbonTransport.*;
+import static globalParameters.*;
+import static plantParameters.*;
+import static modelOptions.*;
+import static initialConditions.*;
+import static absOrgan.*;
+import static environment.*;
+import static rootSystem.*;
+import static extraTools.*;
+import static structuralVariation.*;
+import static soil.*;
+import static fruitBase.*;
+import static budBase.*;
+import static shootBase.*;
+import static tasks.*;
+import io.github.fruitcropxl.config.params.groups.*;
+import io.github.fruitcropxl.config.params.structures.*;
+
+// internode module, parameterized for annual stem segment
+module Internode extends GrowingOrgan
+{
+	/** Type of shoot (e.g., spurs, vegetative shoots), mainly for apple. 
+    can be potentially combined with budType*/
+    String shootType="";
+    
+	double deltaRadius;
+	double deltaRadius_PT;
+	double secondaryGrowthSeasonStartDiameter = -1.0;
+	int secondaryGrowthSeasonYear = -9999;
+	double highestBend = 0;
+	/** for dealing with multiple shoots from the same node, 
+		Increase shoot number if another shoot has been produced from this node*/
+	int shootNumber;
+	/**This is to track the number of branching happens in one growing season and to control the bud behaviour*/
+	int syllepticOrder; 
+	boolean primaryShoot;
+	double lignificationDemand;
+	double ageAtVeraison;
+	/** Saved leaf-allometry frozen potential demand, mg dry matter step-1 before ratio. */
+	public boolean leafAllometryFrozenPotentialDemandValid = false;
+	/** Saved leaf-allometry frozen actual demand, mg dry matter step-1 before ratio. */
+	public boolean leafAllometryFrozenActualDemandValid = false;
+	/** Saved leaf-allometry frozen potential demand, mg dry matter step-1 before ratio. */
+	public double leafAllometryFrozenPotentialDemand = Double.NaN;
+	/** Saved leaf-allometry frozen actual demand, mg dry matter step-1 before ratio. */
+	public double leafAllometryFrozenActualDemand = Double.NaN;
+	  
+	Shader shootShader;
+	/** maximum diameter for the fast growth phase of the internode
+	 * 1.5e-2;	//maximum 15 mm for the logistic growth phase
+	 */
+	double maxDia_phase1;  	  
+	boolean maxDiameterResolvedFromTopology = false;
+	double lastDiameterTopologyUpdateAge = -9999.0;
+	int lastDistalNodeCount = -1;
+	double initialDia;
+	double CORDON_DENSITY;
+	/**
+	 * Shoot vigour factor (unitless).
+	 * 
+	 * This scaling factor modulates the radial growth potential of shoots or internodes
+	 * based on site-specific or plant-level variability in vigour.
+	 * It can be influenced by genotype, environmental stress, parent shoot status,
+	 * or competition from nearby sinks.
+	 * 
+	 * Typical range: 0.7 (low vigour) to 1.2 (high vigour).
+	 */
+	double fvigour; 
+	/**
+	 * Cambial duration for secondary growth (te_sec), in thermal days.
+	 * 
+	 * Represents the length of the secondary growth period after primary elongation.
+	 * Used in young internodes to limit the duration of cambial activity, typically
+	 * lasting 20–40 days after elongation ends.
+	 */
+	double te_sec;
+	/**
+	 * Diameter scaling coefficient ‘a’ for allometric function.
+	 * 
+	 * Used in the internode diameter-length relationship:
+	 * d = dia_a × L^b
+	 * 
+	 * Species-specific parameter — e.g., 1.2 for grapevine, 0.9 for apple.
+	 */
+	//double dia_a;
+	/**
+	 * Diameter allometric exponent ‘b’ in the function:
+	 * d = dia_a × L^dia_b
+	 * 
+	 * Empirically derived, typically around 0.35 for both apple and grapevine.
+	 * Captures nonlinear scaling between internode length and diameter during primary growth.
+	 */
+	//double dia_b;
+	/**current length vs potential length causued by reductions*/
+	double lengthPotentialRatio = 1.0;
+	/** Realized-to-potential final size ratio (-), for calibration/export. */
+	public double realizationRatio = 1.0;
+	//hydraulic conductivity for shoot 
+	//Rx decrease with diameter, and increase with length. The trunk crossing area for the reference Rx value is 35 cm^2
+	//the diameter is 6.66 cm. from W�nsche J.N., Palmer J.W. & Greer D.H. (2000) Hall and Minchin., 2013
+	//const float Rx = 3.62e-4;  //362 kg-1 s m-1 MPa = 362/1e6 mg-1 s m-1 MPa; resistance per meter length of xylem  Rx times length get the resistance for one internode from Hall and Minchin., 2013
+	//from Rami et al., 2018 HydroShoot
+	float cx1 				; //= 1.171;  //shape parameters for the curve of shoot Ks decrease with water potential
+	float cx2 				; //= 1.6;  //relationship between diameter and Ks
+	float cx3 				; //= 2.0; //c?2 and c?3 are dimensionless shape parameters, mostly given within the ranges of [2.5, 2.8] and [2.0, 5.0], respectively (Tyree and Zimmermann, 2002).
+	float phi_stem 			; //= -0.76; //shape factor regulating the steepness of the reduction in K due to caviation
+ 	
+
+	
+	transient WaterFluxTask wftask;
+	//transient GrowthTask gtask;
+	{
+		wftask = new WaterFluxTask(this);
+		//gtask = new GrowthTask(this);
+	}
+
+	void updateRealizationRatio() {
+		double ratio = 1.0;
+		if (potentialFinalSize > 1.0e-12 && !Double.isNaN(potentialFinalSize) && !Double.isInfinite(potentialFinalSize)) {
+			ratio = realizedFinalSize / potentialFinalSize;
+		}
+		if (Double.isNaN(ratio) || Double.isInfinite(ratio)) ratio = 1.0;
+		realizationRatio = Math.max(0.0, ratio);
+	}
+	 
+	@Override
+	public void loadParameters() {
+			
+		/** Set the context for file name parameters*/
+		CategoryStore config = ((DocumentCategoryNameGroup) CONFIG.getGroup(FILE_NAME_PLANT_PARAMETERS, 
+			DocumentCategoryNameGroup.class)).getCategoryStore();
+
+		
+		/** Configuration context for internode carbon-related parameters */
+		config.setCategoryContext("internode-carbon");
+		//common parameters
+		maintenanceCoff        = config.getDouble("MTNCE", 7.67e-05);
+		growthCoff             = config.getDouble("GROWTHRQ", 1.2);		
+		C_content              = config.getDouble("C_CONTENT", 0.46);
+		maxRes                 = config.getDouble("RESERVES", 0.2);
+		
+		/** pass the plant level carbon parameters*/
+		km_pri                 = config.getDouble("KM_PRI", 0.05);
+		km_sec                 = config.getDouble("KM_SECONDARY", 0.12); 
+		configureReserveKmAbsolute(config, 0.48, 0.096);
+		
+			/** Nonstructural carbon hydrolysis and synthesis rates (h-1). */
+			configureReserveTurnover(config, 0.0060, 0.0010);
+		
+		tm	 = config.getDouble("tm", 5);
+		te	 = config.getDouble("te", 8);
+		initialLength = config.getDouble("initialLength", 1e-2);
+		maxLength = config.getDouble("Lmax", 0.1);
+		
+		//New secondary growth
+		secondaryGrowthRate = config.getDouble("SEC_GROWTH_RATE", 7e-06);
+		secBase = 0.0;
+		secBump = 0.0;
+		k_age = 0.0;
+		fvigour = config.getDouble("fvigour", 1.0);
+		te_sec  = config.getDouble("te_sec", 25.0);
+		
+	/* 	dia_a  = config.getDouble("dia_a", 1.2);
+		dia_b  = config.getDouble("dia_b", 0.35); */
+		//the function is sensitive to scale, so need to use mm
+		
+		
+		// Diameter at initiation:
+		// - Annual shoots: topology-based taper from planned distal node count.
+		// - Other internodes: keep existing allometry.
+		try {
+			// pipe_alpha units: m diameter increment per distal annual-shoot node.
+			pipe_alpha = config.getDouble("pipe_alpha", Double.valueOf(pipe_alpha).doubleValue());
+			pipeDiaMin = config.getDouble("pipeDiaMin", Double.valueOf(pipeDiaMin).doubleValue());
+			pipeDiaMax = config.getDouble("pipeDiaMax", Double.valueOf(pipeDiaMax).doubleValue());
+		
+		} catch (Throwable t) {
+			println("[Config] WARN: Failed to load pipe parameters; keeping in-memory defaults.");
+			t.printStackTrace();
+		}
+		maxDia_phase1 = (pipeDiaMin + pipeDiaMax)/2;
+		
+
+		
+		//println("maxLength: " + maxLength + " dia: " + maxDia_phase1);
+		
+		//SHOOT_DENSITY*1e6;  // times 1e6 to convert from mg/cm3 into mg/m3
+		density = config.getDouble("SHOOT_DENSITY", 300) * 1e6;
+		
+		//use for calculating potential shoot density increase
+		config.setCategoryContext("wood-carbon");
+		CORDON_DENSITY = config.getDouble("CORDON_DENSITY", 750) * 1e6;
+		
+		/** Set the context for common plant level water parameters*/
+		config.setCategoryContext("internode-water");
+				
+		cx1		 = config.getDouble("cx1", 1.171);
+		cx2		 = config.getDouble("cx2", 2.6);
+		cx3		 = config.getDouble("cx3", 2);
+		phi_stem = config.getDouble("phi_stem", -2.5);
+		
+		growth_a	 = config.getDouble("growth_a", -10);
+		growth_b	 = config.getDouble("growth_b", -0.6);
+		
+		waterContent = config.getDouble("WATER_CONTENT", 0.8);
+		
+		config.setCategoryContext("internode-nitrogen");
+		/** Slope of Nm decline with thermal time (fraction per °C·d). */
+		aN_slope = config.getDouble("aN_slope", -4.1e-6);
+		
+		/** Clamps for Nm and LMA. */
+		Nm_min  = config.getDouble("Nm_min",  0.005);  // 0.5% N
+		Nm_max  = config.getDouble("Nm_max",  0.020);  // 6.0% N
+		
+
+		
+		
+	/** INITIAL CONDITIONS*/	
+	CategoryStore config_Init = ((DocumentCategoryNameGroup) CONFIG.getGroup(FILE_NAME_INITIAL_CONDITIONS, 
+		DocumentCategoryNameGroup.class)).getCategoryStore();
+		
+		config_Init.setCategoryContext("internode");
+		fNSC                   = config_Init.getDouble("fNSC", 0.1);
+		structure_C            = 1- fNSC; 
+		Nm  = config_Init.getDouble("Nm",  0.020);  // 2.0% N
+		lengthPotentialRatio = 1;
+		
+		
+		
+	}
+	
+	
+	
+	
+	// internode initiation
+	
+	void initiate_pb(PlantBase pb, int i, int k, int l)
+	{
+		//initialize the parameters
+		loadParameters();
+		
+		//IDENTIFIERS
+		plantBaseID = pb.nodeID;
+		plantNumber = pb.plantNumber;
+		border = pb.border;
+		rank = Math.max(i, 1);
+		nodeNumber = k; 
+		cordonNumber = l;
+		age = pb.age - (rank+4) * plastochron;
+		//TAU = TAU_ITNDE;
+		cpn = i;
+		//it is very hard to give a consistent order for this ad it does not contains in the data
+		//based on the i, k, l identification, this should be 3.
+		order = 3; 
+		assignAge(pb, this.cpn);
+		
+		
+		if (!initiation_method.equals("ArchReader")) {
+			initDimensions_DevelopmentRules();
+		}
+		this.potLength = length; 
+		lengthPotentialRatio = 1;
+		//CARBON
+		biomass = woodBiomassCalcMethod == 0? BIOMASS_INTERNODE/(ENDING_PHYTOMER_NUM) :   
+											  Math.PI * (diameter*diameter/4) * length * density; 
+		area = Math.PI * (diameter*diameter/4); 											  
+		
+		freshWeight = biomass/(1-waterContent);
+		carbon_total = biomass * C_content;
+		carbon_structure = carbon_total * structure_C;  //mg, amount of structure carbon
+		carbon_nonStructure = carbon_total * fNSC;    //mg, amount of starch carbon
+		fNSCtoSC = carbon_nonStructure/carbon_structure; 
+		fNSC = carbon_nonStructure/carbon_total;
+		
+		//NITROGEN
+		nitrogen_total = biomass * Nm;
+		nitrogen_structure = biomass * Nm_min; 
+		nitrogen_nonStructure = nitrogen_total * (1 - N_CONTENT_MOBILE) -  nitrogen_structure;
+		nitrogen_mobile = nitrogen_total * N_CONTENT_MOBILE;
+		//water potential initialize		
+		this.waterPotential_b = inputWaterPotential;
+		this.waterPotential = inputWaterPotential;
+		calcKmax();
+		calcKa();
+			this.organType = "Internode";
+			this.shootType = "F";
+			if(shootShader == null) shootShader = this.age > 100 ?  cordonTexture : petiole;
+			updateRealizationRatio();
+		
+	}
+	
+	// internode initiation
+	Internode initiate_pi(PlantIdentifier pb, float length_, float diameter_)
+	{
+		//initialize the parameters
+		loadParameters();
+		
+		//IDENTIFIERS
+		plantNumber = pb.plantNumber;
+		border = pb.border;
+			
+		length = length_;
+		diameter = diameter_;
+		this.potLength = length;
+		lengthPotentialRatio = 1;
+		//CARBON
+		biomass = Math.PI * (diameter*diameter/4) * length * density; 
+		area = Math.PI * (diameter*diameter/4); 											  
+		
+		freshWeight = biomass/(1-waterContent);
+		carbon_total = biomass * C_content;
+		carbon_structure = carbon_total * structure_C;  //mg, amount of structure carbon
+		carbon_nonStructure = carbon_total * fNSC;    //mg, amount of starch carbon
+		fNSCtoSC = carbon_nonStructure/carbon_structure; 
+		fNSC = carbon_nonStructure/carbon_total;
+		//NITROGEN
+		nitrogen_total = biomass * Nm;
+		nitrogen_structure = biomass * Nm_min; 
+		nitrogen_nonStructure = nitrogen_total * (1 - N_CONTENT_MOBILE) -  nitrogen_structure;
+		nitrogen_mobile = nitrogen_total * N_CONTENT_MOBILE;
+		//water potential initialize		
+		this.waterPotential_b = inputWaterPotential;
+		this.waterPotential = inputWaterPotential+1e-2;
+		calcKmax();
+		calcKa();
+			this.organType = "Internode";
+			if(shootShader == null) shootShader = this.age > 100 ?  cordonTexture : petiole;
+			updateRealizationRatio();
+			return this;
+	}
+	
+	
+	
+	void initiate_apex(ApexService a)
+	{
+		loadParameters();
+		
+		//IDENTIFIERS
+		plantNumber = a.plantNumber;
+		border = a.border;
+		rank = Math.max(a.rank,1);
+		nodeNumber = a.nodeNumber; 
+		cordonNumber = a.cordonNumber;
+		age = Math.max(1e-3, a.age - plastochron);
+		
+		this.order = a.order; 
+		this.axis2ID = a.axis2ID; 
+		this.axis3ID = a.axis3ID;
+		this.axis4ID = a.axis4ID;
+		this.axis5ID = a.axis5ID;
+		this.axis6ID = a.axis6ID;
+		this.axis7ID = a.axis7ID;
+		this.axis8ID = a.axis8ID;
+		this.axis9ID = a.axis9ID;
+		this.cpn = axis2ID + axis3ID + axis4ID + axis5ID + axis6ID + axis7ID + axis8ID + axis9ID + rank;
+		
+		//TAU = TAU_ITNDE;
+		//devAge = indeInitialDevAge();
+		cpn = a.cpn ;
+		order = a.order; 
+		this.shootType = a.shootType;
+		//This is to track the number of branching happens in one growing season and to control the bud behaviour
+		this.syllepticOrder = a.syllepticOrder; 
+		if(this.syllepticOrder == 0) 
+		{
+			this.primaryShoot = true;
+		} else {this.primaryShoot = false;}
+		this.shootNumber = resolveDynamicShootNumber(a);
+		if ((printFlag || debug) && this.rank == 1) {
+			println("[apple][internode-init] step=" + step
+				+ " internodeId=" + this.getId()
+				+ " apexId=" + ((a != null) ? a.getId() : 0L)
+				+ " parentOrganId=" + ((a != null) ? a.parentID : 0L)
+				+ " order=" + this.order
+				+ " rank=" + this.rank
+				+ " shootType=" + this.shootType
+				+ " shootNumber=" + this.shootNumber
+				+ " syllepticOrder=" + this.syllepticOrder
+				+ " primaryShoot=" + this.primaryShoot
+				+ " axis2=" + this.axis2ID
+				+ " axis3=" + this.axis3ID
+				+ " axis4=" + this.axis4ID
+				+ " axis5=" + this.axis5ID
+				+ " axis6=" + this.axis6ID
+				+ " axis7=" + this.axis7ID
+				+ " axis8=" + this.axis8ID
+				+ " axis9=" + this.axis9ID
+				+ " cpn=" + this.cpn);
+		}
+		
+		length = initialLength;
+		this.potLength = length;
+		lengthPotentialRatio = 1;
+		// Diameter at initiation:
+		// - Annual shoots: topology-based taper from planned distal node count.
+		// - Other internodes: keep existing allometry.
+		int nAbove = estimateDistalNodeCountFromPlan(a);
+		maxDia_phase1  = diameterFromDistalNodeCount(nAbove);
+		lastDistalNodeCount = nAbove;
+		lastDiameterTopologyUpdateAge = this.age;
+		maxDiameterResolvedFromTopology = true;
+		this.diameter  = pipeDiaMin;
+		
+		
+		
+		
+		//Boltzmann_initialLength = indeInitialLength(rank);
+		
+		
+		
+		//CARBON
+		biomass = Math.PI * (this.diameter*this.diameter/4) * this.length * density; 
+		area = Math.PI * (diameter*diameter/4);
+		
+		freshWeight = biomass/(1-waterContent);
+		carbon_total = biomass * C_content;
+		carbon_structure = carbon_total * structure_C;  //mg, amount of structure carbon
+		carbon_nonStructure = carbon_total * fNSC;    //mg, amount of starch carbon
+		fNSCtoSC = carbon_nonStructure/carbon_structure; 
+		fNSC = carbon_nonStructure/carbon_total;
+		
+		//NITROGEN		
+		nitrogen_total = biomass * Nm;
+		nitrogen_structure = biomass * Nm_min; 
+		nitrogen_nonStructure = nitrogen_total * (1 - N_CONTENT_MOBILE) -  nitrogen_structure;
+		nitrogen_mobile = nitrogen_total * N_CONTENT_MOBILE;
+		
+		calcKmax();
+		this.waterPotential_b = a.waterPotential;
+		this.waterPotential = a.waterPotential+1e-2;;
+		calcKa();
+			this.organType = "Internode";
+			this.shootType = a.shootType;
+			updateRealizationRatio();
+		}
+	
+	
+	private static double clampd(double v, double lo, double hi) {
+		return (v < lo) ? lo : (v > hi) ? hi : v;
+	}
+
+	private boolean isAnnualShootInternode() {
+		if (species == null) return false;
+		if (this.organType == null || !this.organType.equalsIgnoreCase("Internode")) return false;
+		return this.order >= 3;
+	}
+
+	boolean shouldSyncAnnualInternodeBiomassFromLeaves() {
+		if (annualInternodeBiomassMode == null || !annualInternodeBiomassMode.equals("leafAllometry")) return false;
+		if (isPerennialWoodyOrgan()) return false;
+		return this.order >= 3;
+	}
+
+	private static int leafAllometryCacheStep = Integer.MIN_VALUE;
+	private static java.util.Map leafAllometryDirectLeavesByInternode = new java.util.HashMap(); // Internode -> List
+	private static java.util.Map leafAllometryFallbackLeafByInternode = new java.util.HashMap(); // Internode -> PhotosynthateOrgan
+	private static java.util.Map leafAllometryFrozenPotentialDemandByInternode = new java.util.HashMap(); // Internode -> Double, mg dry matter step-1 before ratio
+	private static java.util.Map leafAllometryFrozenActualDemandByInternode = new java.util.HashMap(); // Internode -> Double, mg dry matter step-1 before ratio
+
+	private static boolean isLeafLikePhotosynthateOrgan(PhotosynthateOrgan organ) {
+		if (organ == null || organ.organType == null) return false;
+		return organ.organType.toLowerCase().indexOf("leaf") >= 0;
+	}
+
+	private static boolean usableLeafBiomass(PhotosynthateOrgan organ) {
+		return isLeafLikePhotosynthateOrgan(organ) &&
+			!Double.isNaN(organ.biomass) && !Double.isInfinite(organ.biomass) && organ.biomass > 0.0;
+	}
+
+	private static Internode nearestInternodeForLeaf(PhotosynthateOrgan organ) {
+		if (organ == null) return null;
+		try {
+			return first((* organ (<--)+ parentLeafInternode:Internode *));
+		} catch (RuntimeException ex) {
+			return null;
+		}
+	}
+
+	private double directLeafBiomassForInternode() {
+		double leafBiomass = 0.0;
+		for (PhotosynthateOrgan leafCandidate : (* this (-->)+ directLeafCandidate:PhotosynthateOrgan *)) {
+			if (!usableLeafBiomass(leafCandidate)) continue;
+			Internode owner = nearestInternodeForLeaf(leafCandidate);
+			if (owner == this) {
+				leafBiomass += leafCandidate.biomass;
+			}
+		}
+		return leafBiomass;
+	}
+
+	private double nearbyLeafScore(Internode leafOwner, PhotosynthateOrgan lf) {
+		double score = 1000000.0;
+		if (leafOwner != null) {
+			score = Math.abs(leafOwner.order - this.order) * 1000.0 +
+				Math.abs(leafOwner.nodeNumber - this.nodeNumber) * 10.0 +
+				Math.abs(leafOwner.rank - this.rank);
+		} else if (lf != null) {
+			score = Math.abs(lf.rank - this.rank) + 10000.0;
+		}
+		return score;
+	}
+
+	private double nearbyLeafBiomassForInternode() {
+		double bestBiomass = Double.NaN;
+		double bestScore = Double.POSITIVE_INFINITY;
+		for (PhotosynthateOrgan leafCandidate : (* samePlantLeafCandidate:PhotosynthateOrgan,
+			(samePlantLeafCandidate.plantNumber == this.plantNumber) *)) {
+			if (!usableLeafBiomass(leafCandidate)) continue;
+			Internode owner = nearestInternodeForLeaf(leafCandidate);
+			if (owner != null && owner.getId() == this.getId()) continue;
+			if (owner != null && !owner.shouldSyncAnnualInternodeBiomassFromLeaves()) continue;
+			double score = nearbyLeafScore(owner, leafCandidate);
+			if (score < bestScore) {
+				bestScore = score;
+				bestBiomass = leafCandidate.biomass;
+			}
+		}
+		return bestBiomass;
+	}
+
+	private double annualInternodeLeafBiomassRatioSafe() {
+		double k = annualInternodeLeafBiomassRatio;
+		if (Double.isNaN(k) || Double.isInfinite(k) || k < 0.0) {
+			k = 0.4;
+		}
+		return k;
+	}
+
+	private static double leafStructuralDemand(PhotosynthateOrgan leafCandidate, boolean potentialPath) {
+		if (leafCandidate == null) return 0.0;
+		double demand = potentialPath ? leafCandidate.structureDM_PRI_PT : leafCandidate.structureDM;
+		if (Double.isNaN(demand) || Double.isInfinite(demand) || demand < 0.0) return 0.0;
+		return demand;
+	}
+
+	private static double readLeafAllometryDoubleField(Object organ, String fieldName) {
+		if (organ == null) return Double.NaN;
+		Class c = organ.getClass();
+		while (c != null) {
+			try {
+				java.lang.reflect.Field f = c.getDeclaredField(fieldName);
+				f.setAccessible(true);
+				return f.getDouble(organ);
+			} catch (NoSuchFieldException ex) {
+				c = c.getSuperclass();
+			} catch (Exception ex) {
+				return Double.NaN;
+			}
+		}
+		return Double.NaN;
+	}
+
+	private static boolean isPastLeafAllometryExpansion(Object organ) {
+		double organAge = readLeafAllometryDoubleField(organ, "age");
+		double organTe = readLeafAllometryDoubleField(organ, "te");
+		if (Double.isNaN(organAge) || Double.isInfinite(organAge)) return false;
+		if (Double.isNaN(organTe) || Double.isInfinite(organTe) || organTe < 0.0) return false;
+		return organAge > organTe;
+	}
+
+	private static java.util.Map frozenLeafAllometryDemandMap(boolean potentialPath) {
+		return potentialPath ? leafAllometryFrozenPotentialDemandByInternode : leafAllometryFrozenActualDemandByInternode;
+	}
+
+	public static void resetLeafAllometryRuntimeCache() {
+		leafAllometryCacheStep = Integer.MIN_VALUE;
+		leafAllometryDirectLeavesByInternode.clear();
+		leafAllometryFallbackLeafByInternode.clear();
+		leafAllometryFrozenPotentialDemandByInternode.clear();
+		leafAllometryFrozenActualDemandByInternode.clear();
+	}
+
+	private static boolean validFrozenLeafAllometryDemand(double demand) {
+		return !Double.isNaN(demand) && !Double.isInfinite(demand) && demand >= 0.0;
+	}
+
+	private static boolean hasFrozenLeafAllometryDemand(Internode itn, boolean potentialPath) {
+		if (itn == null) return false;
+		if (frozenLeafAllometryDemandMap(potentialPath).containsKey(itn)) return true;
+		if (potentialPath) {
+			return itn.leafAllometryFrozenPotentialDemandValid &&
+				validFrozenLeafAllometryDemand(itn.leafAllometryFrozenPotentialDemand);
+		}
+		return itn.leafAllometryFrozenActualDemandValid &&
+			validFrozenLeafAllometryDemand(itn.leafAllometryFrozenActualDemand);
+	}
+
+	private static double getFrozenLeafAllometryDemand(Internode itn, boolean potentialPath) {
+		if (itn == null) return Double.NaN;
+		java.util.Map frozenMap = frozenLeafAllometryDemandMap(potentialPath);
+		Object value = frozenMap.get(itn);
+		if (value instanceof Double) return ((Double) value).doubleValue();
+		double savedDemand = potentialPath ? itn.leafAllometryFrozenPotentialDemand : itn.leafAllometryFrozenActualDemand;
+		boolean savedValid = potentialPath ? itn.leafAllometryFrozenPotentialDemandValid : itn.leafAllometryFrozenActualDemandValid;
+		if (savedValid && validFrozenLeafAllometryDemand(savedDemand)) {
+			frozenMap.put(itn, Double.valueOf(savedDemand));
+			return savedDemand;
+		}
+		return Double.NaN;
+	}
+
+	private static void freezeLeafAllometryDemand(Internode itn, boolean potentialPath, double demand) {
+		if (itn == null) return;
+		if (Double.isNaN(demand) || Double.isInfinite(demand) || demand < 0.0) demand = 0.0;
+		frozenLeafAllometryDemandMap(potentialPath).put(itn, Double.valueOf(demand));
+		if (potentialPath) {
+			itn.leafAllometryFrozenPotentialDemand = demand;
+			itn.leafAllometryFrozenPotentialDemandValid = true;
+		} else {
+			itn.leafAllometryFrozenActualDemand = demand;
+			itn.leafAllometryFrozenActualDemandValid = true;
+		}
+	}
+
+	private static boolean allSelectedLeavesPastExpansion(java.util.List selectedLeaves) {
+		if (selectedLeaves == null || selectedLeaves.isEmpty()) return false;
+		for (int i = 0; i < selectedLeaves.size(); i++) {
+			Object o = selectedLeaves.get(i);
+			if (!(o instanceof PhotosynthateOrgan)) return false;
+			if (!isPastLeafAllometryExpansion((PhotosynthateOrgan) o)) return false;
+		}
+		return true;
+	}
+
+	private static void ensureLeafAllometryCacheForStep() {
+		if (leafAllometryCacheStep == step) return;
+		if (step <= 0 || step < leafAllometryCacheStep) {
+			resetLeafAllometryRuntimeCache();
+		}
+		leafAllometryCacheStep = step;
+		leafAllometryDirectLeavesByInternode.clear();
+		leafAllometryFallbackLeafByInternode.clear();
+
+		java.util.List internodes = new java.util.ArrayList();
+		java.util.List leaves = new java.util.ArrayList();
+		java.util.List leafOwners = new java.util.ArrayList();
+
+		for (Internode itn : (* syncInternode:Internode, (syncInternode.shouldSyncAnnualInternodeBiomassFromLeaves()) *)) {
+			internodes.add(itn);
+		}
+		if (internodes.isEmpty()) return;
+
+		for (PhotosynthateOrgan leafCandidate : (* leafQuery:PhotosynthateOrgan *)) {
+			if (!isLeafLikePhotosynthateOrgan(leafCandidate)) continue;
+			Internode owner = nearestInternodeForLeaf(leafCandidate);
+			if (owner != null && !owner.shouldSyncAnnualInternodeBiomassFromLeaves()) continue;
+			leaves.add(leafCandidate);
+			leafOwners.add(owner);
+			if (owner != null) {
+				java.util.List direct = (java.util.List) leafAllometryDirectLeavesByInternode.get(owner);
+				if (direct == null) {
+					direct = new java.util.ArrayList();
+					leafAllometryDirectLeavesByInternode.put(owner, direct);
+				}
+				direct.add(leafCandidate);
+			}
+		}
+
+		for (int i = 0; i < internodes.size(); i++) {
+			Internode target = (Internode) internodes.get(i);
+			if (leafAllometryDirectLeavesByInternode.containsKey(target)) continue;
+			double bestScore = Double.POSITIVE_INFINITY;
+			PhotosynthateOrgan bestLeaf = null;
+			for (int j = 0; j < leaves.size(); j++) {
+				PhotosynthateOrgan leafCandidate = (PhotosynthateOrgan) leaves.get(j);
+				if (leafCandidate == null || leafCandidate.plantNumber != target.plantNumber) continue;
+				Internode owner = (Internode) leafOwners.get(j);
+				if (owner != null && owner == target) continue;
+				double score = target.nearbyLeafScore(owner, leafCandidate);
+				if (score < bestScore) {
+					bestScore = score;
+					bestLeaf = leafCandidate;
+				}
+			}
+			if (bestLeaf != null) {
+				leafAllometryFallbackLeafByInternode.put(target, bestLeaf);
+			}
+		}
+	}
+
+	private double cachedLeafStructuralDemandForInternode(boolean potentialPath) {
+		if (hasFrozenLeafAllometryDemand(this, potentialPath)) {
+			return getFrozenLeafAllometryDemand(this, potentialPath);
+		}
+		ensureLeafAllometryCacheForStep();
+		java.util.List direct = (java.util.List) leafAllometryDirectLeavesByInternode.get(this);
+		if (direct != null) {
+			double demand = 0.0;
+			for (int i = 0; i < direct.size(); i++) {
+				demand += leafStructuralDemand((PhotosynthateOrgan) direct.get(i), potentialPath);
+			}
+			if (isPastLeafAllometryExpansion(this) || allSelectedLeavesPastExpansion(direct)) {
+				freezeLeafAllometryDemand(this, potentialPath, demand);
+			}
+			return demand;
+		}
+		PhotosynthateOrgan fallback = (PhotosynthateOrgan) leafAllometryFallbackLeafByInternode.get(this);
+		if (fallback == null) {
+			if (isPastLeafAllometryExpansion(this)) {
+				freezeLeafAllometryDemand(this, potentialPath, 0.0);
+				return 0.0;
+			}
+			return Double.NaN;
+		}
+		double demand = leafStructuralDemand(fallback, potentialPath);
+		if (isPastLeafAllometryExpansion(this) || isPastLeafAllometryExpansion(fallback)) {
+			freezeLeafAllometryDemand(this, potentialPath, demand);
+		}
+		return demand;
+	}
+
+	private double directLeafStructuralDemandForInternode(double sugarConcentration_phloem, boolean potentialPath) {
+		boolean foundLeaf = false;
+		double demand = 0.0;
+		for (PhotosynthateOrgan leafCandidate : (* this (-->)+ directLeafCandidate:PhotosynthateOrgan *)) {
+			if (!isLeafLikePhotosynthateOrgan(leafCandidate)) continue;
+			Internode owner = nearestInternodeForLeaf(leafCandidate);
+			if (owner != this) continue;
+			foundLeaf = true;
+			demand += leafStructuralDemand(leafCandidate, potentialPath);
+		}
+		return foundLeaf ? demand : Double.NaN;
+	}
+
+	private double nearbyLeafStructuralDemandForInternode(double sugarConcentration_phloem, boolean potentialPath) {
+		double bestDemand = Double.NaN;
+		double bestScore = Double.POSITIVE_INFINITY;
+		for (PhotosynthateOrgan leafCandidate : (* samePlantLeafCandidate:PhotosynthateOrgan,
+			(samePlantLeafCandidate.plantNumber == this.plantNumber) *)) {
+			if (!isLeafLikePhotosynthateOrgan(leafCandidate)) continue;
+			Internode owner = nearestInternodeForLeaf(leafCandidate);
+			if (owner != null && owner.getId() == this.getId()) continue;
+			if (owner != null && !owner.shouldSyncAnnualInternodeBiomassFromLeaves()) continue;
+			double score = nearbyLeafScore(owner, leafCandidate);
+			if (score < bestScore) {
+				bestScore = score;
+				bestDemand = leafStructuralDemand(leafCandidate, potentialPath);
+			}
+		}
+		return bestDemand;
+	}
+
+	private double leafAllometryStructuralDemandForInternode(double sugarConcentration_phloem, boolean potentialPath) {
+		if (!shouldSyncAnnualInternodeBiomassFromLeaves()) return Double.NaN;
+		double leafDemand = Double.NaN;
+		try {
+			leafDemand = cachedLeafStructuralDemandForInternode(potentialPath);
+		} catch (RuntimeException ex) {
+			// Compatibility fallback for older/partial graphs if cache construction fails.
+			leafDemand = directLeafStructuralDemandForInternode(sugarConcentration_phloem, potentialPath);
+			if (Double.isNaN(leafDemand) || Double.isInfinite(leafDemand)) {
+				leafDemand = nearbyLeafStructuralDemandForInternode(sugarConcentration_phloem, potentialPath);
+			}
+		}
+		if (Double.isNaN(leafDemand) || Double.isInfinite(leafDemand) || leafDemand < 0.0) {
+			leafDemand = 0.0;
+		}
+		return annualInternodeLeafBiomassRatioSafe() * leafDemand;
+	}
+
+	void syncAnnualInternodeBiomassFromLocalOrNearbyLeaf() {
+		if (!shouldSyncAnnualInternodeBiomassFromLeaves()) return;
+		double leafBiomass = directLeafBiomassForInternode();
+		if (Double.isNaN(leafBiomass) || Double.isInfinite(leafBiomass) || leafBiomass <= 0.0) {
+			leafBiomass = nearbyLeafBiomassForInternode();
+		}
+		if (Double.isNaN(leafBiomass) || Double.isInfinite(leafBiomass) || leafBiomass <= 0.0) return;
+
+		double candidateBiomass = annualInternodeLeafBiomassRatioSafe() * leafBiomass; // mg dry matter, leaf-to-internode allometry.
+		if (Double.isNaN(candidateBiomass) || Double.isInfinite(candidateBiomass) || candidateBiomass <= 0.0) return;
+		biomass_pre = biomass;
+		biomass = candidateBiomass;
+		initCN_content(biomass);
+		updateRealizationRatio();
+	}
+
+	private double safeTopologyUpdateCadence() {
+		double cadence = plastochron;
+		try {
+			cadence = phyllochron;
+		} catch (RuntimeException ex) {
+			cadence = plastochron;
+		}
+		if (Double.isNaN(cadence) || Double.isInfinite(cadence) || cadence <= 0.0) cadence = 1.0;
+		return cadence;
+	}
+
+	private boolean hasActiveDistalApex() {
+		ApexService apx = first((* this (-->)+ a:ApexService *));
+		return apx != null;
+	}
+
+	int countAnnualShootNodesAbove() {
+		Internode cursor = this;
+		int count = 0;
+		int guard = 0;
+		while (guard < 512) {
+			guard++;
+			Internode next = first((* cursor --> nx:Internode *));
+			if (next == null) break;
+			if (next == cursor) break;
+			if (next.organType == null || !next.organType.equalsIgnoreCase("Internode")) break;
+			if (next.order <= 2) break;
+			count++;
+			cursor = next;
+		}
+		return count;
+	}
+
+	double diameterFromDistalNodeCount(int nAbove) {
+		double D = pipeDiaMin + pipe_alpha * Math.max(0, nAbove);
+		return clampd(D, pipeDiaMin, pipeDiaMax);
+	}
+
+		private void refreshMaxDiameterFromTopologyIfNeeded() {
+			if (!isAnnualShootInternode()) return;
+			if (useStaticArc) {
+				// Static/imported architectures already carry initialized diameters.
+				// Do not overwrite their diameter target with a topology-count taper.
+				maxDiameterResolvedFromTopology = true;
+				return;
+			}
+			double fallbackDia = (pipeDiaMin + pipeDiaMax) / 2.0;
+			if (Double.isNaN(maxDia_phase1) || Double.isInfinite(maxDia_phase1) || maxDia_phase1 <= 0.0) {
+				maxDia_phase1 = fallbackDia;
+			}
+			double cadence = safeTopologyUpdateCadence();
+			boolean hasDistalApex = hasActiveDistalApex();
+			boolean canUpdateNow = hasDistalApex
+				&& ((!maxDiameterResolvedFromTopology)
+					|| ((this.age - lastDiameterTopologyUpdateAge) >= cadence));
+			if (canUpdateNow) {
+				int nAbove = countAnnualShootNodesAbove();
+				if (nAbove != lastDistalNodeCount || !maxDiameterResolvedFromTopology) {
+					maxDia_phase1 = diameterFromDistalNodeCount(nAbove);
+					lastDistalNodeCount = nAbove;
+				}
+				lastDiameterTopologyUpdateAge = this.age;
+				maxDiameterResolvedFromTopology = true;
+			}
+			if (Double.isNaN(maxDia_phase1) || Double.isInfinite(maxDia_phase1) || maxDia_phase1 < pipeDiaMin) {
+				maxDia_phase1 = pipeDiaMin;
+		}
+		if (maxDia_phase1 > pipeDiaMax) maxDia_phase1 = pipeDiaMax;
+	}
+
+	private int resolveDynamicShootNumber(ApexService a) {
+		if (a == null) return 1;
+		int sn = 0;
+		if (a.order >= 9) sn = a.axis9ID;
+		else if (a.order == 8) sn = a.axis8ID;
+		else if (a.order == 7) sn = a.axis7ID;
+		else if (a.order == 6) sn = a.axis6ID;
+		else if (a.order == 5) sn = a.axis5ID;
+		else if (a.order == 4) sn = a.axis4ID;
+		else if (a.order == 3) sn = a.axis3ID;
+		else sn = a.axis2ID;
+
+		if (sn <= 0) {
+			if (a.axis9ID > 0) sn = a.axis9ID;
+			else if (a.axis8ID > 0) sn = a.axis8ID;
+			else if (a.axis7ID > 0) sn = a.axis7ID;
+			else if (a.axis6ID > 0) sn = a.axis6ID;
+			else if (a.axis5ID > 0) sn = a.axis5ID;
+			else if (a.axis4ID > 0) sn = a.axis4ID;
+			else if (a.axis3ID > 0) sn = a.axis3ID;
+			else if (a.axis2ID > 0) sn = a.axis2ID;
+		}
+		if (sn <= 0) sn = Math.max(1, a.nodeNumber);
+		return sn;
+	}
+
+	static double safePositiveOrFallback(double candidate, double fallback) {
+		if (Double.isNaN(candidate) || Double.isInfinite(candidate) || candidate <= 0.0) {
+			return fallback;
+		}
+		return candidate;
+	}
+	
+	/** Quick estimate of distal annual-shoot nodes from the *plan* at initiation time. */
+	private int estimateDistalNodeCountFromPlan(ApexService a) {
+		if (a == null) return 0;
+		return Math.max(0, a.phytomerNumber - a.rank);
+	}
+	
+
+	// Initiate internode using digitalised data
+	void initiate_reconstruction(PlantBase pb, int i, int shootNumber, int k, int l, boolean isPrimary)
+	{
+		this.shootNumber = shootNumber;
+		this.primaryShoot = isPrimary;
+		initiate_pb(pb, i, k, l);
+		
+	}
+	
+	// Method for initiating dimensions if digitalised  reconstruction has not been used
+	void initDimensions_DevelopmentRules()
+	{
+		length = organSize[rank][3];
+		
+		//@FIXME, check why i do not read the diameter, or calculate it
+		/** Set the context for file name parameters*/
+
+		CategoryStore config = ((DocumentCategoryNameGroup) CONFIG.getGroup(FILE_NAME_INITIAL_CONDITIONS, 
+			DocumentCategoryNameGroup.class)).getCategoryStore();
+			
+		/** Configuration context for carbon-related parameters */
+		config.setCategoryContext("internode");
+		
+		Double val = config.getDouble("SHOOT_DIAMETER");
+	
+		if (val == null && length > 0) {
+			// Log a warning, set default, or escalate as you see fit
+			// System.err.println("Warning: SHOOT_DIAMETER not found, using default 0.5");
+			diameter = (pipeDiaMin + pipeDiaMax)/2;
+		} else {
+			diameter = val.doubleValue();
+		}
+
+		 
+		
+	}
+	
+	// Method for initiating dimensions if digitalised reconstruction has been used
+	void initDimensions_Reconstruction()
+	{
+/* 		Vector3D start;
+		Vector3D end;
+		if(useArchReader == false) {
+		if (primaryShoot == true) {
+			start = primaryShootData.start[cordonNumber][nodeNumber][shootNumber][rank];
+			end = primaryShootData.end[cordonNumber][nodeNumber][shootNumber][rank];
+			diameter = primaryShootData.diameter[cordonNumber][nodeNumber][shootNumber][rank];
+		} else {
+			start = secondaryShootData.start[cordonNumber][nodeNumber][shootNumber][rank];
+			end = secondaryShootData.end[cordonNumber][nodeNumber][shootNumber][rank];
+			diameter = secondaryShootData.diameter[cordonNumber][nodeNumber][shootNumber][rank];
+		}
+		length = start.distance(end);
+		} */
+	}
+	
+	@Override
+	public void initializeCarbonTransport() {
+		double length_cm = this.length * 1e2;
+	    double area_cm2   = this.area * 1e4;
+		float Rs = ( R0 * PhloemResistanceRatio_mixture(initial_c0, FRACTION_SORBITOL)/(PressureRatio(initial_c0)*R_ct*Tk));   // resistance per unit length (initial case)
+		this.r =  Rs * length_cm / area_cm2; //r is in unit of cm //divided by diameter
+		
+		float h_internode_rs = 0; //1/o.Ka /3.6; 	// hydraulic resistance
+		this.xp = 0;//(-Jw * h_internode_rs * initial_c0)/(PressureRatio(initial_c0)*R*Tk);  //need to update this term
+		
+		this.cpb = this.cpt =  SOURCEcp;
+		 
+		//this.cpt = SOURCEcp - cpn * ini_length * SOURCEj * Rs;
+		//this.cpb = SOURCEcp - (cpn - 1) * length * SOURCEj * Rs;
+		this.j = j;
+	}
+	@Override
+	public void updateCTRs(double carbonConcentration) {
+		double length_cm = this.length * 1e2;
+	    double area_cm2   = this.area * 1e4;
+		float Rs = ( R0 * PhloemResistanceRatio_mixture(carbonConcentration, FRACTION_SORBITOL)/(PressureRatio(carbonConcentration)*R_ct*Tk));   // resistance per unit length (initial case)
+		this.r =  Rs * length_cm / area_cm2; //r is in unit of cm //divided by diameter
+		float h_internode_rs = 1/this.Ka/3.6; 	// hydraulic resistance
+	  
+		if (this.waterFlux == 0 | Double.isNaN(this.waterFlux)) {
+			 this.xp = 0;
+		} else {	  		
+			 this.xp = Double.isNaN(this.waterFlux)? 
+			 0 : 
+			 Math.max(0,(this.waterFlux * 3.6 * h_internode_rs * carbonConcentration)/
+								  (PressureRatio(carbonConcentration)*R_ct*Tk));
+		}
+		
+		
+	}		
+	
+	/**
+     * Potential early radial growth (logistic phase) of a young internode.
+     *
+     * <p>This is the developmental/temperature-driven radial increment for the early primary
+     * expansion phase before water and carbon limitation are applied. It is paired with
+     * {@link #radiusLogisticPhase()} (water-limited) and is used in {@code calcUnloading(...)}
+     * to apply a dominant-limiter rule ({@code min(fw, fc)}) consistently to both internode
+     * primary elongation and early radial expansion.
+     *
+     * @return Potential early radial increment (m per timestep)
+     */
+    double radiusLogisticPhasePotential() {
+    	double dt = this.age - this.age_pre;
+    	refreshMaxDiameterFromTopologyIfNeeded();
+    	//the function is sensitive to scale, so need to use mm
+    	//double newMaxLength = Math.max(10, this.maxLength* lengthPotentialRatio * 1000);  //mm
+		//maxDia_phase1 = dia_a * Math.pow(newMaxLength, dia_b)/1000;
+		if (Double.isNaN(dt) || Double.isInfinite(dt) || dt <= 0) {
+			dt = 1.0;
+		}
+		
+        double r_growthRate = betaGrowthRate(this.age, this.maxDia_phase1/2, this.tm, this.te) * dt;
+        if (Double.isNaN(r_growthRate) || Double.isInfinite(r_growthRate)) {
+        	r_growthRate = 0.0;
+        }
+		double targetRadius = this.maxDia_phase1 / 2.0;
+		double currentRadius = this.diameter / 2.0;
+		double remaining = Math.max(0.0, targetRadius - currentRadius);
+		r_growthRate = Math.min(r_growthRate, remaining);
+        return r_growthRate;
+    }
+
+    /**
+     * Water-limited early radial growth (logistic phase) for young internodes.
+     *
+     * <p>Equivalent to {@code radiusLogisticPhasePotential() * fw} for the current water status.
+     *
+     * @return Water-limited early radial increment (m per timestep)
+     */
+    float radiusLogisticPhase() {    
+    	double r_growthRate = radiusLogisticPhasePotential();
+        if(organGrowthMethod.equals("TempLimited")) {
+        	return r_growthRate;
+        } else return r_growthRate * waterPotentialRes(this.waterPotential, this.growth_a, this.growth_b); 
+    }
+
+		boolean isPerennialWoodyOrgan() {
+			if (this.organType == null) return false;
+			String type = this.organType.toLowerCase();
+			return type.indexOf("cordon") >= 0 ||
+				   type.indexOf("trunk") >= 0 ||
+				   type.indexOf("oldshoot") >= 0 ||
+				   type.indexOf("old_shoot") >= 0 ||
+				   type.indexOf("old shoot") >= 0 ||
+				   type.indexOf("cane") >= 0 ||
+				   type.indexOf("arm") >= 0 ||
+				   type.indexOf("upright") >= 0 ||
+				   type.indexOf("spur") >= 0 ||
+				   type.indexOf("dropper") >= 0;
+		}
+
+		boolean shouldKeepWoodyLengthFixed() {
+			return isPerennialWoodyOrgan();
+		}
+
+		boolean useTempLimitedPerennialSecondaryGrowth() {
+			return "TempLimited".equalsIgnoreCase(organGrowthMethod) && isPerennialWoodyOrgan();
+		}
+
+		int getCurrentSecondaryGrowthSeasonKey() {
+			try {
+				return year;
+			} catch (Throwable t) {
+				return START_YEAR + (day / 365);
+			}
+		}
+
+		double capPerennialSeasonalDeltaRadius(double proposedDeltaRadius) {
+			if (!useTempLimitedPerennialSecondaryGrowth()) {
+				return proposedDeltaRadius;
+			}
+			if (Double.isNaN(proposedDeltaRadius) || Double.isInfinite(proposedDeltaRadius) || proposedDeltaRadius < 0.0) {
+				return 0.0;
+			}
+			if (Double.isNaN(this.diameter) || Double.isInfinite(this.diameter) || this.diameter <= 0.0) {
+				return 0.0;
+			}
+
+			// Cap TempLimited trunk/cordon secondary growth to 0.005 m diameter per season.
+			double maxSeasonRadiusIncrease = 0.0025;
+			int currentSeason = getCurrentSecondaryGrowthSeasonKey();
+			if (secondaryGrowthSeasonYear != currentSeason ||
+				secondaryGrowthSeasonStartDiameter <= 0.0 ||
+				Double.isNaN(secondaryGrowthSeasonStartDiameter) ||
+				Double.isInfinite(secondaryGrowthSeasonStartDiameter)) {
+				secondaryGrowthSeasonYear = currentSeason;
+				secondaryGrowthSeasonStartDiameter = this.diameter;
+			}
+
+			double seasonDiameterIncrease = Math.max(0.0, this.diameter - secondaryGrowthSeasonStartDiameter);
+			double remainingRadius = Math.max(0.0, maxSeasonRadiusIncrease - seasonDiameterIncrease / 2.0);
+			return Math.min(proposedDeltaRadius, remainingRadius);
+		}
+
+		double capTempLimitedPerennialDiameterUpdate(double candidateDiameter, double currentDiameter) {
+			if (!useTempLimitedPerennialSecondaryGrowth()) {
+				return candidateDiameter;
+			}
+			if (Double.isNaN(currentDiameter) || Double.isInfinite(currentDiameter) || currentDiameter <= 0.0) {
+				return currentDiameter;
+			}
+			if (Double.isNaN(candidateDiameter) || Double.isInfinite(candidateDiameter) || candidateDiameter <= 0.0) {
+				return currentDiameter;
+			}
+
+			// Final geometry guard: no more than 0.005 m diameter increase per season.
+			double maxSeasonDiameterIncrease = 0.005;
+			int currentSeason = getCurrentSecondaryGrowthSeasonKey();
+			if (secondaryGrowthSeasonYear != currentSeason ||
+				secondaryGrowthSeasonStartDiameter <= 0.0 ||
+				Double.isNaN(secondaryGrowthSeasonStartDiameter) ||
+				Double.isInfinite(secondaryGrowthSeasonStartDiameter)) {
+				secondaryGrowthSeasonYear = currentSeason;
+				secondaryGrowthSeasonStartDiameter = currentDiameter;
+			}
+
+			double seasonIncreaseNow = Math.max(0.0, currentDiameter - secondaryGrowthSeasonStartDiameter);
+			double remainingDiameter = Math.max(0.0, maxSeasonDiameterIncrease - seasonIncreaseNow);
+			double proposedIncrease = Math.max(0.0, candidateDiameter - currentDiameter);
+			return currentDiameter + Math.min(proposedIncrease, remainingDiameter);
+		}
+
+		double secondaryGrowthDeltaRadiusForCordonTrunk(double sugarConcentration_phloem, boolean potentialPath) {
+			double dr = secondaryGrowthRate();
+			if (useTempLimitedPerennialSecondaryGrowth()) {
+				dr = capPerennialSeasonalDeltaRadius(dr);
+			}
+			if (!potentialPath) {
+				dr *= sinkUnloading(sugarConcentration_phloem, km_sec);
+			}
+			dr *= woodySecondaryGrowthCarbonStatusScale();
+			if (Double.isNaN(dr) || Double.isInfinite(dr) || dr < 0.0) {
+				dr = 0.0;
+			}
+			return dr;
+		}
+
+		@Override
+		void calcPTCTRAM(double sc)
+	{
+		calcLeakage(sc);
+		double radius = this.diameter / 2;
+		deltalength = (!shouldKeepWoodyLengthFixed() && this.age <= this.te) ? primaryGrowthRate() : 0;
+		deltalength_PT = deltalength;
+		
+		double deltaRadius1 =  this.age <= this.te ? radiusLogisticPhase() : 0; 
+		if(this.age <= this.te)  {
+			deltaRadius = radiusLogisticPhase();
+			structureDM_PRI_PT = C_content * growthCoff * Math.PI * radius * radius * density * deltalength + 
+								 C_content *growthCoff * 2.0 * Math.PI * radius * length * density *deltaRadius;	
+			
+		} else if(this.age > this.te && this.age <= this.te + this.te_sec)  {
+			//cambial grwoth;
+			deltaRadius = secondaryGrowthRate();
+			if (isAnnualShootInternode()) {
+				double remainingSecondary = Math.max(0.0, pipeDiaMax / 2.0 - this.diameter / 2.0);
+				deltaRadius = Math.min(deltaRadius, remainingSecondary);
+			}
+			deltaRadius *= woodySecondaryGrowthCarbonStatusScale();
+			structureDM_SEC_PT = C_content *growthCoff * 2.0 * Math.PI * radius * length * density *deltaRadius;
+			structureDM_PRI_PT = 0; 
+		}
+		if (shouldSyncAnnualInternodeBiomassFromLeaves()) {
+			structureDM_PRI_PT = leafAllometryStructuralDemandForInternode(sc, true);
+			structureDM_SEC_PT = 0;
+		}
+        
+		if(shouldLignify()) this.calcLignification();
+       
+      //if (printFlag) { println(" lignificationDemand " + lignificationDemand + "structureDM_SEC_PT " + structureDM_SEC_PT + " maintenanceDM_PT " + maintenanceDM_PT ); }
+		maintenanceDM_PT = calcMaintanceRespiration(this.fNSCtoSC); 
+		reserveDM_PT = reserveSynthesis();
+		loading_PT =  reserveHydrolysis(); 
+	}
+	
+	boolean shouldLignify() {
+		if(FruitService.veraison == true && ageAtVeraison <= 0.5) {
+			ageAtVeraison = age;
+		}
+		return(FruitService.veraison && (this.age - this.ageAtVeraison) < te);
+	}
+	
+	
+	void calcLignification()
+	{
+		double dt = this.age - this.age_pre; //this dt include temperature effect	
+
+		lignificationDemand =   this.carbon_structure * (CORDON_DENSITY/this.density - 1) * 
+								betaGrowthRate(this.age - this.ageAtVeraison+3, 1, this.tm, this.te) * dt; 		
+	    //if (printFlag) { println("this is loading from internode " + "node " + nodeNumber + " rank "+ this.rank + " loading " + loading); }
+	}
+	
+	@Override
+	void calcLoading(double sugarConcentration_phloem)
+	{
+		loading =  fNSC > MINIMUM_NSC ? reserveHydrolysis() * 
+				   sourceLoading(sugarConcentration_phloem, sourceLoading_b, sourceLoading_cp) : 0;
+	    //if (printFlag) { println("this is loading from internode " + "node " + nodeNumber + " rank "+ this.rank + " loading " + loading); }
+	}
+		
+	@Override
+	void calcUnloading(double sugarConcentration_phloem)
+	{
+		//internode has two structural demand part, length growth and diameter
+		//diameter growth has two parts: short-term logistic expansion for young
+		//internodes, and long-term radial expansion that is proportional to the internode�s surface area.
+		// Primary internode elongation and early radial expansion use a dominant-limiter rule
+		// (min of water limiter fw and carbon sink limiter fc) to avoid compounding stress
+		// as fw * fc. Secondary growth and reserve/maintenance paths remain unchanged.
+		double radius = this.diameter / 2;
+		double fc_pri = sinkUnloading(sugarConcentration_phloem, km_pri);
+		if (Double.isNaN(fc_pri) || Double.isInfinite(fc_pri)) fc_pri = 0.0;
+		if (fc_pri < 0.0) fc_pri = 0.0;
+		if (fc_pri > 1.0) fc_pri = 1.0;
+		if (shouldUsePreT1PotentialGrowth()) {
+			fc_pri = 1.0;
+		}
+		double fw_pri = primaryGrowthWaterEffect();
+		double stress_pri = (fw_pri < fc_pri) ? fw_pri : fc_pri;
+		if (shouldSyncAnnualInternodeBiomassFromLeaves()) {
+			// In leafAllometry mode, biomass follows leaf allometry; keep primary geometry carbon-neutral.
+			stress_pri = fw_pri;
+		}
+		
+		deltalength = (!shouldKeepWoodyLengthFixed() && this.age <= this.te) ? primaryGrowthPotential() * stress_pri : 0;
+        
+        if(this.age <= this.te)  {
+			// Use the same dominant limiter rule for internode primary elongation and
+			// early radial expansion to avoid compounding water and carbon limits.
+			deltaRadius = radiusLogisticPhasePotential() * stress_pri;
+                          
+            structureDM_PRI = C_content * growthCoff * Math.PI * radius * radius * density * deltalength + 
+				              C_content *growthCoff * 2.0 * Math.PI * radius * length * density *deltaRadius;	
+			structureDM_SEC = 0;				                 
+		                          
+		} else if(this.age > this.te && this.age <= this.te + this.te_sec)  {
+			//cambial grwoth;
+			deltaRadius = secondaryGrowthRate() * sinkUnloading(sugarConcentration_phloem, km_sec); 
+			if (isAnnualShootInternode()) {
+				double remainingSecondary = Math.max(0.0, pipeDiaMax / 2.0 - this.diameter / 2.0);
+				deltaRadius = Math.min(deltaRadius, remainingSecondary);
+			}
+			deltaRadius *= woodySecondaryGrowthCarbonStatusScale();
+			structureDM_SEC = C_content *growthCoff * 2.0 * Math.PI * radius * length * density *deltaRadius;
+			structureDM_PRI = 0; 
+		}
+		if (shouldSyncAnnualInternodeBiomassFromLeaves()) {
+			structureDM_PRI = leafAllometryStructuralDemandForInternode(sugarConcentration_phloem, false);
+			structureDM_SEC = 0;
+		}
+				  
+        
+        if(shouldLignify()) { 
+        	this.calcLignification();
+        	//println("lignificationDemand: " + lignificationDemand);
+        }
+        
+       	//need to separate the primary diameter growth and secondary growth	
+      						  	
+        structureDM = structureDM_PRI + structureDM_SEC + 
+        			  lignificationDemand *
+        			  sinkUnloading(sugarConcentration_phloem, km_sec);	
+		        			  
+        
+		maintenanceDM = calcMaintanceRespiration(this.fNSCtoSC) * 
+         				sinkUnloading(sugarConcentration_phloem, KM_MTNCE);
+		
+		reserveDM = reserveSynthesis() * sinkUnloading(sugarConcentration_phloem, km_res);			
+		
+		unloading = structureDM + maintenanceDM + reserveDM;
+		
+ 		if(debug)
+ 		//if(true)
+		{	
+		checkForNaN(printFlag, // Assuming printFlag is already defined as true or false
+            //"deltalength", deltalength,
+            //"deltaRadius", deltaRadius,
+            //"radius", radius,
+            //"rank", rank,
+           // "shootType", organType,
+            //"structureDM_PRI", structureDM_PRI,
+            //"structureDM_SEC", structureDM_SEC,
+            "structureDM", structureDM,
+            "maintenanceDM", maintenanceDM,
+            "reserveDM", reserveDM);
+           } 
+					
+	}
+	
+	void calcWaterFlux(double f_waterFlux) 
+	{	
+		waterFlux = f_waterFlux * sum((*this (-->)+ v:PhotosynthateOrgan *)[waterFluxPotential]) ; 				
+	}
+	//hydraulic conductivity per meter length of shoot calculated by diameter
+	
+	void calcKmax() {
+		Kmax = Math.max(cx2 * Math.pow(diameter, cx3), cx2 * Math.pow(pipeDiaMin, cx3))
+				/ this.length * 1e6; //mg  s-1 m MPa-1
+	}
+	
+	void calcKa() {
+		Ka = Kmax * 1/(1 + Math.pow(this.waterPotential/phi_stem, cx1));
+	}
+	
+	void calcWaterPotential() 
+	{
+		if(parentID > 0 && plantBaseID > 0) {
+			this.waterPotential_b = Math.min(getParent().waterPotential, getPlantBase().xylemWaterPotential);
+		} else if(parentID <= 0 && plantBaseID > 0) {
+			this.waterPotential_b = getPlantBase().xylemWaterPotential;
+		} else {
+			this.waterPotential_b = inputWaterPotential;
+		}
+			
+		this.waterPotential = waterPotential_b - 1/Ka * this.waterFlux - Dw * gacc * this.length*1e-3; 
+		if(Double.isNaN(this.waterPotential)) this.waterPotential = inputWaterPotential;
+		
+/* 		println("this rank:" + rank + " getParent().waterPotential " + getParent().waterPotential + 
+				" getPlantBase()xylemWaterPotential " + getPlantBase()xylemWaterPotential + 
+				"this water potential: " + waterPotential +	
+				"waterFlux " + this.waterFlux); */
+	}
+		
+	void updateWaterPotential()
+	{
+		calcWaterPotential();
+		calcKa();
+		calcWaterPotential();
+	}
+	
+	void updateWaterFlux()
+	{
+		if(plantBaseID <= 0) {
+			PlantBase pb = first((* this (<--)+ PlantBase*));
+			if(pb != null) {
+				this.plantBaseID = pb.getId();
+			}
+		}
+		if(plantBaseID > 0) {
+			calcWaterFlux(getPlantBase().f_waterFlux);
+		}
+	}
+	
+	@Override
+	void update()
+	{
+		super.update();
+
+		if(plantBaseID <= 0) {
+			PlantBase pb = first((* this (<--)+ PlantBase*));
+			if(pb != null) {
+				this.plantBaseID = pb.getId();
+			}
+		}
+		
+		if (parentID <= 0) {  // Assuming 0 is an uninitialized ID
+			GrowingOrgan parentOrgan = (GrowingOrgan) first((* this (<--)+ Internode*));
+			if (parentOrgan != null) {
+				storeParentId(parentOrgan);
+				parentOrgan.addChildInternodeId(this.nodeID);
+			}
+		}
+		
+			
+		if(shootShader == null) shootShader = this.age > 100 ?  cordonTexture : petiole;
+		
+		
+		/** update organ size and area, potential length at certain time point if no stress besides temperature */
+			biomass_pre = biomass;
+			double prevLength = this.length;
+			double prevDiameter = this.diameter;
+			if (shouldKeepWoodyLengthFixed()) {
+				this.potLength = prevLength;
+				lengthPotentialRatio = 1.0;
+				deltalength = 0.0;
+				deltalength_PT = 0.0;
+			} else {
+				this.potLength = this.maxLength * betaGrowthFunction(this.age, this.tm, this.te);
+				this.potLength = clampNonShrinkingPotentialLength(prevLength, this.potLength, this.maxLength);
+				lengthPotentialRatio = (this.potLength > 1.0e-9) ? length / potLength : 1.0;
+			}
+			//if organGrowthMethod.equals("TempLimited") is true, length increase by potential length
+					
+			if(organGrowthMethod.equals("TempLimited")) {
+				this.length = shouldKeepWoodyLengthFixed() ? prevLength : safePositiveOrFallback(this.potLength, prevLength);
+				double cappedDiameter = capTempLimitedPerennialDiameterUpdate(diameter + 2 * deltaRadius_PT, prevDiameter);
+				deltaRadius_PT = Math.max(0.0, 0.5 * (cappedDiameter - prevDiameter));
+				this.diameter = safePositiveOrFallback(cappedDiameter, prevDiameter);
+			} else if(organGrowthMethod.equals("TempWaterLimited")) {
+				//the calculation of PT includes water potential response already
+				this.length = length + deltalength_PT;
+				this.diameter = diameter + 2 * deltaRadius_PT;
+		} else if(organGrowthMethod.equals("TempWaterCarbonLimited")){
+			this.length = length + deltalength;
+			this.diameter = diameter + 2 * deltaRadius;
+		} else {
+			this.length = length + deltalength;
+			this.diameter = diameter + 2 * deltaRadius;
+		}
+		
+			double vol = calcVol(length, diameter);
+		
+			/** update organ carbon and nitrogen status */
+			if(organGrowthMethod.equals("TempLimited")) {
+				biomass = safePositiveOrFallback(vol * density, biomass_pre);
+				this.initCN_content(this.biomass);
+			} else {
+			delta_str = structureDM - growthCost; //maintenanceDM + reserveDM
+			delta_NSC = maintenanceDM + reserveDM + leakage 
+						- loading - carbonMobilizationCost - maintenanceDM_PT;
+						   
+			updateCarbonStatus(delta_str, delta_NSC);
+		
+			if(Double.isNaN(this.biomass)) {
+				this.initCN_content(this.biomass_pre);
+			}
+		}
+/* 		println(" delta_str " + delta_str + "delta_NSC " + delta_NSC + " carbon_structure " +
+					carbon_structure + "carbon_nonStructure" + carbon_nonStructure);
+					
+		if (printFlag) { println(" biomass " + biomass + "fNSCtoSC " + fNSCtoSC ); }
+		 */
+			km_res = adjustKmResSeasonally(daysSinceWinterSolstice, km_res_early, km_res_late);	
+			updateRealizationRatio();
+			calcKmax();
+			calcKa();
+		//calcNdegradation();
+		//calcNSynthesis(); 
+		//nitrogen_total = nitrogen_structure + nitrogen_nonStructure;
+	}
+}
+==> if (border == false) (
+		Cylinder(length,diameter/2).(setLayer(border?borderLayer:0), 
+				setShader(new AlgorithmSwitchShader(shootShader,LightOpaqueShader))
+		) //cylinder settings
+		
+	) else (
+		Cylinder(length,diameter/2).(setLayer(border?borderLayer:0), setShader(new AlgorithmSwitchShader(shootShader,LightOpaqueShader)))
+	)
+;
+
+
+
+
+// Cordon module
+module Cordon extends Internode
+{
+	/**
+	 * Age decay coefficient for secondary growth rate modulation.
+	 *
+	 * Used to reduce cambial (secondary) growth activity as the organ ages.
+	 * Incorporated in age-dependent functions such as:
+	 *   ageEffect = 1 / (1 + k_age * ageYears)
+	 * or
+	 *   ageEffect = max(0.1, 1 - k_age * log(ageYears + 1))
+	 *
+	 * Typical values:
+	 * - 0.18 for grapevine trunk (fast decline with age)
+	 * - 0.14 for apple trunk
+	 * - 0.10 for structural roots (slower decline)
+	 *
+	 * Units: 1 / year
+	 */
+	@Override
+	public void loadParameters() {
+			
+		/** Set the context for file name parameters*/
+		CategoryStore config = ((DocumentCategoryNameGroup) CONFIG.getGroup(FILE_NAME_PLANT_PARAMETERS, 
+			DocumentCategoryNameGroup.class)).getCategoryStore();
+
+		/** Configuration context for internode carbon-related parameters */
+		config.setCategoryContext("wood-carbon");
+		//common parameters
+		maintenanceCoff        = config.getDouble("MTNCE", 5e-05);
+		growthCoff             = config.getDouble("GROWTHRQ", 1.2);
+		C_content              = config.getDouble("C_CONTENT", 0.46);
+		maxRes                 = config.getDouble("RESERVES", 0.3);
+		
+		/** pass the plant level carbon parameters*/
+		km_sec                 = config.getDouble("KM_SECONDARY", 0.14); 
+		configureReserveKmAbsolute(config, 0.56, 0.112);
+			configureReserveTurnover(config, 0.0060, 0.0010);
+		
+		secondaryGrowthRate = config.getDouble("SEC_GROWTH_RATE", 2.5e-06);
+		k_age = config.getDouble("k_age", 0.18);
+		try {
+			secBase = config.getDouble("SEC_BASE", SEC_BASE);
+		} catch (Throwable t) {
+			// compatibility fallback: older wood-carbon categories omit organ-level timing keys
+			secBase = SEC_BASE;
+		}
+		try {
+			secBump = config.getDouble("SEC_BUMP", SEC_BUMP);
+		} catch (Throwable t) {
+			// compatibility fallback: older wood-carbon categories omit organ-level timing keys
+			secBump = SEC_BUMP;
+		}
+		secBase = Math.max(0.0, Math.min(1.0, secBase));
+		secBump = Math.max(0.0, Math.min(1.0, secBump));
+		//times 1e6 to convert from mg/cm3 into mg/m3
+		density = config.getDouble("CORDON_DENSITY", 750) * 1e6;
+		
+		/** Set the context for water parameters*/
+		config.setCategoryContext("wood-water");		 
+		waterContent = config.getDouble("WATER_CONTENT", 0.56);
+		
+		config.setCategoryContext("wood-nitrogen");
+		/** Clamps for Nm and LMA. */
+		Nm_min  = config.getDouble("Nm_min",  0.005);  // 0.5% N
+		Nm_max  = config.getDouble("Nm_max",  0.020);  // 6.0% N
+
+		
+		
+	/** INITIAL CONDITIONS*/
+		
+		
+		/** Set the context for common plant level water parameters*/
+		config.setCategoryContext("internode-water");		 
+		cx1		 = config.getDouble("cx1", 1.171);
+		cx2		 = config.getDouble("cx2", 2.6);
+		cx3		 = config.getDouble("cx3", 2);
+		phi_stem = config.getDouble("phi_stem", -2.5);
+		growth_a	 = config.getDouble("growth_a", -10);
+		growth_b	 = config.getDouble("growth_b", -0.6);
+		
+		
+		
+	/** Set the context for file name parameters*/
+	CategoryStore config_Init = ((DocumentCategoryNameGroup) CONFIG.getGroup(FILE_NAME_INITIAL_CONDITIONS, 
+		DocumentCategoryNameGroup.class)).getCategoryStore();
+		
+		config_Init.setCategoryContext("wood");
+		fNSC                   = config_Init.getDouble("fNSC", 0.1);
+		structure_C            = 1- fNSC; 
+		this.Nm  = config_Init.getDouble("Nm",  0.020);  // 2.0% N
+	}
+	
+	
+	
+	
+/* 	transient WaterPotentialTask wftask;
+	transient GrowthTask gtask;
+	{
+		wftask = new WaterPotentialTask(this);
+		gtask = new GrowthTask(this);
+	}
+	 */
+	
+	// CORDON initiation
+	@Override
+	void initiate_pb(PlantBase pb, int nodeNumber, int cordonNumber)
+	{
+		loadParameters();
+		//IDENTIFIERS
+		plantBaseID = pb.nodeID;
+		plantNumber = pb.plantNumber;
+		border = pb.border;
+		this.nodeNumber = nodeNumber;
+		this.cordonNumber = cordonNumber;
+		this.rank = nodeNumber;
+		
+		age = pb.age;
+		ageD = pb.ageD;
+		
+		this.syllepticOrder = 0;
+		cpn = 0;
+		//set cordon order to 2
+		order = 2;
+		assignAge(pb, cpn);
+		
+		//STATE VARIABLES
+		if(!initiation_method.equals("ArchReader")) {
+			initDimensions_DevelopmentRules();
+		}
+		this.potLength = length; 
+		//CARBON
+		biomass = woodBiomassCalcMethod == 0? BIOMASS_CORDON/(SHOOT_NUM) :   //for ONE CORDEN internode HERE
+				  Math.PI * (diameter*diameter/4) * length * density; //the density was in unit of mg/cm3, so need to times 1e6 
+		area = Math.PI * (diameter*diameter/4);				  
+		
+		freshWeight = biomass/(1-waterContent);
+		carbon_total = biomass * C_content;
+		carbon_structure = carbon_total * structure_C;  //mg, amount of structure carbon
+		carbon_nonStructure = carbon_total * fNSC;    //mg, amount of starch carbon
+		fNSCtoSC = carbon_nonStructure/carbon_structure; 
+		fNSC = carbon_nonStructure/carbon_total;
+		
+		//NITROGEN
+		nitrogen_total = biomass * Nm;
+		nitrogen_structure = biomass * Nm_min; 
+		nitrogen_nonStructure = nitrogen_total * (1 - N_CONTENT_MOBILE) -  nitrogen_structure;
+		nitrogen_mobile = nitrogen_total * N_CONTENT_MOBILE;
+		//water potential initialize		
+		this.waterPotential_b = inputWaterPotential;
+		this.waterPotential = inputWaterPotential+1e-2;;
+		calcKmax();
+		calcKa();
+		this.organType = "Cordon";
+
+	}
+	
+	@Override
+	Internode initiate_pi(PlantIdentifier pi, float length_, float diameter_)
+	{
+		//initialize the parameters
+		loadParameters();
+		//IDENTIFIERS
+		plantNumber = pi.plantNumber;
+		border = pi.border;
+		
+		cpn = 0;
+		this.length = length_;
+		this.diameter = diameter_;
+	    this.potLength = length; 
+		//CARBON
+		biomass = Math.PI * (diameter*diameter/4) * length * density; //the density was in unit of mg/cm3, so need to times 1e6 
+		area = Math.PI * (diameter*diameter/4);				  
+		freshWeight = biomass/(1-waterContent);
+		carbon_total = biomass * C_content;
+		carbon_structure = carbon_total * structure_C;  //mg, amount of structure carbon
+		carbon_nonStructure = carbon_total * fNSC;    //mg, amount of starch carbon
+		fNSCtoSC = carbon_nonStructure/carbon_structure; 
+		fNSC = carbon_nonStructure/carbon_total;
+		//NITROGEN
+		nitrogen_total = biomass * Nm;
+		nitrogen_structure = biomass * Nm_min; 
+		nitrogen_nonStructure = nitrogen_total * (1 - N_CONTENT_MOBILE) -  nitrogen_structure;
+		nitrogen_mobile = nitrogen_total * N_CONTENT_MOBILE;
+		//water potential initialize		
+		this.waterPotential_b = inputWaterPotential;
+		this.waterPotential = inputWaterPotential;
+		calcKmax();
+		calcKa();
+		this.organType = "Cordon";
+		return this;
+	}
+	
+	// Method for initiating dimensions if lidar reconstruction has not been used
+	@Override
+	void initDimensions_DevelopmentRules()
+	{
+		if (!initiation_method.equals("ArchReader")) 
+		{
+			try {
+				length = organSize[nodeNumber][6];  // Attempt to access the array
+			} catch (ArrayIndexOutOfBoundsException e) {
+				length = 0.1;  // Assign default value if index is out of bounds
+			}
+
+			/** Set the context for file name parameters*/
+			/** Set the context for file name parameters*/
+		CategoryStore config = ((DocumentCategoryNameGroup) CONFIG.getGroup(FILE_NAME_INITIAL_CONDITIONS, 
+			DocumentCategoryNameGroup.class)).getCategoryStore();
+			/** Configuration context for internode carbon-related parameters */
+			config.setCategoryContext("wood");
+			//common parameters
+			diameter        = config.getDouble("CORDON_DIAMETER", 0.01);
+		
+		}
+	}
+	
+	// Method for initiating dimensions if lidar reconstruction has been used
+	@Override
+	void initDimensions_Reconstruction()
+	{
+		/* if(useArchReader == false) 
+		{
+		Vector3D start = cordonData.start[cordonNumber][nodeNumber];
+		Vector3D end = cordonData.end[cordonNumber][nodeNumber];
+		length =  start.distance(end);
+		diameter = cordonData.diameter[cordonNumber][nodeNumber];
+		} */
+	}
+	
+	
+	@Override
+	void calcPTCTRAM(double sc) 
+	{
+		calcLeakage(sc);
+		double radius = this.diameter / 2;
+		deltalength = 0;
+        deltaRadius_PT = secondaryGrowthDeltaRadiusForCordonTrunk(sc, true);
+		structureDM_PRI_PT = 0;
+        structureDM_SEC_PT = C_content *growthCoff * 2.0 * Math.PI * radius * length * density *deltaRadius_PT;
+       				
+		maintenanceDM_PT = calcMaintanceRespiration(this.fNSCtoSC); 
+		reserveDM_PT = reserveSynthesis();
+		loading_PT =  reserveHydrolysis(); 
+	}
+	@Override
+	void calcLoading(double sugarConcentration_phloem)
+	{
+		loading =  fNSC > MINIMUM_NSC ? reserveHydrolysis() * 
+				   sourceLoading(sugarConcentration_phloem, sourceLoading_b, sourceLoading_cp) : 0;
+	    //if (printFlag) { println("this is loading from internode " + "node " + nodeNumber + " rank "+ this.rank + " loading " + loading); }
+	}
+	@Override
+	void calcUnloading(double sugarConcentration_phloem)
+	{
+		//internode has two structural demand part, length growth and diameter
+		//diameter growth has two parts: short-term logistic expansion for young
+		//internodes, and long-term radial expansion that is proportional to the internode�s surface area.
+		double radius = this.diameter / 2;
+		deltalength = 0;
+        deltaRadius = secondaryGrowthDeltaRadiusForCordonTrunk(sugarConcentration_phloem, false);
+		structureDM_PRI = 0;
+        structureDM_SEC = C_content * growthCoff * 2.0 * Math.PI * radius * length * density *deltaRadius;
+		structureDM = structureDM_PRI + structureDM_SEC;
+		
+       
+		maintenanceDM = calcMaintanceRespiration(this.fNSCtoSC) * 
+         				sinkUnloading(sugarConcentration_phloem, KM_MTNCE);
+		
+		reserveDM = reserveSynthesis() * sinkUnloading(sugarConcentration_phloem, km_res);			
+		
+		unloading = structureDM + maintenanceDM + reserveDM;				
+	}
+	
+	@Override
+	void calcWaterFlux(double f_waterFlux) 
+	{
+		waterFlux = f_waterFlux * sum((*this (-->)+ v:PhotosynthateOrgan *)[waterFluxPotential]) ;
+						
+	}
+	//hydraulic conductivity per meter length of shoot calculated by diameter
+	@Override
+	void calcKmax() {
+		Kmax = Math.max(cx2 * Math.pow(diameter, cx3), cx2 * Math.pow(pipeDiaMin, cx3))
+				/ this.length * 1e6; //mg  s-1 m MPa-1/ this.length * 1e6; //mg  s-1 m MPa-1
+	}
+	@Override
+	void calcKa() {
+		Ka = Kmax * 1/(1 + Math.pow(this.waterPotential/phi_stem, cx1));
+	}
+	@Override
+	void calcWaterPotential() 
+	{
+		if(parentID >0 && plantBaseID > 0) {
+			this.waterPotential_b = Math.min(getParent().waterPotential, getPlantBase().xylemWaterPotential);
+		} else if(parentID <= 0 && plantBaseID > 0) {
+			this.waterPotential_b = getPlantBase().xylemWaterPotential;
+		} else {
+			this.waterPotential_b = inputWaterPotential;
+		} 
+		
+		this.waterPotential = waterPotential_b - 1/Ka * this.waterFlux - Dw * gacc * this.length*1e-3;; 
+		if(Double.isNaN(this.waterPotential)) this.waterPotential = inputWaterPotential;
+	}
+	@Override
+	void update()
+	{
+		super.update();
+
+		if(this.plantBaseID <= 0) { this.plantBaseID = first((* p:PlantBase, (p.plantNumber == this.plantNumber)*)).nodeID;}
+		
+		if (parentID <= 0) {  // Assuming 0 is an uninitialized ID
+			GrowingOrgan parentOrgan = (GrowingOrgan) first((* this (<--)+ Internode*));
+			if (parentOrgan != null) {
+				storeParentId(parentOrgan);
+				parentOrgan.addChildInternodeId(this.nodeID);
+			}
+		}
+		
+		
+		/** update organ size and area */
+				biomass_pre = biomass;
+				double prevDiameter = this.diameter;
+				if(organGrowthMethod.equals("TempLimited")) {
+					double cappedDiameter = capTempLimitedPerennialDiameterUpdate(diameter + 2 * deltaRadius_PT, prevDiameter);
+					deltaRadius_PT = Math.max(0.0, 0.5 * (cappedDiameter - prevDiameter));
+					this.diameter = safePositiveOrFallback(cappedDiameter, prevDiameter);
+				} else if(organGrowthMethod.equals("TempWaterLimited")) {
+				this.diameter = diameter + 2 * deltaRadius_PT;
+			} else if(organGrowthMethod.equals("TempWaterCarbonLimited")){
+			this.diameter = diameter + 2 * deltaRadius;
+		} else {
+			this.diameter = diameter + 2 * deltaRadius;
+		}
+		
+			double vol = calcVol(length, diameter);
+			
+			/** update organ carbon and nitrogen status */
+			if(organGrowthMethod.equals("TempLimited")) {
+				biomass = safePositiveOrFallback(vol * density, biomass_pre);
+				this.initCN_content(this.biomass);
+			} else {
+			delta_str = structureDM - growthCost; //maintenanceDM + reserveDM
+			delta_NSC = maintenanceDM + reserveDM + leakage 
+						- loading - carbonMobilizationCost - maintenanceDM_PT;
+						   
+			updateCarbonStatus(delta_str, delta_NSC);
+		
+			if(Double.isNaN(this.biomass)) {
+				this.initCN_content(this.biomass_pre);
+			}
+		}
+		km_res = adjustKmResSeasonally(daysSinceWinterSolstice, km_res_early, km_res_late);
+		calcKmax();
+		calcKa();
+		//calcNdegradation();
+		//calcNSynthesis(); 
+		//nitrogen_total = nitrogen_structure + nitrogen_nonStructure;
+	}
+}
+==> if (border == false) (
+		Cylinder(length,diameter/2).(setLayer(border?borderLayer:0), 
+		setShader(cordonTexture))
+		//setShader(new AlgorithmSwitchShader(cordonTexture,LightOpaqueShader)))
+	) else (
+		Cylinder(length,diameter/2).(setLayer(border?borderLayer:0), setShader(new AlgorithmSwitchShader(cordonTexture,LightOpaqueShader)))
+	)
+;
+
+
+// Trunk module
+module Trunk extends Internode 
+{
+	@Override
+	public void loadParameters() {
+			
+	/** Set the context for file name parameters*/
+		CategoryStore config = ((DocumentCategoryNameGroup) CONFIG.getGroup(FILE_NAME_PLANT_PARAMETERS, 
+			DocumentCategoryNameGroup.class)).getCategoryStore();
+
+		/** Configuration context for internode carbon-related parameters */
+		config.setCategoryContext("wood-carbon");
+		//common parameters
+		maintenanceCoff        = config.getDouble("MTNCE", 5e-05);
+		growthCoff             = config.getDouble("GROWTHRQ", 1.2);
+		C_content              = config.getDouble("C_CONTENT", 0.46);
+		maxRes                 = config.getDouble("RESERVES", 0.3);
+		
+		/** pass the plant level carbon parameters*/
+		km_sec                 = config.getDouble("KM_SECONDARY", 0.14); 
+		configureReserveKmAbsolute(config, 0.56, 0.112);
+			configureReserveTurnover(config, 0.0060, 0.0010);
+		
+		secondaryGrowthRate = config.getDouble("SEC_GROWTH_RATE", 2.5e-06);
+		k_age = config.getDouble("k_age", 0.18);
+		try {
+			secBase = config.getDouble("SEC_BASE", SEC_BASE);
+		} catch (Throwable t) {
+			// compatibility fallback: older wood-carbon categories omit organ-level timing keys
+			secBase = SEC_BASE;
+		}
+		try {
+			secBump = config.getDouble("SEC_BUMP", SEC_BUMP);
+		} catch (Throwable t) {
+			// compatibility fallback: older wood-carbon categories omit organ-level timing keys
+			secBump = SEC_BUMP;
+		}
+		secBase = Math.max(0.0, Math.min(1.0, secBase));
+		secBump = Math.max(0.0, Math.min(1.0, secBump));
+		//times 1e6 to convert from mg/cm3 into mg/m3
+		density = config.getDouble("WOOD_DENSITY", 750) * 1e6;
+		
+		/** Set the context for water parameters*/
+		config.setCategoryContext("wood-water");		 
+		waterContent = config.getDouble("WATER_CONTENT", 0.56);
+		
+		config.setCategoryContext("wood-nitrogen");
+		/** Clamps for Nm and LMA. */
+		Nm_min  = config.getDouble("Nm_min",  0.005);  // 0.5% N
+		Nm_max  = config.getDouble("Nm_max",  0.020);  // 6.0% N
+
+		
+		/** Set the context for common plant level water parameters*/
+		config.setCategoryContext("internode-water");		 
+		cx1		 = config.getDouble("cx1", 1.171);
+		cx2		 = config.getDouble("cx2", 2.6);
+		cx3		 = config.getDouble("cx3", 2);
+		phi_stem = config.getDouble("phi_stem", -2.5);
+		growth_a	 = config.getDouble("growth_a", -10);
+		growth_b	 = config.getDouble("growth_b", -0.6);
+		
+		
+		/** Set the context for file name parameters*/
+		CategoryStore config_Init = ((DocumentCategoryNameGroup) CONFIG.getGroup(FILE_NAME_INITIAL_CONDITIONS, 
+			DocumentCategoryNameGroup.class)).getCategoryStore();
+			
+		config_Init.setCategoryContext("wood");
+		fNSC                   = config_Init.getDouble("fNSC", 0.1);
+		structure_C            = 1- fNSC; 
+		this.Nm  = config_Init.getDouble("Nm",  0.020);  // 2.0% N
+
+		
+	}
+	
+	
+	@Override
+	void initiate_pb(PlantBase pb)
+	{
+		//initialize the parameters
+		loadParameters();
+		
+		//IDENTIFIERS
+		this.plantNumber = pb.plantNumber;
+		this.border = pb[border];
+		plantBaseID = pb.nodeID;
+		age = pb.age;
+		ageD = pb.ageD;
+		cpn = 1;
+		//set trunk order to 1 for consistentce
+		order = 1;
+		rank = 1;
+		assignAge(pb, cpn);
+		//STATE VARIABLES
+		if (!initiation_method.equals("ArchReader")) {
+			initDimensions_DevelopmentRules();
+		}
+		println("WOOD_LENGTH" + WOOD_LENGTH);
+		this.potLength = length; 
+		//CARBON
+		double trunkBiomassGeom = Math.PI * (diameter*diameter/4) * length * density;
+		if (woodBiomassCalcMethod == 0) {
+			biomass = BIOMASS_WOOD;
+		} else if (woodBiomassCalcMethod == 1) {
+			biomass = BIOMASS_WOOD * CORDEN_NUM * SHOOT_NUM;
+		} else {
+			biomass = trunkBiomassGeom;
+		}
+		area = Math.PI * (diameter*diameter/4);
+		
+		freshWeight = biomass/(1-waterContent);
+		carbon_total = biomass * C_content;
+		carbon_structure = carbon_total * structure_C;  //mg, amount of structure carbon
+		carbon_nonStructure = carbon_total * fNSC;    //mg, amount of starch carbon
+		fNSCtoSC = carbon_nonStructure/carbon_structure; 
+		fNSC = carbon_nonStructure/carbon_total;
+		//NITROGEN
+		nitrogen_total = biomass * Nm;
+		nitrogen_structure = biomass * Nm_min; 
+		nitrogen_nonStructure = nitrogen_total * (1 - N_CONTENT_MOBILE) -  nitrogen_structure;
+		nitrogen_mobile = nitrogen_total * N_CONTENT_MOBILE;
+		//water potential initialize		
+		this.waterPotential_b = inputWaterPotential;
+		this.waterPotential = inputWaterPotential;
+		calcKmax();
+		calcKa();
+		this.organType = "Trunk";
+	}
+	
+	@Override
+	Internode initiate_pi(PlantIdentifier pi, float length_, float diameter_)
+	{
+		//initialize the parameters
+		loadParameters();
+		
+		//IDENTIFIERS		
+		this.plantNumber = pi.plantNumber;
+		this.border = pi[border];
+		
+		if(plantBaseID <= 0) {
+			PlantBase pb = first((* this (<--)+ PlantBase*));
+			if(pb != null) {
+				this.plantBaseID = pb.getId();
+			}
+		}
+
+		this.diameter = diameter_;
+		this.length = length_;
+		this.potLength = length; 
+		//CARBON
+		double trunkBiomassGeom = Math.PI * (diameter*diameter/4) * length * density;
+		if (woodBiomassCalcMethod == 2) {
+			biomass = trunkBiomassGeom;
+		} else if (woodBiomassCalcMethod == 1) {
+			// Reconstructed trunk may contain multiple Trunk segments. Using the whole-trunk
+			// total on each segment inflates structure-based sums, so initialize each segment
+			// from its geometry and let later updates evolve biomass dynamically.
+			biomass = trunkBiomassGeom;
+			if (biomass <= 0) biomass = BIOMASS_WOOD * CORDEN_NUM * SHOOT_NUM;
+		} else {
+			// calcMethod 0 (direct input total): avoid duplicating BIOMASS_WOOD on every
+			// reconstructed trunk segment; use per-segment geometric biomass placeholder.
+			biomass = trunkBiomassGeom;
+			if (biomass <= 0) biomass = BIOMASS_WOOD;
+		}
+		area = Math.PI * (diameter*diameter/4);
+		freshWeight = biomass/(1-waterContent);
+		carbon_total = biomass * C_content;
+		carbon_structure = carbon_total * structure_C;  //mg, amount of structure carbon
+		carbon_nonStructure = carbon_total * fNSC;    //mg, amount of starch carbon
+		fNSCtoSC = carbon_nonStructure/carbon_structure; 
+		fNSC = carbon_nonStructure/carbon_total;
+		//NITROGEN
+		nitrogen_total = biomass * Nm;
+		nitrogen_structure = biomass * Nm_min; 
+		nitrogen_nonStructure = nitrogen_total * (1 - N_CONTENT_MOBILE) -  nitrogen_structure;
+		nitrogen_mobile = nitrogen_total * N_CONTENT_MOBILE;
+		//water potential initialize		
+		this.waterPotential_b = inputWaterPotential;
+		this.waterPotential = inputWaterPotential;
+		calcKmax();
+		calcKa();
+		this.organType = "Trunk";
+		return this;
+	}
+	
+	
+	// Initiation method used with grapevine reconstruction from digitalized lidar data
+	@Override
+	void initiate_reconstruction(PlantBase pb, int i)
+	{
+		this.rank = Math.max(i,1);
+		initiate_pb(pb);
+	}
+	
+	// Method for initiating dimensions if lidar reconstruction has not been used
+	@Override
+	void initDimensions_DevelopmentRules()
+	{
+		
+		this.length = WOOD_LENGTH;
+		this.diameter = WOOD_DIAMETER;
+		
+	}
+	
+	// Method for initiating dimensions if lidar reconstruction has been used
+	@Override
+	void initDimensions_Reconstruction()
+	{
+	/* 	Vector3D start = trunkData.start[rank];
+		Vector3D end = trunkData.end[rank];
+		this.length = start.distance(end);
+		this.diameter = trunkData.diameter[rank]; */
+	}
+	
+	
+	@Override
+	void calcPTCTRAM(double sc) 
+	{ 
+		calcLeakage(sc);
+		double radius = this.diameter / 2;
+		deltalength_PT = 0;
+        deltaRadius_PT = secondaryGrowthDeltaRadiusForCordonTrunk(sc, true);
+		structureDM_PRI_PT = 0;
+        structureDM_SEC_PT = C_content * growthCoff * 2.0 * Math.PI * radius * length * density *deltaRadius_PT;
+       				
+		maintenanceDM_PT = calcMaintanceRespiration(this.fNSCtoSC); 
+		reserveDM_PT = reserveSynthesis();
+		loading_PT =  reserveHydrolysis(); 
+	}
+	@Override
+	void calcLoading(double sugarConcentration_phloem)
+	{
+		loading =  fNSC > MINIMUM_NSC ? reserveHydrolysis() * 
+				   sourceLoading(sugarConcentration_phloem, sourceLoading_b, sourceLoading_cp) : 1e-6;
+	    //if (printFlag) { println("this is loading from internode " + "node " + nodeNumber + " rank "+ this.rank + " loading " + loading); }
+	} 
+	@Override
+	void calcUnloading(double sugarConcentration_phloem)
+	{
+		//internode has two structural demand part, length growth and diameter
+		//diameter growth has two parts: short-term logistic expansion for young
+		//internodes, and long-term radial expansion that is proportional to the internode�s surface area.
+		double radius = this.diameter / 2;
+		deltalength = 0;
+        deltaRadius = secondaryGrowthDeltaRadiusForCordonTrunk(sugarConcentration_phloem, false);
+		structureDM_PRI = 0;
+        structureDM_SEC = C_content * growthCoff * 2.0 * Math.PI * radius * length * density *deltaRadius;
+		structureDM = structureDM_PRI + structureDM_SEC;
+		
+		maintenanceDM = calcMaintanceRespiration(this.fNSCtoSC) * 
+         				sinkUnloading(sugarConcentration_phloem, KM_MTNCE);
+			
+		reserveDM = reserveSynthesis() * sinkUnloading(sugarConcentration_phloem, km_res);			
+		
+		unloading = structureDM + maintenanceDM + reserveDM;				
+	}
+	
+	
+	@Override
+	void calcWaterFlux(double f_waterFlux) 
+	{
+		//first step pb[0] could be null
+		waterFlux = plantBaseID <= 0? 1e-5 : f_waterFlux * getPlantBase().waterFluxPotential;
+		
+	}
+	@Override
+	void calcWaterPotential() 
+	{
+		if(parentID > 0 && plantBaseID > 0) {
+			this.waterPotential_b = Math.min(getParent().waterPotential, getPlantBase().xylemWaterPotential);
+		} else if(parentID <= 0 && plantBaseID > 0) {
+			this.waterPotential_b = getPlantBase().xylemWaterPotential;
+		} else {
+			this.waterPotential_b = inputWaterPotential;
+		}
+			
+		this.waterPotential = waterPotential_b - 1/Ka * this.waterFlux - Dw * gacc * this.length*1e-3;;
+		if(Double.isNaN(this.waterPotential)) this.waterPotential = inputWaterPotential;
+	}
+	//hydraulic conductivity per meter length of shoot calculated by diameter
+	@Override
+	void calcKmax() {
+		Kmax = Math.max(cx2 * Math.pow(diameter, cx3), cx2 * Math.pow(pipeDiaMin, cx3))
+				/ this.length * 1e6; //mg  s-1 m MPa-1/ this.length * 1e6; //mg  s-1 m MPa-1
+	}
+	@Override
+	void calcKa() {
+		Ka = Kmax * 1/(1 + Math.pow(this.waterPotential/phi_stem, cx1));
+	}
+	
+
+	
+	@Override
+	void update()
+	{
+		super.update();
+		
+		if(plantBaseID <= 0) {
+			PlantBase pb = first((* this (<--)+ PlantBase*));
+			if(pb != null) {
+				this.plantBaseID = pb.getId();
+				
+			}
+		}
+		if(parentID <= 0 && step <= 2 && this.rank > 1) {  //trunk may not have parent internode, especially for the first one 
+			GrowingOrgan parentOrgan = (GrowingOrgan) first((* this (<--)+ Internode*));
+			if (parentOrgan != null) {
+				storeParentId(parentOrgan);
+				parentOrgan.addChildInternodeId(this.nodeID);
+			}
+		}
+		if(parentID <= 0 && this.rank == 1) {
+			if(plantBaseID > 0){
+				getPlantBase().childTrunkID = this.getId(); 
+			} 
+		}
+		
+		/** update organ size and area */
+				biomass_pre = biomass;
+				double prevDiameter = this.diameter;
+				if(organGrowthMethod.equals("TempLimited")) {
+					double cappedDiameter = capTempLimitedPerennialDiameterUpdate(diameter + 2 * deltaRadius_PT, prevDiameter);
+					deltaRadius_PT = Math.max(0.0, 0.5 * (cappedDiameter - prevDiameter));
+					this.diameter = safePositiveOrFallback(cappedDiameter, prevDiameter);
+				} else if(organGrowthMethod.equals("TempWaterLimited")) {
+				this.diameter = diameter + 2 * deltaRadius_PT;
+			} else if(organGrowthMethod.equals("TempWaterCarbonLimited")){
+			this.diameter = diameter + 2 * deltaRadius;
+		} else {
+			this.diameter = diameter + 2 * deltaRadius;
+		}
+		
+			double vol = calcVol(length, diameter);
+			
+			/** update organ carbon and nitrogen status */
+			if(organGrowthMethod.equals("TempLimited")) {
+				biomass = safePositiveOrFallback(vol * density, biomass_pre);
+				this.initCN_content(this.biomass);
+			} else {
+			delta_str = structureDM - growthCost; //maintenanceDM + reserveDM
+			delta_NSC = maintenanceDM + reserveDM + leakage 
+						- loading - carbonMobilizationCost - maintenanceDM_PT;
+						   
+			updateCarbonStatus(delta_str, delta_NSC);
+		
+			if(Double.isNaN(this.biomass)) {
+				this.initCN_content(this.biomass_pre);
+			}
+		}
+		km_res = adjustKmResSeasonally(daysSinceWinterSolstice, km_res_early, km_res_late);
+		
+		
+		calcKmax();
+		calcKa();
+		
+	/* 	println("delta_str " + delta_str + " delta_NSC " + delta_NSC + 
+				" loading " + (loading) +  " cflux " + Cflux);
+				
+		println("cur_biomass " + biomass + " biomass_pre " + biomass_pre + 
+				" dif " + (biomass-biomass_pre) +  " cflux " + Cflux); */
+				
+		//calcNdegradation();
+		//calcNSynthesis(); 
+		//nitrogen_total = nitrogen_structure + nitrogen_nonStructure;
+	}
+} 
+==> Cylinder(length,diameter/2).(setLayer(border?borderLayer:0),setShader(woodTexture))
+	//Box(0.025, 0.1, 0.05).(setLayer(border?borderLayer:0),setShader(woodTexture))
+;
+
+
+// Module for joint between internodes
+module Joint extends RP(new Point3d(0, 0, 0), 0)
+{
+	
+	// Constants used in calcStrength
+	static final float setStrength = 0.3;
+	static final float strength45 = 0.15;
+	static final float maxUpwardStrength = 0.5;
+	
+	int rank; // Used to determine how strong tropism of Joint will be
+		
+	void initiate(Internode i)
+	{
+		this.rank =  Math.max(i.rank,1);
+	}
+	
+	void initiate(Point3d target, float strength, int rank)
+	{
+		this.target = target; 			// Point tropism moves towards
+		this.strength = strength;		// Strength of tropism
+		this.rank = Math.max(rank,1);
+	}
+	
+	// Set the tropism for repositioning growing internodes in dynamic architecture
+	void setTropism(ApexService a)
+	{
+		this.target = calcTarget(a);
+		this.strength = calcStrength(a);
+	}
+
+	// Get target for tropism for repositioning growing internodes in dynamic architecture
+	static Point3d calcTarget(ApexService a)
+	{
+		Point3d currentLocation = location(a);
+		return new Point3d(currentLocation.x, currentLocation.y, currentLocation.z + 10);
+	}
+	
+	// Get the strength of the tropism based on the current orientation of the apex
+	static float calcStrength(ApexService a) 
+	{
+		Vector3d dir = new Vector3d();
+		dir = direction(a);
+		Vector3d z = new Vector3d(dir.x, dir.y, 0);
+		float strength = setStrength;
+		if(dir.z < 0){
+			strength = angle(dir, z) / 45;
+			if(strength < setStrength) {strength = setStrength;}
+		}
+		if(dir.z >= 0){
+			if(angle(dir, z) >= 45){
+				strength = strength45;
+			}
+		}
+		if(strength > maxUpwardStrength){
+			strength = maxUpwardStrength;
+		}
+		double scaledStrength = strength * JOINT_TROPISM_SCALE;
+		if (Double.isNaN(scaledStrength) || Double.isInfinite(scaledStrength)) {
+			scaledStrength = strength;
+		}
+		scaledStrength = Math.max(0.0, Math.min(1.0, scaledStrength));
+		return (float) scaledStrength;
+	}
+}

@@ -1,0 +1,1990 @@
+//java modules
+import java.util.Arrays;
+import java.util.List;                            
+import java.util.ArrayList;
+import de.grogra.graph.impl.Node;
+import de.grogra.vecmath.Matrix34d;
+import de.grogra.vecmath.Math2;
+import java.util.Objects;
+//rgg modules
+import static absOrgan.*;
+import static plantBase.*;
+import static java.lang.Math.*;
+import static globalParameters.*;
+import static plantParameters.*;
+import static modelOptions.*;
+import static initialConditions.*;
+import static extraTools.*;
+import static carbonTransport.*;
+import static soil.*;
+import static environment.*;
+import static archReader.*;
+import static fineRoot.*;
+import static structuralRoot.*;
+
+class RootWaterCandidate {
+	double xylemWaterPotential;
+	double ABA;
+	double meanWaterPotential;
+	double weightedMeanWaterPotential;
+	boolean valid;
+}
+/**
+ * The RootSystem class models the root system of a plant and is responsible for
+ * various calculations related to hydraulic conductance, nitrogen flux, and ABA
+ * biosynthesis.
+ */
+
+/**
+ * RootBase serves as the the base for the root system to collect its child information for solving
+ * water flux allocation between different layers. This class may include summarised variables that define
+ * the root's physical attributes, nutritional status, and more. It may also have summarised information
+ * for growth simulation, nutrient uptake, and interaction with the soil environment.
+ * 
+ * ONE OF THE REASON THAT ROOTBASE EXTENDS Organ is because we used root based in the XEG reader to serve
+ * as a base for provide PlantIdentifier and run the fromXNode function. 
+ */
+module RootBase extends Organ
+{	
+	//Root and soil combined, we might consider using gridpoints to make soil compartments that contain
+	//a root system to allow nitrogen not used by outcompeted plants to migrate to neighbouring gidcells
+	
+    /** Strip number in which the plant is located. */
+    public int strip;
+
+    /** Row number in which the plant is located. */
+    public int row;
+
+    /** Position of the plant within its row. */
+    public int pos;
+
+    /** Species of the plant. */
+    public String species;
+
+    /** Phloem carbon concentration for water and growth calculations. */
+    public double phloemSugarConcentration;
+
+    /** Plant water flux for water and growth calculations. */
+    public double plantWaterFlux;
+
+    /** Mean soil water potential, used by the shoot branching algorithm. */
+    public double meanSoilWaterPotential = -0.1;
+
+    /** Mean water potential of all the roots. 
+    used for comparing water potential gradient within the root system*/
+    double meanWaterPotential;
+    
+    /** weighted water potential of the root by water flux. */
+    public double weightedMeanWaterPotential;
+
+    /** Mean abscisic acid concentration. */
+    public double meanABA;
+
+
+    /** Array of FineRoot IDs per soil layer */
+	long[] frIDs = new long[numofSoilLayers];
+	
+	
+
+	
+	/**
+	 * Retrieves the FineRoot object at the specified soil layer index.
+	 *
+	 * @param i The index of the soil layer.
+	 * @return The FineRoot object at the given index, or null if the ID is invalid or out of bounds.
+	 */
+	protected FineRoot getFineRootAt(int i) {
+		if (frIDs != null && i >= 0 && i < frIDs.length) {
+			return getFineRootById(frIDs[i]);
+		}
+		return null;
+	}
+
+	/**
+	 * Retrieves the FineRoot object corresponding to the given node ID.
+	 *
+	 * @param id The node ID of the FineRoot.
+	 * @return The FineRoot object, or null if the ID is invalid or the node is not a FineRoot.
+	 */
+	protected FineRoot getFineRootById(long id) {
+		if (id > 0) {
+			Node n = (Node) graph().getNodeForId(id);
+			if (n instanceof FineRoot) {
+				return (FineRoot) n;
+			}
+		}
+		return null;
+	}
+	
+	/**
+	 * Retrieves a node from the graph by its ID and casts it to the desired type using raw Class.
+	 *
+	 * @param id The node ID.
+	 * @param type The expected class type (e.g., FineRoot.class).
+	 * @return The node cast to the specified type, or null if not valid.
+	 * FineRoot fr = (FineRoot) getNodeById(frIDs[i], FineRoot.class);
+	 * StructuralRoot sr = (StructuralRoot) getNodeById(srIDs[i], StructuralRoot.class);
+	 * Soil sl = (Soil) getNodeById(slIDs[i], Soil.class);
+	 */
+	protected Object getNodeById(long id, Class type) {
+		if (id > 0) {
+			Object node = graph().getNodeForId(id);
+			if (type.isInstance(node)) {
+				return node;
+			}
+		}
+		return null;
+	}
+
+
+	
+	/** Array of StructuralRoot IDs per soil layer */
+	long[] srIDs = new long[numofSoilLayers];
+	
+	/**
+	 * Retrieves the StructuralRoot object at the specified soil layer index.
+	 *
+	 * @param i The index of the soil layer.
+	 * @return The StructuralRoot object at the given index, or null if the ID is invalid or out of bounds.
+	 */
+	protected StructuralRoot getStructuralRootAt(int i) {
+		if (srIDs != null && i >= 0 && i < srIDs.length) {
+			return getStructuralRootById(srIDs[i]);
+		}
+		return null;
+	}
+	
+	/**
+	 * Retrieves the StructuralRoot object corresponding to the given node ID.
+	 *
+	 * @param id The node ID of the StructuralRoot.
+	 * @return The StructuralRoot object, or null if the ID is invalid or the node is not a StructuralRoot.
+	 */
+	protected StructuralRoot getStructuralRootById(long id) {
+		if (id > 0) {
+			Node n = (Node) graph().getNodeForId(id);
+			if (n instanceof StructuralRoot) {
+				return (StructuralRoot) n;
+			}
+		}
+		return null;
+	}
+	
+
+	/** Array of Soil IDs per soil layer */
+	long[] slIDs = new long[numofSoilLayers];
+	/**
+		 * Retrieves the Soil object at the specified soil layer index.
+		 *
+		 * @param i The index of the soil layer.
+		 * @return The Soil object at the given index, or null if the ID is invalid or out of bounds.
+		 */
+		protected Soil getSoilAt(int i) {
+			//println(" slIDs[i]: " + i + " " + slIDs[i]);
+			if (slIDs != null && i >= 0 && i < slIDs.length) {
+				return getSoilById(slIDs[i]);
+			}
+			return null;
+		}
+		
+		/**
+		 * Retrieves the Soil object corresponding to the given node ID.
+		 *
+		 * @param id The node ID of the Soil.
+		 * @return The Soil object, or null if the ID is invalid or the node is not a Soil.
+		 */
+		protected Soil getSoilById(long id) {
+			if (id > 0) {
+				Node n = (Node) graph().getNodeForId(id);
+				if (n instanceof Soil) {
+					return (Soil) n;
+				}
+			}
+			return null;
+		}
+    
+	/** temp array of fine roots for each soil layer.
+     will be assign null after step 0 for safty and clean up the organ reference in graph.xml*/
+    FineRoot[] frs;// = new FineRoot[numofSoilLayers];
+
+    /** Array of structural roots for each soil layer. 
+    will be assign null after step 0 for safty and clean up the organ reference in graph.xml*/
+    StructuralRoot[] srs;// = new StructuralRoot[numofSoilLayers];
+
+    /** Array of soil layers. 
+    will be assign null after step 0 for safty and clean up the organ reference in graph.xml*/
+    Soil[] sl;// = new Soil[numofSoilLayers];
+    
+    
+		
+    /** grid index for keeping track of the soil id */
+    public int[] gridIndex;
+    
+    
+    /** Proportion of fine roots in each soil layer. */
+    public double[] fiRootProportion; //= new double[numofSoilLayers];
+
+    /** Allocation of water flux in each soil layer. */
+    public double[] f_flux; //= new double[numofSoilLayers];
+
+    /** Water uptake in each soil layer measured in millimeters. */
+    public double[] waterUptake_mm;// = new double[numofSoilLayers];
+    
+    /** sum of maximum root conductance from each layer */
+    public double TGrmax;
+    double Tautranspigr;
+    /** Intermediate variable for calculating water allocation. Equals to 1/(numofSoilLayers-1). */
+    //double k_a = 1.0;
+
+	/**
+	 * Calculates the resistance from soil to root surface for water transfer.
+	 * the soil to root resistance are hard to measure, from the previous work on one soil layer
+	 * we have obtained one emperical specific root to soil resistance (RSR) for grapevine under field conditions
+	 * for capturing the difference in root length density between soil layers, we thus created added the 
+	 * relativeRootResistance, which will scale up or down the RSR
+	 */
+	public double[] relative_RSR;// = new double[numofSoilLayers]; 
+	//water uptake factor
+	public double[] WUF;// = new double[numofSoilLayers];	
+	
+	// Plant-available water above wilting (mm) in each soil grid in PAW_mm 
+	public double[] availalbeWater;// = new double[numofSoilLayers];	
+	
+	
+	/** Potentially needed for the complex root function later */
+	double surfaceArea;			// root surface area
+	double volume;
+
+	double width = 0.3;
+	double depth = 0.5;
+	
+	double rootLength;
+	double rootVolume;
+	double rhizArea;
+	
+	double Uptake_W;
+	// --- Class-level fields (put near your water arrays) ---
+	/** Total plant N uptake (mg N h⁻¹). */
+	double totalNuptake_overTime = 0.0;
+	double totalNuptake_step;
+	double Uptake_P;
+	double Uptake_N_MF;
+	double Uptake_P_MF;
+	double RootN;			// N allocated to roots		
+	
+	/** Nitrogen uptake per soil layer / fine root, area-normalized (mg N m⁻² h⁻¹). */
+	public double[] nitrogenUptake_mgm2;// = new double[numofSoilLayers];
+
+
+
+	/** Fine root exudation per layer (mg C step-1). */
+	public double[] fineRootExudation_mg;
+	/** Fine root turnover per layer (mg C step-1). */
+	public double[] fineRootTurnover_mg;
+
+	/** Fine root exudation summed across layers (mg C step-1). */
+	double fineRootExudation_total_mg;
+	/** Fine root turnover summed across layers (mg C step-1). */
+	double fineRootTurnover_total_mg;
+
+	/** Fine root exudation cumulative per layer (mg C). */
+	public double[] fineRootExudation_cum_mg;
+	/** Fine root turnover cumulative per layer (mg C). */
+	public double[] fineRootTurnover_cum_mg;
+	/** Fine root exudation cumulative total (mg C). */
+	double fineRootExudation_total_cum_mg;
+	/** Fine root turnover cumulative total (mg C). */
+	double fineRootTurnover_total_cum_mg;
+    
+	/**
+	 * Initializes the root system object with various plant identifiers.
+	 * 
+	 * <p>
+	 * This method initializes the {@code RootSystem} object with different 
+	 * plant identifiers such as plant number, border, strip, row, position, 
+	 * and species. It also initializes various arrays and variables that 
+	 * will be used for different calculations later on.
+	 * </p>
+	 *
+	 * @param pi The PlantIdentifier object containing various identifiers for the plant.
+	 * @see PlantIdentifier
+	 */
+	void initiate_pb(PlantBase pb, int gridNumber)
+	{
+		//IDENTIFIERS
+		this.pi = pb;
+		this.plantNumber = pb.plantNumber;
+		println("this.plantNumber" + this.plantNumber);
+		this.border = pb[border];
+				
+		this.strip = pb.strip;
+		this.row = pb.row;
+		this.pos = pb.pos;
+		this.species = pb.species;
+		this.length = 0;
+		
+	 // Initialize arrays using gridNumber
+		plantBaseID = pb.nodeID;
+		int size = gridNumber + 1;
+		println("size: " + size + " gridNumber: " + gridNumber );
+		this.gridIndex = new int[size];
+		
+		this.frIDs = new long[size];
+		this.srIDs = new long[size];
+		this.slIDs = new long[size];
+		//clear the following arrays after initiation
+		sl  = new Soil[size];
+        frs = new FineRoot[size];
+        srs = new StructuralRoot[size];
+        
+        
+		this.fiRootProportion = new double[size];
+		this.f_flux = new double[size];
+		this.waterUptake_mm = new double[size];
+		this.relative_RSR = new double[size];
+		this.WUF = new double[size];
+		this.availalbeWater = new double[size];
+		this.nitrogenUptake_mgm2 = new double[size];
+		
+		this.fineRootExudation_mg = new double[size];
+		this.fineRootTurnover_mg = new double[size];
+		this.fineRootExudation_cum_mg = new double[size];
+		this.fineRootTurnover_cum_mg = new double[size];
+		this.fineRootExudation_total_mg = 0.0;
+		this.fineRootTurnover_total_mg = 0.0;
+		this.fineRootExudation_total_cum_mg = 0.0;
+		this.fineRootTurnover_total_cum_mg = 0.0;
+		
+		
+		//this.k_a = numofSoilLayers > 1 ? (double) 1.0/(numofSoilLayers-1) : 1.0;
+		//Arrays.fill(ones, 1.0);	
+		    // Fill relative_RSR safely
+		double fill;
+		if (numofSoilLayers > 1 && size > 1) {
+			fill = 1.0 / (size - 1);
+		} else if (size > 0) {
+			fill = 1.0;
+		} else {
+			fill = 0.0;
+		}
+		java.util.Arrays.fill(relative_RSR, fill);
+		
+		 
+
+        pb.addRootBase(this);
+		println("pb id: " + pb.getId() + " rb id: " + this.getId());
+	}
+/**
+ * Adds a single Soil–Root layer entry.
+ *
+ * @param fid XEG node id of the grid cell (r2.N.id)
+ * @param s   Soil object
+ * @param fr  FineRoot object
+ * @param sr  StructuralRoot object
+ */
+void addChildSoilRoot(int fid, Soil s, FineRoot fr, StructuralRoot sr) {
+    // We expect fid in 1..gridNumber; slot 0 is unused.
+    if (fid < 0 || fid >= sl.length) {
+        println("Warning addChildSoilRoot: fid=" + fid
+                + " is out of bounds for arrays of length " + sl.length
+                + " (plant " + this.plantNumber + ")");
+        return; // do not crash the simulation
+    }
+
+    // Detect duplicates (same grid cell matched multiple times) and preserve
+    // the first linked voxel so later accidental matches do not orphan it.
+    if (sl[fid] != null || frs[fid] != null || srs[fid] != null) {
+        println("[RootSoilGrid:duplicate] fid=" + fid
+                + " plant=" + this.plantNumber
+                + " existingSoilId=" + (sl[fid] == null ? -1 : sl[fid].getId())
+                + " existingFineRootId=" + (frs[fid] == null ? -1 : frs[fid].getId())
+                + " existingStructuralRootId=" + (srs[fid] == null ? -1 : srs[fid].getId())
+                + " newSoilId=" + (s == null ? -1 : s.getId())
+                + " newFineRootId=" + (fr == null ? -1 : fr.getId())
+                + " newStructuralRootId=" + (sr == null ? -1 : sr.getId()));
+        return;
+    }
+
+    if (fr != null) {
+        fr.nodeID = fr.getId();
+        fr.rbID = this.getId();
+        if (s != null) {
+            fr.addSoilArray(s);
+        }
+    }
+    if (sr != null) {
+        sr.nodeID = sr.getId();
+    }
+    if (fr != null && sr != null) {
+        fr.storeParentId(sr);
+        sr.addFineRoot(fr);
+    }
+
+    // Store references in the slot indexed by fid
+    sl[fid]  = s;
+    frs[fid] = fr;
+    srs[fid] = sr;
+
+    // Bookkeeping: remember which XEG grid this slot corresponds to
+    gridIndex[fid] = fid;
+
+    // Root traits
+    if (fr != null) {
+        fiRootProportion[fid] = fr.fiRootProportion;
+        this.Tautranspigr     = fr.Tautranspigr;
+    }
+
+    
+}
+
+	
+	/**
+	 * Finalizes the organ IDs and removes the object references to avoid duplication
+	 * or memory conflicts in the scene graph (recommended to call at step 1 or 2).
+	 */
+	void finalizeSoilRootIDs() {
+		int len = Math.max(sl.length, Math.max(frs.length, srs.length));
+	
+		for (int i = 0; i < len; i++) {
+			// Temporarily hold references
+			Soil s = (sl != null && i < sl.length) ? sl[i] : null;
+			FineRoot fr = (frs != null && i < frs.length) ? frs[i] : null;
+			StructuralRoot sr = (srs != null && i < srs.length) ? srs[i] : null;
+	
+			// Assign IDs and clear references
+			if (s != null) {
+				slIDs[i] = s.getId();
+				sl[i] = null;
+			}
+			if (fr != null) {
+				frIDs[i] = fr.getId();
+				frs[i] = null;
+			}
+			if (sr != null) {
+				srIDs[i] = sr.getId();
+				srs[i] = null;
+			}
+	
+			// Logical linkage after assignment
+			if (s != null && fr != null) {
+				fr.addSoilArray(s);
+				fr.rbID = this.getId();
+			}
+			if (sr != null && fr != null) {
+				sr.addFineRoot(fr);
+			}
+		}
+		if (printFlag) {
+			println("Finalized root system IDs and linked components (length = " + len + ").");
+		}
+	}
+
+	
+	//Add plantBase
+	void addPlantBase(PlantBase pb)
+	{
+		this.parentID = pb.getId();
+	}
+	
+	
+ public void filterAndResizeArrays() {
+    // Snapshot originals
+    final long[] frIDs0 = frIDs;
+    final long[] slIDs0 = slIDs;
+    final long[] srIDs0 = srIDs;
+    final int[]  gridIndex0 = gridIndex;
+    final double[] fiRootProportion0 = fiRootProportion;
+
+    // 1) Indices to keep (remove zero soil references)
+    final java.util.List keep = new java.util.ArrayList(); // raw types for Java 1.5
+    int i;
+    for (i = 0; i < slIDs0.length; i++) {
+        if (slIDs0[i] != 0L) {
+            // If you also want FR/SR non-zero: add && frIDs0[i] != 0L && srIDs0[i] != 0L
+            keep.add(Integer.valueOf(i));
+        }
+    }
+
+    final int newSize = keep.size();
+
+    // 2) Rebuild ID arrays with kept indices
+    frIDs = new long[newSize];
+    slIDs = new long[newSize];
+    srIDs = new long[newSize];
+    gridIndex = new int[newSize];
+    fiRootProportion = new double[newSize];
+
+    for (i = 0; i < newSize; i++) {
+        final int src = ((Integer) keep.get(i)).intValue();
+        frIDs[i] = frIDs0[src];
+        slIDs[i] = slIDs0[src];
+        srIDs[i] = srIDs0[src];
+        gridIndex[i] = (gridIndex0 != null && src < gridIndex0.length) ? gridIndex0[src] : src;
+        fiRootProportion[i] = (fiRootProportion0 != null && src < fiRootProportion0.length) ? fiRootProportion0[src] : 0.0;
+    }
+
+    // 3) Gather companion arrays to keep alignment
+    f_flux          = gatherDoubles(f_flux, keep);
+    waterUptake_mm  = gatherDoubles(waterUptake_mm, keep);
+    relative_RSR    = gatherDoubles(relative_RSR, keep);
+    WUF             = gatherDoubles(WUF, keep);
+    availalbeWater  = gatherDoubles(availalbeWater, keep);
+    nitrogenUptake_mgm2 = gatherDoubles(nitrogenUptake_mgm2, keep);
+    // 4) Normalize relative_RSR safely
+    if (relative_RSR != null) {
+        double fill;
+        if (numofSoilLayers > 1 && newSize > 1) {
+            fill = 1.0 / (newSize - 1);
+        } else if (newSize > 0) {
+            fill = 1.0;
+        } else {
+            fill = 0.0;
+        }
+        java.util.Arrays.fill(relative_RSR, fill);
+    }
+}
+
+/** Java 1.5-friendly gather helper (raw List, explicit casts). */
+private double[] gatherDoubles(double[] original, java.util.List idxs) {
+    if (original == null) return null;
+    final int n = idxs.size();
+    double[] out = new double[n];
+    int i;
+    for (i = 0; i < n; i++) {
+        int src = ((Integer) idxs.get(i)).intValue();
+        out[i] = (src < original.length) ? original[src] : 0.0;
+    }
+    return out;
+}
+
+
+	
+	/**
+	 * Updates the input variables in case one wants to run the root model alone  
+	 * Fetches variables like phloemCarbonConcentration and plantWaterFlux
+	 * based on the scenario and other conditions.
+	 */
+	void updateInput() 
+	{
+		if(this.plantBaseID <= 0 || parentID <= 0) {
+			PlantBase pb = first((* this (<--)+ PlantBase*));
+			if(pb != null) {
+				this.parentID  = this.plantBaseID = pb.getId();
+				
+			}
+		}
+		
+		
+		if(inputVesselConditions == true  &&  Objects.equals(special_scenario, "singleRoot") && rootModelInput_file != null)
+		{
+			this.phloemSugarConcentration = rootModelInput[step][0];  
+			this.plantWaterFlux = rootModelInput[step][1];
+			//println("plantWaterFlux " + plantWaterFlux + " phloemCarbonConcentration " + rootModelInput[step][0]);	
+		} else {
+			this.phloemSugarConcentration = getPlantBase().sugarConcentration_phloem;			  
+			this.plantWaterFlux = getPlantBase().waterFlux_optimized;			
+		}
+		
+		
+		calcGrowthCycle(this.meanSoilWaterPotential);
+		//if (printFlag) { println("current growthCycleDuration: " + gcDurationGlobal); }
+
+	}
+	
+	/**
+	 * Calculates the duration in degree days of one growth cycle.
+	 * The growth cycle is equivalent to the time between phytomer production on the main shoot.
+	 * 
+	 * @param waterPotential The soil water potential.
+	 * @return The duration of one growth cycle in degree days.
+	 */
+	void calcGrowthCycle(float waterPotential) {
+		float awI = 11.8f;
+		float bwI = -7.41f;
+		float cwI = 0.18f;
+		// Soil parameters n_waterPotential and alpha are used
+		Soil soil = getSoilAt(0);
+	
+		float airEntryCoef = 0.1f;   // default
+		float poreSizeCoef = 1.5f;   // default
+	
+		if (soil != null) {
+			airEntryCoef = soil.airEntryCoef;
+			poreSizeCoef = soil.poreSizeCoef;
+		}
+	
+		// van Genuchten style calculation
+		float m = 1.0f - 1.0f / poreSizeCoef;
+		float a = (float) Math.pow(-waterPotential * airEntryCoef, poreSizeCoef);
+		gcDurationGlobal = phyllochron * 
+				(1 + (awI * (float) Math.exp(bwI * ((1 / Math.pow(a + 1, m)) + cwI))));
+	}
+/**
+ * Allocates water flux across complex-root soil-grid voxels.
+ *
+ * Primary allocation is mechanistic:
+ *
+ *     f_flux[i] = WUF[i] / totalWUF
+ *
+ * where WUF is calculated by FineRoot.calcWaterUptake().
+ *
+ * Imported root weight is used only as a global fallback when totalWUF is
+ * zero, NaN, or infinite. It is not multiplied into WUF during normal
+ * allocation, because imported root distribution should affect uptake
+ * upstream through conductance, resistance, biomass, or root-density terms.
+ *
+ * Only runs once per time step. By contrast, calcXylemWaterPotential() is
+ * used in the water-potential solver and may be called multiple times
+ * within a step.
+ *
+ * @see FineRoot
+ * @see Soil
+ */
+void calcfluxAllocation() {
+
+    // Initialization for step 1.
+    if (step <= 1) {
+        calcXylemWaterPotential(10.0, fiRootProportion);
+    }
+
+    double EPS = 1e-12;
+
+    double totalRSR = 0.0;
+    double totalRsp = 0.0;
+    double totalWUF = 0.0;
+
+    double minWUF = Double.POSITIVE_INFINITY;
+    double maxWUF = 0.0;
+
+    double totalImportedWeight = 0.0;
+    double minImportedWeight = Double.POSITIVE_INFINITY;
+    double maxImportedWeight = 0.0;
+
+    int activeRoots = 0;
+
+    boolean usedFallback = false;
+    boolean usedImportedFallback = false;
+    boolean usedEqualFallback = false;
+
+    String allocationMode = "NONE";
+
+    double meanRSR = 1.0;
+
+    meanSoilWaterPotential = 0.0;
+    TGrmax = 0.0;
+
+    boolean hasSoilPotentialSample = false;
+    double soilPotentialWeightSum = 0.0;
+
+    if (numofSoilLayers > 1) {
+
+        int n = (frIDs == null) ? 0 : frIDs.length;
+
+        /*
+         * First pass:
+         * - calculate WUF from FineRoot.calcWaterUptake()
+         * - collect imported root weights only for fallback/diagnostics
+         * - calculate mean radial soil-root resistance across active root voxels
+         * - calculate mean soil water potential from resolved soil voxels
+         */
+        for (int i = 0; i < n; i++) {
+
+            FineRoot fr = getFineRootAt(i);
+            Soil soil = getSoilAt(i);
+
+            if (fr != null && soil != null) {
+
+                double rsr = fr.radialSoilToRootResistance;
+                if (!Double.isNaN(rsr) && !Double.isInfinite(rsr) && rsr > 0.0) {
+                    totalRSR += rsr;
+                }
+
+                double rsp = fr.Rsp;
+                if (!Double.isNaN(rsp) && !Double.isInfinite(rsp) && rsp > 0.0) {
+                    totalRsp += rsp;
+                }
+
+                double wuf = fr.calcWaterUptake();
+                if (Double.isNaN(wuf) || Double.isInfinite(wuf) || wuf < 0.0) {
+                    wuf = 0.0;
+                }
+
+                WUF[i] = wuf;
+                totalWUF += wuf;
+
+                minWUF = Math.min(minWUF, wuf);
+                maxWUF = Math.max(maxWUF, wuf);
+
+                double importedWeight = importedRootWeightAt(i, fr);
+                if (Double.isNaN(importedWeight) || Double.isInfinite(importedWeight) || importedWeight < 0.0) {
+                    importedWeight = 0.0;
+                }
+
+                totalImportedWeight += importedWeight;
+                minImportedWeight = Math.min(minImportedWeight, importedWeight);
+                maxImportedWeight = Math.max(maxImportedWeight, importedWeight);
+
+                double grmax = fr.Grmax;
+                if (!Double.isNaN(grmax) && !Double.isInfinite(grmax) && grmax > 0.0) {
+                    TGrmax += grmax;
+                }
+
+                activeRoots++;
+
+            } else {
+                if (WUF != null && i < WUF.length) {
+                    WUF[i] = 0.0;
+                }
+            }
+
+            /*
+             * Mean soil water potential.
+             *
+             * For complex-root voxel grids, do not divide by numofSoilLayers
+             * or totalSoilDepth here because the loop is over voxels/root IDs,
+             * not only physical soil layers. Use a resolved-soil weighted mean.
+             */
+            if (soil != null) {
+                double soilWeight = soil.length;
+                if (Double.isNaN(soilWeight) || Double.isInfinite(soilWeight) || soilWeight <= 0.0) {
+                    soilWeight = 1.0;
+                }
+
+                if (!Double.isNaN(soil.waterPotential) && !Double.isInfinite(soil.waterPotential)) {
+                    meanSoilWaterPotential += soil.waterPotential * soilWeight;
+                    soilPotentialWeightSum += soilWeight;
+                    hasSoilPotentialSample = true;
+                }
+            }
+        }
+
+        if (hasSoilPotentialSample && soilPotentialWeightSum > EPS) {
+            meanSoilWaterPotential = meanSoilWaterPotential / soilPotentialWeightSum;
+        }
+
+        /*
+         * For voxel-level roots, average resistance across active roots/voxels,
+         * not across numofSoilLayers.
+         */
+        if (activeRoots > 0 && totalRSR > EPS
+                && !Double.isNaN(totalRSR) && !Double.isInfinite(totalRSR)) {
+            meanRSR = totalRSR / activeRoots;
+        } else {
+            meanRSR = 1.0;
+        }
+
+        boolean validWUF = !Double.isNaN(totalWUF)
+                && !Double.isInfinite(totalWUF)
+                && totalWUF > EPS;
+
+        boolean wufHasVariation = activeRoots > 1
+                && maxWUF > 0.0
+                && (maxWUF - minWUF) > Math.max(1e-12, maxWUF * 1e-6);
+
+        boolean importedHasVariation = activeRoots > 1
+                && maxImportedWeight > 0.0
+                && (maxImportedWeight - minImportedWeight) > Math.max(1e-12, maxImportedWeight * 1e-6);
+
+        /*
+         * Primary allocation:
+         * mechanistic WUF-only allocation.
+         */
+        if (validWUF) {
+
+            allocationMode = "WUF_PRIMARY";
+
+            for (int i = 0; i < n; i++) {
+
+                FineRoot fr = getFineRootAt(i);
+
+                if (fr != null) {
+
+                    double safeWUF = (WUF != null && i < WUF.length) ? WUF[i] : 0.0;
+                    if (Double.isNaN(safeWUF) || Double.isInfinite(safeWUF) || safeWUF < 0.0) {
+                        safeWUF = 0.0;
+                    }
+
+                    relative_RSR[i] = (meanRSR > EPS
+                            && !Double.isNaN(meanRSR)
+                            && !Double.isInfinite(meanRSR))
+                        ? fr.radialSoilToRootResistance / meanRSR
+                        : 1.0;
+
+                    if (Double.isNaN(relative_RSR[i])
+                            || Double.isInfinite(relative_RSR[i])
+                            || relative_RSR[i] <= 0.0) {
+                        relative_RSR[i] = 1.0;
+                    }
+
+                    f_flux[i] = Math.max(0.0, safeWUF / totalWUF);
+
+                } else {
+                    relative_RSR[i] = 1.0;
+                    f_flux[i] = 0.0;
+                }
+            }
+
+        } else {
+
+            /*
+             * Global fallback only:
+             * use imported root weights only when WUF cannot be used.
+             */
+            usedFallback = true;
+
+            double importedTotal = 0.0;
+
+            for (int i = 0; i < n; i++) {
+                FineRoot fr = getFineRootAt(i);
+                if (fr == null) continue;
+
+                double importedWeight = importedRootWeightAt(i, fr);
+                if (Double.isNaN(importedWeight) || Double.isInfinite(importedWeight) || importedWeight < 0.0) {
+                    importedWeight = 0.0;
+                }
+
+                importedTotal += importedWeight;
+            }
+
+            if (importedTotal > EPS
+                    && !Double.isNaN(importedTotal)
+                    && !Double.isInfinite(importedTotal)) {
+
+                allocationMode = "IMPORTED_FALLBACK";
+                usedImportedFallback = true;
+
+                for (int i = 0; i < n; i++) {
+
+                    FineRoot fr = getFineRootAt(i);
+
+                    if (fr != null) {
+
+                        double importedWeight = importedRootWeightAt(i, fr);
+                        if (Double.isNaN(importedWeight) || Double.isInfinite(importedWeight) || importedWeight < 0.0) {
+                            importedWeight = 0.0;
+                        }
+
+                        relative_RSR[i] = (meanRSR > EPS
+                                && !Double.isNaN(meanRSR)
+                                && !Double.isInfinite(meanRSR))
+                            ? fr.radialSoilToRootResistance / meanRSR
+                            : 1.0;
+
+                        if (Double.isNaN(relative_RSR[i])
+                                || Double.isInfinite(relative_RSR[i])
+                                || relative_RSR[i] <= 0.0) {
+                            relative_RSR[i] = 1.0;
+                        }
+
+                        f_flux[i] = Math.max(0.0, importedWeight / importedTotal);
+
+                    } else {
+                        relative_RSR[i] = 1.0;
+                        f_flux[i] = 0.0;
+                    }
+                }
+
+            } else {
+
+                allocationMode = "EQUAL_FALLBACK";
+                usedEqualFallback = true;
+
+                for (int i = 0; i < n; i++) {
+
+                    FineRoot fr = getFineRootAt(i);
+
+                    if (fr != null && activeRoots > 0) {
+
+                        relative_RSR[i] = (meanRSR > EPS
+                                && !Double.isNaN(meanRSR)
+                                && !Double.isInfinite(meanRSR))
+                            ? fr.radialSoilToRootResistance / meanRSR
+                            : 1.0;
+
+                        if (Double.isNaN(relative_RSR[i])
+                                || Double.isInfinite(relative_RSR[i])
+                                || relative_RSR[i] <= 0.0) {
+                            relative_RSR[i] = 1.0;
+                        }
+
+                        f_flux[i] = 1.0 / activeRoots;
+
+                    } else {
+                        relative_RSR[i] = 1.0;
+                        f_flux[i] = 0.0;
+                    }
+                }
+            }
+        }
+
+        /*
+         * Optional normalization guard.
+         * This should normally do almost nothing, but protects against tiny
+         * floating-point drift or unexpected negative values.
+         */
+        double sumFlux = 0.0;
+        for (int i = 0; i < n; i++) {
+            if (Double.isNaN(f_flux[i]) || Double.isInfinite(f_flux[i]) || f_flux[i] < 0.0) {
+                f_flux[i] = 0.0;
+            }
+            sumFlux += f_flux[i];
+        }
+
+        if (sumFlux > EPS && !Double.isNaN(sumFlux) && !Double.isInfinite(sumFlux)) {
+            for (int i = 0; i < n; i++) {
+                f_flux[i] = f_flux[i] / sumFlux;
+            }
+        }
+
+        if (debug && printFlag) {
+
+            double meanFlux = activeRoots > 0 ? 1.0 / activeRoots : 0.0;
+            double ssFlux = 0.0;
+            double minFlux = Double.POSITIVE_INFINITY;
+            double maxFlux = 0.0;
+
+            for (int j = 0; f_flux != null && j < f_flux.length; j++) {
+                FineRoot fr = getFineRootAt(j);
+                if (fr == null) continue;
+
+                minFlux = Math.min(minFlux, f_flux[j]);
+                maxFlux = Math.max(maxFlux, f_flux[j]);
+                ssFlux += (f_flux[j] - meanFlux) * (f_flux[j] - meanFlux);
+            }
+
+            double cvFlux = (activeRoots > 1 && meanFlux > 0.0)
+                ? Math.sqrt(ssFlux / activeRoots) / meanFlux
+                : 0.0;
+
+            double meanWUF = activeRoots > 0 ? totalWUF / activeRoots : 0.0;
+            double cvWUF = (activeRoots > 1 && meanWUF > 0.0)
+                ? (maxWUF - minWUF) / meanWUF
+                : 0.0;
+
+            println("[RootFluxStats]"
+                + " step=" + step
+                + " activeRoots=" + activeRoots
+                + " allocationMode=" + allocationMode
+                + " sumFlux=" + sumNonNegative(f_flux)
+                + " minFlux=" + (activeRoots > 0 ? minFlux : 0.0)
+                + " maxFlux=" + maxFlux
+                + " cvFlux=" + cvFlux
+                + " sumWUF=" + totalWUF
+                + " minWUF=" + (activeRoots > 0 ? minWUF : 0.0)
+                + " maxWUF=" + maxWUF
+                + " cvWUF=" + cvWUF
+                + " sumImportedRootWeight=" + totalImportedWeight
+                + " minImportedRootWeight=" + (activeRoots > 0 ? minImportedWeight : 0.0)
+                + " maxImportedRootWeight=" + maxImportedWeight
+                + " wufHasVariation=" + wufHasVariation
+                + " importedHasVariation=" + importedHasVariation
+                + " usedFallback=" + usedFallback
+                + " usedImportedFallback=" + usedImportedFallback
+                + " usedEqualFallback=" + usedEqualFallback);
+
+            if (activeRoots > 1 && validWUF && !wufHasVariation && importedHasVariation) {
+                println("[RootFluxAllocation:WARN]"
+                    + " WUF is nearly uniform across complex-root grid; "
+                    + "f_flux remains WUF-based. Check calcWaterUptake(), soil water potential, "
+                    + "Rsp, Grmax, waterPotential_pre, and root conductance states.");
+            }
+        }
+
+    } else {
+
+        /*
+         * Single-layer fallback.
+         */
+        if (f_flux != null && f_flux.length > 0) {
+            f_flux[0] = 1.0;
+        }
+
+        Soil soil0 = getSoilAt(0);
+        if (soil0 != null && !Double.isNaN(soil0.waterPotential) && !Double.isInfinite(soil0.waterPotential)) {
+            meanSoilWaterPotential = soil0.waterPotential;
+            hasSoilPotentialSample = true;
+        }
+    }
+
+    /*
+     * Compatibility fallback when no soil layer was resolved from IDs.
+     */
+    if (!hasSoilPotentialSample) {
+        meanSoilWaterPotential = inputWaterPotential;
+    }
+
+    if (debug) {
+        checkForNaN(printFlag,
+            "totalRSR", totalRSR,
+            "totalRsp", totalRsp,
+            "totalWUF", totalWUF,
+            "meanRSR", meanRSR,
+            "TGrmax", TGrmax,
+            "meanSoilWaterPotential", meanSoilWaterPotential
+        );
+    }
+}
+		double candidateRootAmplitude(FineRoot rt) {
+			if (rt == null) return 0.0;
+			int d = day;
+			if (d < 0) d = 0;
+			if (d >= rt.ampli.length) d = rt.ampli.length - 1;
+			double wp = isBad(rt.waterPotential) ? inputWaterPotential : rt.waterPotential;
+			double candidateMax = max(isBad(rt.Psixylmax[d]) ? wp : rt.Psixylmax[d], wp);
+			double candidateMin = min(isBad(rt.Psixylmin[d]) ? wp : rt.Psixylmin[d], wp);
+			double candidateAmpli = candidateMax - candidateMin;
+			if (d > 1) {
+				double prevMax = isBad(rt.Psixylmax[d - 2]) ? candidateMax : rt.Psixylmax[d - 2];
+				double prevMin = isBad(rt.Psixylmin[d - 2]) ? candidateMin : rt.Psixylmin[d - 2];
+				candidateAmpli = prevMax - prevMin;
+			}
+			if (isBad(candidateAmpli)) candidateAmpli = isBad(rt.ampli[d]) ? 0.0 : rt.ampli[d];
+			if (isBad(candidateAmpli)) candidateAmpli = 0.0;
+			return Math.max(0.0, candidateAmpli);
+		}
+
+		private static boolean isBad(double v) {
+			return Double.isNaN(v) || Double.isInfinite(v);
+		}
+
+		private static double positiveOr(double v, double fallback) {
+			return (isBad(v) || v <= 0.0) ? fallback : v;
+		}
+
+		private static double clampDouble(double v, double lo, double hi) {
+			if (isBad(v)) return lo;
+			if (v < lo) return lo;
+			if (v > hi) return hi;
+			return v;
+		}
+
+		private double importedRootWeightAt(int i, FineRoot fr) {
+			double w = 0.0;
+			if (fiRootProportion != null && i >= 0 && i < fiRootProportion.length) w = fiRootProportion[i];
+			if ((isBad(w) || w <= 0.0) && fr != null) w = fr.fiRootProportion;
+			if (isBad(w) || w < 0.0) w = 0.0;
+			return w;
+		}
+
+		private static double sumNonNegative(double[] a) {
+			if (a == null) return 0.0;
+			double total = 0.0;
+			for (int i = 0; i < a.length; i++) {
+				double v = a[i];
+				if (!isBad(v) && v > 0.0) total += v;
+			}
+			return total;
+		}
+
+		double candidateRsp(FineRoot rt, Soil soil, double relativeRSR) {
+			double rel = positiveOr(relativeRSR, 1.0);
+			double kRatio = 1.0;
+			if (soil != null) {
+				double ksoil = positiveOr(soil.Ksoil, soil.Ks_soil);
+				kRatio = positiveOr(soil.Ks_soil / ksoil, 1.0);
+			}
+			double rsp = Math.min(rt.RSR * rel * kRatio / 1e6, rt.RSR_max);
+			if (isBad(rsp) || rsp <= 0.0) rsp = rt.RSR_max;
+			return rsp;
+		}
+
+	RootWaterCandidate evalXylemWaterPotentialCandidate(double plantWaterFlux, double[] fluxFractions) {
+		RootWaterCandidate c = new RootWaterCandidate();
+		c.xylemWaterPotential = inputWaterPotential;
+		c.ABA = 0.0;
+		c.meanWaterPotential = 0.0;
+		c.weightedMeanWaterPotential = 0.0;
+		c.valid = false;
+
+		int validCount = 0;
+		for (int i = 0; frIDs != null && i < frIDs.length; i++) {
+			FineRoot rt = getFineRootAt(i);
+			Soil soil = getSoilAt(i);
+			if (rt == null || soil == null) continue;
+
+			double fraction = 0.0;
+			if (fluxFractions != null && i < fluxFractions.length) fraction = Math.max(0.0, fluxFractions[i]);
+			double layerWaterFlux = fraction * plantWaterFlux;
+			double relativeRSR = (relative_RSR != null && i < relative_RSR.length) ? relative_RSR[i] : 1.0;
+			double rsp = candidateRsp(rt, soil, relativeRSR);
+				double rootSurfacePsi = soil.waterPotential - rsp * layerWaterFlux;
+				if (isBad(rootSurfacePsi)) rootSurfacePsi = inputWaterPotential;
+
+				PlantBase pb = getPlantBase();
+				double leafAreaForABA = (pb != null) ? positiveOr(pb.leafArea, 0.12) : 0.12;
+				double sunFraction = (pb != null && !isBad(pb.sunExposedLeafFraction) && pb.sunExposedLeafFraction > 0.0) ? pb.sunExposedLeafFraction : 1.0;
+				double safeRootProp = Math.max(positiveOr(rt.fiRootProportion, 1e-6), 1e-6);
+				double normalizedWaterFlux = layerWaterFlux / leafAreaForABA
+					* max(0.12, 0.12 / max(0.1, sunFraction * safeRootProp));
+				if (isBad(normalizedWaterFlux) || normalizedWaterFlux < 0.0) normalizedWaterFlux = 0.1;
+
+				double denom = normalizedWaterFlux + rt.eq3_b;
+				if (isBad(denom) || Math.abs(denom) < 1e-9) denom = 1e-9;
+				double abaCandidate = rt.eq3_constit + (-rt.eq3_a * rootSurfacePsi) / denom;
+				if (isBad(abaCandidate) || abaCandidate <= 0.0) abaCandidate = 20.0;
+
+				double ampliCandidate = candidateRootAmplitude(rt);
+				double grCircadCandidate = (cos((hourOfDay - sunriseTime) * PI / 12) * ampliCandidate) * rt.Taucircadgr * safeRootProp;
+				if (isBad(grCircadCandidate)) grCircadCandidate = 0.0;
+				double safeGrmin = Math.max(positiveOr(rt.Grmin, 1e-12), 1e-12);
+				double safeGrmax = Math.max(positiveOr(rt.Grmax, safeGrmin), safeGrmin);
+				double grTranspiCandidate = clampDouble(rt.Tautranspigr * layerWaterFlux, safeGrmin, safeGrmax);
+				double grABACandidate = clampDouble(rt.TauABAgr * log(positiveOr(abaCandidate, 20.0) / 20.0) * safeRootProp, -0.95, 10.0);
+				double baseGr = safeGrmin + grCircadCandidate + grTranspiCandidate;
+				if (isBad(baseGr) || baseGr <= 0.0) baseGr = safeGrmin;
+				double grCandidate = clampDouble(baseGr * Math.max(0.05, 1.0 + grABACandidate), safeGrmin, safeGrmax);
+				if (isBad(grCandidate) || grCandidate <= 0.0) grCandidate = safeGrmin;
+
+			double rootXylemPsi = Math.max(-3.5, rootSurfacePsi - layerWaterFlux / grCandidate);
+			if (Double.isNaN(rootXylemPsi) || Double.isInfinite(rootXylemPsi)) continue;
+
+			c.meanWaterPotential += rootXylemPsi * (1.0 / frIDs.length);
+			c.weightedMeanWaterPotential += rootXylemPsi * fraction;
+			c.ABA += abaCandidate * fraction;
+			validCount++;
+		}
+
+		if (validCount > 0) {
+			c.xylemWaterPotential = c.weightedMeanWaterPotential;
+			c.valid = !(Double.isNaN(c.xylemWaterPotential) || Double.isInfinite(c.xylemWaterPotential)
+				|| Double.isNaN(c.ABA) || Double.isInfinite(c.ABA));
+		}
+		return c;
+	}
+
+	void commitXylemWaterPotentialCandidate(double plantWaterFlux, double[] fluxFractions) {
+		weightedMeanWaterPotential = 0.0;
+		meanWaterPotential = 0.0;
+		meanABA = 0.0;
+
+		int validCount = 0;
+		for (int i = 0; frIDs != null && i < frIDs.length; i++) {
+			FineRoot rt = getFineRootAt(i);
+			Soil soil = getSoilAt(i);
+			if (rt == null || soil == null) continue;
+
+			double fraction = 0.0;
+			if (fluxFractions != null && i < fluxFractions.length) {
+				fraction = Math.max(0.0, fluxFractions[i]);
+				fluxFractions[i] = fraction;
+			}
+			double layerWaterFlux = fraction * plantWaterFlux;
+			double relativeRSR = (relative_RSR != null && i < relative_RSR.length) ? relative_RSR[i] : 1.0;
+
+				rt.calcRootLengthPerVolumn();
+				rt.Rsp = candidateRsp(rt, soil, relativeRSR);
+				rt.waterPotentialRootSurface = soil.waterPotential - rt.Rsp * layerWaterFlux;
+				if (isBad(rt.waterPotentialRootSurface)) rt.waterPotentialRootSurface = inputWaterPotential;
+
+				PlantBase pb = getPlantBase();
+				double leafAreaForABA = (pb != null) ? positiveOr(pb.leafArea, 0.12) : 0.12;
+				double sunFraction = (pb != null && !isBad(pb.sunExposedLeafFraction) && pb.sunExposedLeafFraction > 0.0) ? pb.sunExposedLeafFraction : 1.0;
+				double safeRootProp = Math.max(positiveOr(rt.fiRootProportion, 1e-6), 1e-6);
+				double normalizedWaterFlux = layerWaterFlux / leafAreaForABA
+					* max(0.12, 0.12 / max(0.1, sunFraction * safeRootProp));
+				if (isBad(normalizedWaterFlux) || normalizedWaterFlux < 0.0) normalizedWaterFlux = 0.1;
+
+				double denom = normalizedWaterFlux + rt.eq3_b;
+				if (isBad(denom) || Math.abs(denom) < 1e-9) denom = 1e-9;
+				rt.ABA = rt.eq3_constit + (-rt.eq3_a * rt.waterPotentialRootSurface) / denom;
+				if (isBad(rt.ABA) || rt.ABA <= 0.0) rt.ABA = 20.0;
+
+				int d = day;
+				if (d < 0) d = 0;
+				if (d >= rt.ampli.length) d = rt.ampli.length - 1;
+				double wp = isBad(rt.waterPotential) ? inputWaterPotential : rt.waterPotential;
+				rt.Psixylmax[d] = max(isBad(rt.Psixylmax[d]) ? wp : rt.Psixylmax[d], wp);
+				rt.Psixylmin[d] = min(isBad(rt.Psixylmin[d]) ? wp : rt.Psixylmin[d], wp);
+				rt.ampli[d] = Math.max(0.0, rt.Psixylmax[d] - rt.Psixylmin[d]);
+				if (d > 1) {
+					double prevMax = isBad(rt.Psixylmax[d - 2]) ? rt.Psixylmax[d] : rt.Psixylmax[d - 2];
+					double prevMin = isBad(rt.Psixylmin[d - 2]) ? rt.Psixylmin[d] : rt.Psixylmin[d - 2];
+					rt.ampli[d] = Math.max(0.0, prevMax - prevMin);
+				}
+
+					double safeGrmin = Math.max(positiveOr(rt.Grmin, 1e-12), 1e-12);
+				double safeGrmax = Math.max(positiveOr(rt.Grmax, safeGrmin), safeGrmin);
+				rt.Grcircad = (cos((hourOfDay - sunriseTime) * PI / 12) * rt.ampli[d]) * rt.Taucircadgr * safeRootProp;
+				if (isBad(rt.Grcircad)) rt.Grcircad = 0.0;
+				rt.Grtranspi = clampDouble(rt.Tautranspigr * layerWaterFlux, safeGrmin, safeGrmax);
+				rt.GrABA = clampDouble(rt.TauABAgr * log(positiveOr(rt.ABA, 20.0) / 20.0) * safeRootProp, -0.95, 10.0);
+				double baseGr = safeGrmin + rt.Grcircad + rt.Grtranspi;
+				if (isBad(baseGr) || baseGr <= 0.0) baseGr = safeGrmin;
+				rt.Gr = clampDouble(baseGr * Math.max(0.05, 1.0 + rt.GrABA), safeGrmin, safeGrmax);
+				if (isBad(rt.Gr) || rt.Gr <= 0.0) rt.Gr = safeGrmin;
+			rt.Ka = rt.Gr;
+			rt.waterPotential = Math.max(-3.5, rt.waterPotentialRootSurface - layerWaterFlux / rt.Gr);
+
+			if (Double.isNaN(rt.waterPotential) || Double.isInfinite(rt.waterPotential)) continue;
+			meanWaterPotential += rt.waterPotential * (1.0 / frIDs.length);
+			weightedMeanWaterPotential += rt.waterPotential * fraction;
+			meanABA += rt.ABA * fraction;
+			validCount++;
+		}
+
+		if (validCount > 0 && step >= 1) {
+			PlantBase pb = getPlantBase();
+			if (pb != null) {
+				pb.xylemWaterPotential = weightedMeanWaterPotential;
+				pb.ABA = meanABA;
+			}
+		}
+	}
+
+		/**
+	 * Calculates the xylem water potential for different soil layers.
+	 *
+ * <p>
+ * This method is responsible for calculating the xylem water potential for 
+ * each FineRoot object in the root system, based on the provided water flux
+ * and flux allocation array. The method also updates the
+ * xylem water potential of the PlantBase object.
+ * </p>
+ *
+ * @param plantWaterFlux  The optimized plant water flux.
+ * @param f_flux          The array that specifies how the water flux is to be allocated across layers.
+ *
+ * @see FineRoot
+ * @see PlantBase
+ */
+void calcXylemWaterPotential(double plantWaterFlux, double[] f_flux) {
+	weightedMeanWaterPotential = 0.0;   
+	meanWaterPotential = 0.0;
+	meanABA = 0.0;
+
+	// Calculate the total soil to root conductance
+	for (int i = 0; frIDs != null && i < frIDs.length; i++) {
+		FineRoot rt = getFineRootAt(i);
+		Soil soil = getSoilAt(i); // direct soil access from slIDs
+
+		// if (printFlag) { println("Processing FineRoot at index " + i); }
+
+		// Skip if root or its associated soil layer is null
+		if (rt == null || soil == null) {
+			/*
+			if (printFlag) {
+				println("Skipping calculations for index " + i + " due to null FineRoot or soil layer.");
+			}
+			*/
+			continue;
+		}
+
+		// if (printFlag) { println(availalbeWater[i] + "availalbeWater"); }
+		// if (f_flux[i] * plantWaterFlux * 3600 > availalbeWater[i])
+
+		try {
+			// Perform calculations
+			f_flux[i] = Math.max(0, f_flux[i]);
+			rt.calcRootLengthPerVolumn();
+			rt.calcRspSoilToRoot(relative_RSR[i]);
+			rt.calcPsir(f_flux[i] * plantWaterFlux);
+			rt.calcABA(f_flux[i] * plantWaterFlux, rt.fiRootProportion);
+			rt.calcAmpli();
+			rt.calcRootConductance(f_flux[i] * plantWaterFlux);
+			rt.calcPsixyl_without_Jxc(f_flux[i] * plantWaterFlux);
+
+			// summarise information
+			meanWaterPotential += rt.waterPotential * (1.0 / frIDs.length);
+			weightedMeanWaterPotential += rt.waterPotential * f_flux[i];
+			meanABA += rt.ABA * f_flux[i];
+			
+			//println("layer i:" + i + " " + rt.waterPotential + " weightedMeanWaterPotential: " + weightedMeanWaterPotential);		
+		} catch (Exception e) {
+			if (printFlag) {
+				println("Error processing FineRoot at index " + i + ": " + e.getMessage());
+			}
+		}
+	}
+
+	// Update plant xylem water potential and ABA
+	if (step >= 1) {
+		/*
+		if (Double.isNaN(meanXylemWaterPotential)) 
+			println("Warning meanXylemWaterPotential is nan");
+		*/
+		PlantBase pb = getPlantBase();
+		if (pb != null) {
+			pb.xylemWaterPotential = weightedMeanWaterPotential;
+			pb.ABA = meanABA;
+		}
+		// println("weightedMeanWaterPotential:" + weightedMeanWaterPotential);
+	}
+
+	// Check for NaN after calculations
+	if (debug) {
+		checkForNaN(printFlag,
+			"plantXylemWaterPotential", weightedMeanWaterPotential,
+			"meanABA", meanABA
+			// Add other relevant variables here if needed
+		);
+	}
+}
+
+
+
+/**
+ * This method is mainly for connecting with the soil model in the DHS platform. 
+ * Updates the water uptake by fine roots based on plant water flux and flux distribution.
+ * This method calculates water uptake for each fine root in the array and converts 
+ * the values into millimeters (mm) of water uptake.
+ * 
+ * <p><b>Calculation Breakdown:</b></p>
+ * <ul>
+ *   <li>Converts soil layer volume to area (m³ to m²).</li>
+ *   <li>Calculates water uptake in kg/m² (equivalent to mm of water).</li>
+ *   <li>Skips calculations if the fine root or soil layer data is null.</li>
+ * </ul>
+ *
+ * @param plantWaterFlux The total water flux of the plant (mg/s).
+ * @param f_flux         An array representing the fractional distribution of water uptake 
+ *                       across fine roots.
+ */
+void updateWaterUptake(double plantWaterFlux, double[] f_flux) {
+    for (int i = 0; frIDs != null && i < frIDs.length; i++) {
+        FineRoot rt = getFineRootAt(i);
+        Soil soil = getSoilAt(i);
+
+        // Skip iteration if FineRoot object or soil layer data is missing
+        if (rt == null || soil == null) {
+            continue;
+        }
+
+        // Convert soil volume to area (m³ to m²)
+        double area = soil.volume / soil.length;
+        availalbeWater[i] = soil.PAW_mm;
+        // Convert water uptake from mg/s to mm:
+        // - f_flux[i] * plantWaterFlux gives uptake in mg/s per root
+        // - Multiply by 3600 to convert mg/s to mg/h
+        // - Convert mg to kg (1e6 mg = 1 kg)
+        // - Divide by area to get kg/m² (equivalent to mm)
+        double waterUptake = Math.max(0, f_flux[i]) * plantWaterFlux * 3600 / 1e6;
+        rt.waterFlux = Math.max(0, f_flux[i]) * plantWaterFlux;
+        waterUptake_mm[i] = waterUptake / area; // kg/m² = L/m² = mm
+        
+    }
+}
+
+
+
+/**
+ * Update nitrogen uptake per fine root (mirrors updateWaterUptake).
+ * - Calls each root's calcNitrogenUptake() (which should set rt.Nuptake_mgph).
+ * - Stores per-layer uptake in mg N m⁻² h⁻¹ (area-normalized by soil layer area).
+ * - Accumulates plant-level total in mg N h⁻¹.
+ *
+ * Assumptions:
+ *  - soil.volume is the layer volume (m³), soil.length is the layer thickness (m),
+ *    so area = volume / length (m²).
+ *  - FineRoot exposes 'Nuptake_mgph' after calcNitrogenUptake() (mg N h⁻¹).
+ */
+void updateNitrogenUptake() {
+
+    for (int i = 0; frIDs != null && i < frIDs.length; i++) {
+        FineRoot rt = getFineRootAt(i);
+        Soil soil   = getSoilAt(i);
+
+        // Skip if data missing
+        if (rt == null || soil == null) {
+            // keep previous nitrogenUptake_mgm2[i] value or set to zero if you prefer:
+            // nitrogenUptake_mgm2[i] = 0.0;
+            continue;
+        }
+
+        // Convert soil volume to area (m³ -> m²)
+        // NOTE: guard against zero/negative length
+        double areaLen = (soil.length > 1e-12) ? soil.length : 1e-12;
+        double area    = soil.volume / areaLen; // m²
+
+        // Have the root compute its own uptake (mg N h⁻¹)
+        rt.calcNitrogenUptake();
+
+        // Read root-specific uptake (rename if your field differs)
+        double nuptake_mgph = rt.Nuptake;
+
+        // Clamp negatives (numerical safety)
+        if (nuptake_mgph < 0.0) nuptake_mgph = 0.0;
+
+        // Area-normalized uptake: mg N m⁻² h⁻¹
+        // mg h⁻¹ divided by m² = mg m⁻² h⁻¹
+        nitrogenUptake_mgm2[i] = nuptake_mgph / ((area > 1e-12) ? area : 1e-12);
+
+        // Sum plant-level uptake (mg N h⁻¹)
+        totalNuptake_step += nuptake_mgph;
+       // println("fiRootProportion: " + fiRootProportion[i] + " nuptake_mgph: " + nuptake_mgph + " totalNuptake: " + totalNuptake);
+    }
+
+    // Store plant-level total (mg N h⁻¹)
+    this.totalNuptake_overTime += totalNuptake_step;
+    
+    PlantBase pb = getPlantBase();
+	if (pb != null) {
+		pb.Nuptake = totalNuptake_step;
+	}
+		
+}
+
+
+/**
+ * Aggregates fine-root carbon flux diagnostics after fine-root updates.
+ * Units: mg C step-1 for step totals and mg C for cumulative totals.
+ */
+public void updateFineRootTurnoverAndExudation() {
+	int layers = (frIDs != null) ? frIDs.length : numofSoilLayers;
+	if (layers < 0) layers = 0;
+
+	if (fineRootExudation_mg == null || fineRootExudation_mg.length != layers) {
+		fineRootExudation_mg = new double[layers];
+		fineRootTurnover_mg = new double[layers];
+		fineRootExudation_cum_mg = new double[layers];
+		fineRootTurnover_cum_mg = new double[layers];
+	}
+
+	fineRootExudation_total_mg = 0.0;
+	fineRootTurnover_total_mg = 0.0;
+
+	for (int i = 0; i < layers; i++) {
+		FineRoot fr = getFineRootAt(i);
+		double exu = 0.0;
+		double tur = 0.0;
+
+		if (fr != null) {
+			exu = Math.max(0.0, fr.rootExudation);
+			tur = Math.max(0.0, (double) fr.rootTurnover);
+		}
+
+		fineRootExudation_mg[i] = exu;
+		fineRootTurnover_mg[i] = tur;
+		fineRootExudation_total_mg += exu;
+		fineRootTurnover_total_mg += tur;
+		fineRootExudation_cum_mg[i] += exu;
+		fineRootTurnover_cum_mg[i] += tur;
+	}
+
+	fineRootExudation_total_cum_mg += fineRootExudation_total_mg;
+	fineRootTurnover_total_cum_mg += fineRootTurnover_total_mg;
+}
+
+
+
+
+/**
+ * Hard-reset layered root dry matter and carbon pools from a target total root biomass.
+ * Units: biomass in mg DM, carbon pools in mg C.
+ */
+public void updateLayeredRootBiomassAndCarbon(double totalRootDMTarget) {
+	if (Double.isNaN(totalRootDMTarget) || Double.isInfinite(totalRootDMTarget) || totalRootDMTarget < 0) {
+		totalRootDMTarget = 0.0;
+	}
+
+	int frLen = (frIDs != null) ? frIDs.length : 0;
+	int srLen = (srIDs != null) ? srIDs.length : 0;
+	int nLayers = Math.max(1, numofSoilLayers);
+	if (nLayers <= 0) return;
+
+	double[] fineCurrentByLayer = new double[nLayers];
+	double[] strCurrentByLayer = new double[nLayers];
+	double[] fineWeightByLayer = new double[nLayers];
+	double[] strWeightByLayer = new double[nLayers];
+	int[] fineCountByLayer = new int[nLayers];
+	int[] strCountByLayer = new int[nLayers];
+	double fineCurrent = 0.0;
+	double strCurrent = 0.0;
+
+	int i;
+	for (i = 0; i < frLen; i++) {
+		FineRoot fr = getFineRootAt(i);
+		if (fr != null) {
+			int layer = fr.layer;
+			if (layer < 0) layer = 0;
+			if (layer >= nLayers) layer = nLayers - 1;
+			double v = safeNonNegative(fr.biomass);
+			fineCurrentByLayer[layer] += v;
+			fineWeightByLayer[layer] += safeNonNegative(fr.fiRootProportion);
+			fineCountByLayer[layer]++;
+			fineCurrent += v;
+		}
+	}
+	for (i = 0; i < srLen; i++) {
+		StructuralRoot sr = getStructuralRootAt(i);
+		if (sr != null) {
+			int layer = sr.layer;
+			if (layer < 0) layer = 0;
+			if (layer >= nLayers) layer = nLayers - 1;
+			double v = safeNonNegative(sr.biomass);
+			strCurrentByLayer[layer] += v;
+			strWeightByLayer[layer] += safeNonNegative(sr.stRootProportion);
+			strCountByLayer[layer]++;
+			strCurrent += v;
+		}
+	}
+	double totalCurrent = fineCurrent + strCurrent;
+
+	double fineFrac;
+	if (totalCurrent > 1e-12) {
+		fineFrac = fineCurrent / totalCurrent;
+	} else {
+		fineFrac = PERCENT_FINE_ROOT;
+	}
+	if (fineFrac < 0.0) fineFrac = 0.0;
+	if (fineFrac > 1.0) fineFrac = 1.0;
+
+	double fineTarget = totalRootDMTarget * fineFrac;
+	double strTarget = totalRootDMTarget - fineTarget;
+	if (strTarget < 0.0) strTarget = 0.0;
+
+	double[] fineLayerFrac = new double[nLayers];
+	double[] strLayerFrac = new double[nLayers];
+	double fineLayerFracSum = 0.0;
+	double strLayerFracSum = 0.0;
+	for (i = 0; i < nLayers; i++) {
+		fineLayerFrac[i] = safeNonNegative(fineWeightByLayer[i]);
+		strLayerFrac[i] = safeNonNegative(strWeightByLayer[i]);
+		fineLayerFracSum += fineLayerFrac[i];
+		strLayerFracSum += strLayerFrac[i];
+	}
+	if (fineLayerFracSum <= 1e-12) {
+		for (i = 0; i < nLayers; i++) {
+			fineLayerFrac[i] = safeNonNegative(fineCurrentByLayer[i]);
+			fineLayerFracSum += fineLayerFrac[i];
+		}
+	}
+	if (strLayerFracSum <= 1e-12) {
+		for (i = 0; i < nLayers; i++) {
+			strLayerFrac[i] = safeNonNegative(strCurrentByLayer[i]);
+			strLayerFracSum += strLayerFrac[i];
+		}
+	}
+	if (fineLayerFracSum <= 1e-12) {
+		int countLayers = 0;
+		for (i = 0; i < nLayers; i++) if (fineCountByLayer[i] > 0) countLayers++;
+		if (countLayers > 0) {
+			for (i = 0; i < nLayers; i++) fineLayerFrac[i] = (fineCountByLayer[i] > 0) ? 1.0 / countLayers : 0.0;
+			fineLayerFracSum = 1.0;
+		}
+	}
+	if (strLayerFracSum <= 1e-12) {
+		int countLayers = 0;
+		for (i = 0; i < nLayers; i++) if (strCountByLayer[i] > 0) countLayers++;
+		if (countLayers > 0) {
+			for (i = 0; i < nLayers; i++) strLayerFrac[i] = (strCountByLayer[i] > 0) ? 1.0 / countLayers : 0.0;
+			strLayerFracSum = 1.0;
+		}
+	}
+	if (fineLayerFracSum <= 1e-12) {
+		for (i = 0; i < nLayers; i++) fineLayerFrac[i] = 1.0 / nLayers;
+	} else {
+		for (i = 0; i < nLayers; i++) fineLayerFrac[i] = fineLayerFrac[i] / fineLayerFracSum;
+	}
+	if (strLayerFracSum <= 1e-12) {
+		for (i = 0; i < nLayers; i++) strLayerFrac[i] = 1.0 / nLayers;
+	} else {
+		for (i = 0; i < nLayers; i++) strLayerFrac[i] = strLayerFrac[i] / strLayerFracSum;
+	}
+	double[] fineLayerTarget = new double[nLayers];
+	double[] strLayerTarget = new double[nLayers];
+	for (i = 0; i < nLayers; i++) {
+		fineLayerTarget[i] = fineTarget * fineLayerFrac[i];
+		strLayerTarget[i] = strTarget * strLayerFrac[i];
+	}
+
+
+	double fineAssigned = 0.0;
+	double strAssigned = 0.0;
+	FineRoot firstFine = null;
+	StructuralRoot firstStr = null;
+
+	for (i = 0; i < frLen; i++) {
+		FineRoot fr = getFineRootAt(i);
+		if (fr != null) {
+			if (firstFine == null) firstFine = fr;
+			int layer = fr.layer;
+			if (layer < 0) layer = 0;
+			if (layer >= nLayers) layer = nLayers - 1;
+			double denom = fineWeightByLayer[layer];
+			double share;
+			if (denom > 1e-12) {
+				share = safeNonNegative(fr.fiRootProportion) / denom;
+			} else if (fineCurrentByLayer[layer] > 1e-12) {
+				share = safeNonNegative(fr.biomass) / fineCurrentByLayer[layer];
+			} else {
+				share = 1.0 / Math.max(1, fineCountByLayer[layer]);
+			}
+			double oldC = safeNonNegative(fr.carbon_total);
+			double oldNSC = safeNonNegative(fr.carbon_nonStructure);
+			double nscFrac = resolveNSCFrac(oldC, oldNSC);
+			applyRootBiomassCarbonNitrogenReset(fr, fineLayerTarget[layer] * share, nscFrac);
+			fineAssigned += fr.biomass;
+		}
+	}
+	for (i = 0; i < nLayers; i++) {
+		if (fineCountByLayer[i] <= 0 && fineLayerTarget[i] > 1e-9 && printFlag) {
+			println("[RootReset] WARN no FineRoot in layer " + i + ", target DM=" + fineLayerTarget[i]);
+		}
+	}
+
+	for (i = 0; i < srLen; i++) {
+		StructuralRoot sr = getStructuralRootAt(i);
+		if (sr != null) {
+			if (firstStr == null) firstStr = sr;
+			int layer = sr.layer;
+			if (layer < 0) layer = 0;
+			if (layer >= nLayers) layer = nLayers - 1;
+			double denom = strWeightByLayer[layer];
+			double share;
+			if (denom > 1e-12) {
+				share = safeNonNegative(sr.stRootProportion) / denom;
+			} else if (strCurrentByLayer[layer] > 1e-12) {
+				share = safeNonNegative(sr.biomass) / strCurrentByLayer[layer];
+			} else {
+				share = 1.0 / Math.max(1, strCountByLayer[layer]);
+			}
+			double oldC = safeNonNegative(sr.carbon_total);
+			double oldNSC = safeNonNegative(sr.carbon_nonStructure);
+			double nscFrac = resolveNSCFrac(oldC, oldNSC);
+			applyRootBiomassCarbonNitrogenReset(sr, strLayerTarget[layer] * share, nscFrac);
+			strAssigned += sr.biomass;
+		}
+	}
+	for (i = 0; i < nLayers; i++) {
+		if (strCountByLayer[i] <= 0 && strLayerTarget[i] > 1e-9 && printFlag) {
+			println("[RootReset] WARN no StructuralRoot in layer " + i + ", target DM=" + strLayerTarget[i]);
+		}
+	}
+
+	if (firstFine != null) {
+		double rem = fineTarget - fineAssigned;
+		if (Math.abs(rem) > 1e-6) {
+			double nscFrac = resolveNSCFrac(firstFine.carbon_total, firstFine.carbon_nonStructure);
+			applyRootBiomassCarbonNitrogenReset(firstFine, Math.max(0.0, firstFine.biomass + rem), nscFrac);
+		}
+	}
+	if (firstStr != null) {
+		double rem = strTarget - strAssigned;
+		if (Math.abs(rem) > 1e-6) {
+			double nscFrac = resolveNSCFrac(firstStr.carbon_total, firstStr.carbon_nonStructure);
+			applyRootBiomassCarbonNitrogenReset(firstStr, Math.max(0.0, firstStr.biomass + rem), nscFrac);
+		}
+	}
+
+	refreshPlantRootAggregates();
+
+	if (printFlag) {
+		println("[RootReset] totalTarget=" + totalRootDMTarget + " fineFrac=" + fineFrac +
+			" fineTarget=" + fineTarget + " strTarget=" + strTarget);
+		double chkFine = 0.0;
+		double chkStr = 0.0;
+		double chkC = 0.0;
+		double chkNSC = 0.0;
+		double[] gotFineByLayer = new double[nLayers];
+		double[] gotStrByLayer = new double[nLayers];
+		for (i = 0; i < frLen; i++) {
+			FineRoot fr = getFineRootAt(i);
+			if (fr != null) {
+				int layer = fr.layer;
+				if (layer < 0) layer = 0;
+				if (layer >= nLayers) layer = nLayers - 1;
+				gotFineByLayer[layer] += fr.biomass;
+				chkFine += fr.biomass;
+				chkC += fr.carbon_total;
+				chkNSC += fr.carbon_nonStructure;
+			}
+		}
+		for (i = 0; i < srLen; i++) {
+			StructuralRoot sr = getStructuralRootAt(i);
+			if (sr != null) {
+				int layer = sr.layer;
+				if (layer < 0) layer = 0;
+				if (layer >= nLayers) layer = nLayers - 1;
+				gotStrByLayer[layer] += sr.biomass;
+				chkStr += sr.biomass;
+				chkC += sr.carbon_total;
+				chkNSC += sr.carbon_nonStructure;
+			}
+		}
+		for (i = 0; i < nLayers; i++) {
+			println("[RootReset] layer=" + i + " targetFine=" + fineLayerTarget[i] + " targetStr=" + strLayerTarget[i] +
+				" gotFine=" + gotFineByLayer[i] + " gotStr=" + gotStrByLayer[i]);
+		}
+		println("[RootReset] achieved fine=" + chkFine + " structural=" + chkStr + " total=" + (chkFine + chkStr));
+		println("[RootReset] carbon total=" + chkC + " nsc=" + chkNSC);
+	}
+}
+
+private double[] resolveRootLayerFractionsByType(int nLayers, boolean isFineRoot,
+		double[] fineCurrentByLayer, double[] strCurrentByLayer, double totalCurrent) {
+	double[] frac = new double[nLayers];
+	double sum = 0.0;
+
+	for (int i = 0; i < nLayers; i++) {
+		if (isFineRoot) {
+			FineRoot fr = (i < ((frIDs != null) ? frIDs.length : 0)) ? getFineRootAt(i) : null;
+			double w = (fr != null) ? safeNonNegative(fr.fiRootProportion) : 0.0;
+			frac[i] = w;
+			sum += w;
+		} else {
+			StructuralRoot sr = (i < ((srIDs != null) ? srIDs.length : 0)) ? getStructuralRootAt(i) : null;
+			double w = (sr != null) ? safeNonNegative(sr.stRootProportion) : 0.0;
+			frac[i] = w;
+			sum += w;
+		}
+	}
+
+	if (sum > 1e-12) {
+		for (int i = 0; i < nLayers; i++) frac[i] = frac[i] / sum;
+		return frac;
+	}
+
+	if (totalCurrent > 1e-12) {
+		for (int i = 0; i < nLayers; i++) {
+			double v = isFineRoot ? fineCurrentByLayer[i] : strCurrentByLayer[i];
+			frac[i] = safeNonNegative(v);
+			sum += frac[i];
+		}
+		if (sum > 1e-12) {
+			for (int i = 0; i < nLayers; i++) frac[i] = frac[i] / sum;
+			return frac;
+		}
+	}
+
+	double uniform = 1.0 / nLayers;
+	for (int i = 0; i < nLayers; i++) frac[i] = uniform;
+	return frac;
+}
+
+private double resolveNSCFrac(double oldC, double oldNSC) {
+	if (oldC > 1e-12) {
+		double f = oldNSC / oldC;
+		if (Double.isNaN(f) || Double.isInfinite(f)) return 0.1;
+		if (f < 0.0) f = 0.0;
+		if (f > 1.0) f = 1.0;
+		return f;
+	}
+	return 0.1;
+}
+
+private void applyRootBiomassCarbonNitrogenReset(GrowingOrgan root, double dmTarget, double nscFrac) {
+	double dm = safeNonNegative(dmTarget);
+	root.biomass = dm;
+	root.freshWeight = dm / (1.0 - root.waterContent);
+
+	// Carbon pools (mg C)
+	double cTot = dm * root.C_content;
+	if (Double.isNaN(cTot) || Double.isInfinite(cTot) || cTot < 0.0) cTot = 0.0;
+	if (nscFrac < 0.0) nscFrac = 0.0;
+	if (nscFrac > 1.0) nscFrac = 1.0;
+	root.carbon_total = cTot;
+	root.carbon_nonStructure = cTot * nscFrac;
+	if (root.carbon_nonStructure > cTot) root.carbon_nonStructure = cTot;
+	root.carbon_structure = cTot - root.carbon_nonStructure;
+	if (root.carbon_structure < 0.0) root.carbon_structure = 0.0;
+	if (root.carbon_total > 0.0) {
+		root.fNSC = root.carbon_nonStructure / root.carbon_total;
+	} else {
+		root.fNSC = 0.0;
+	}
+	if (root.carbon_structure > 1e-12) {
+		root.fNSCtoSC = root.carbon_nonStructure / root.carbon_structure;
+	} else {
+		root.fNSCtoSC = 0.0;
+	}
+	if (root.maxRes > 0.0 && root.maxRes < 0.999999) {
+		root.carbon_nonStructure_max = root.carbon_structure * root.maxRes / (1.0 - root.maxRes);
+	} else {
+		root.carbon_nonStructure_max = root.carbon_nonStructure;
+	}
+
+	// Nitrogen pools (mg N) aligned with root initiate_pb() formulas
+	root.nitrogen_total = dm * root.Nm;
+	root.nitrogen_structure = dm * root.Nm_min;
+	root.nitrogen_nonStructure = root.nitrogen_total * (1 - N_CONTENT_MOBILE) - root.nitrogen_structure;
+	if (root.nitrogen_nonStructure < 0.0) root.nitrogen_nonStructure = 0.0;
+	root.nitrogen_mobile = root.nitrogen_total * N_CONTENT_MOBILE;
+
+	root.structureDM_PRI_PT = 0.0;
+	root.structureDM_SEC_PT = 0.0;
+	root.maintenanceDM_PT = 0.0;
+	root.reserveDM_PT = 0.0;
+	root.loading_PT = 0.0f;
+	root.delta_str = 0.0;
+	root.delta_NSC = 0.0;
+
+	if (root instanceof FineRoot) {
+		FineRoot fr = (FineRoot) root;
+		fr.length = fr.biomass * fr.SRL;
+		fr.rootExudation_PT = 0.0;
+		fr.rootExudation = 0.0;
+		fr.rootTurnover = 0.0f;
+		fr.Grmax = fr.Grmax_a * fr.biomass + fr.Grmax_b;
+	} else if (root instanceof StructuralRoot) {
+		StructuralRoot sr = (StructuralRoot) root;
+		if (sr.area > 1e-12 && sr.density > 1e-12) {
+			sr.length = sr.biomass / (sr.area * sr.density);
+		}
+		sr.calcKmax();
+		sr.calcKa();
+	}
+}
+
+private void refreshPlantRootAggregates() {
+	PlantBase pb = getPlantBase();
+	if (pb == null) return;
+	double fine = 0.0;
+	double str = 0.0;
+	double fineNSC = 0.0;
+	double strNSC = 0.0;
+	for (int i = 0; frIDs != null && i < frIDs.length; i++) {
+		FineRoot fr = getFineRootAt(i);
+		if (fr != null) {
+			fine += safeNonNegative(fr.biomass);
+			fineNSC += safeNonNegative(fr.carbon_nonStructure);
+		}
+	}
+	for (int i = 0; srIDs != null && i < srIDs.length; i++) {
+		StructuralRoot sr = getStructuralRootAt(i);
+		if (sr != null) {
+			str += safeNonNegative(sr.biomass);
+			strNSC += safeNonNegative(sr.carbon_nonStructure);
+		}
+	}
+	pb.biomassFineRoot = fine;
+	pb.biomassStructuralRoot = str;
+	pb.fineRootNSC = fineNSC;
+	pb.structuralRootNSC = strNSC;
+	BIOMASS_ROOT = fine + str;
+	if (BIOMASS_WOOD > 1e-9) {
+		StrRootToTrunk = BIOMASS_ROOT / BIOMASS_WOOD;
+	}
+}
+
+private double safeNonNegative(double v) {
+	if (Double.isNaN(v) || Double.isInfinite(v) || v < 0.0) return 0.0;
+	return v;
+}
+
+public boolean verifyLayeredRootBiomassAndCarbon(double targetRootDM, double absTolerance) {
+	double tol = Math.max(1e-3, Math.max(0.0, absTolerance));
+	double fine = 0.0;
+	double str = 0.0;
+	for (int i = 0; frIDs != null && i < frIDs.length; i++) {
+		FineRoot fr = getFineRootAt(i);
+		if (fr != null) fine += safeNonNegative(fr.biomass);
+	}
+	for (int i = 0; srIDs != null && i < srIDs.length; i++) {
+		StructuralRoot sr = getStructuralRootAt(i);
+		if (sr != null) str += safeNonNegative(sr.biomass);
+	}
+	double achieved = fine + str;
+	double diff = Math.abs(achieved - safeNonNegative(targetRootDM));
+	boolean ok = diff <= tol;
+	if (printFlag) {
+		println("[RootResetVerify] target=" + targetRootDM + " achieved=" + achieved + " diff=" + diff + " tol=" + tol + " pass=" + ok);
+	}
+	return ok;
+}
+
+
+
+/**
+ * Calculates the water stress response factor (alpha) based on the Feddes et al. (1978) model.
+ 
+ * the value is equal to f_waterFlux in this model
+ * The function determines how soil water pressure head (h) affects plant water uptake
+ * Instead of using traditional soil water pressure head values, this implementation replaces 
+ * water head with **negative water potential** to ensure consistency with other parts of the model.
+ *
+ * **Behavior:**
+ * - **h > h1**  → **0** (Waterlogging effect, no uptake).
+ * - **h1 ≥ h > h2** → **Linear decrease** from 1 to 0.
+ * - **h2 ≥ h > h3** → **1** (Optimal water uptake).
+ * - **h3 ≥ h > h4** → **Linear increase** from 0 to 1.
+ * - **h ≤ h4** → **0** (Severe drought, no uptake).
+ *
+  * **Parameters:**
+ * @param h   The soil water pressure head (MPa). A negative value indicates water tension.
+ * @param h1  The upper threshold (-0.001 MPa = -10 cm) where **waterlogging occurs** (alpha = 0).
+ * @param h2  The lower threshold (-0.0025 MPa = -25 cm) where **maximum water uptake occurs** (alpha = 1).
+ * @param h3  The lower threshold (-0.03 MPa = -300 cm) where **water uptake starts decreasing** (alpha = 1).
+ * @param h4  The lower threshold (-1.5 MPa = -15000 cm) where **severe drought occurs** (alpha = 0).
+ *
+ * **Returns:**
+ * @return The reduction factor (alpha) for water uptake:
+ *         - **0.0** → No uptake (`h > h1` or `h ≤ h4`).
+ *         - **Linear decrease** → `h1 ≥ h > h2`.
+ *         - **1.0** → Optimal uptake (`h2 ≥ h > h3`).
+ *         - **Linear increase** → `h3 ≥ h > h4`.
+ */
+double calcAlpha(double h, 
+	double h1, 
+	double h2, 
+	double h3, 
+	double h4) {
+    if (h > h1) {
+        return 0.0;  // Waterlogging effect (h > h1), no uptake
+    } else if (h1 >= h && h > h2) {
+        return (h1 - h) / (h1 - h2);  // Linear decrease from h1 to h2
+    } else if (h2 >= h && h > h3) {
+        return 1.0;  // Optimal water uptake (constant alpha = 1)
+    } else if (h3 >= h && h > h4) {
+        return (h - h4) / (h3 - h4);  // Linear increase from h4 to h3
+    } else {
+        return 0.0;  // Severe drought (h ≤ h4), no uptake
+    }
+}
+
+/**
+ * Checks if any soil layer is experiencing waterlogging.
+ * Waterlogging occurs if the water potential of any soil layer exceeds its h2 threshold.
+ *
+ * @return true if at least one soil layer has a water potential greater than h2, otherwise false.
+ */
+public boolean isWaterLogging() {
+    if (slIDs == null || slIDs.length == 0) {
+        return false; // Handle case where slIDs is null or empty
+    }
+
+    for (int i = 0; i < slIDs.length; i++) {
+        Soil soil = getSoilAt(i);
+
+        if (soil != null && soil.waterPotential > soil.h2) {
+            return true; // Found a waterlogged layer
+        }
+    }
+
+    return false; // No waterlogging detected
+}
+
+
+	
+/**
+ * Calculates the overall water stress reduction factor for the entire root zone
+ * based on soil water pressure heads, and fraction of fine root across multiple soil layers.
+ *
+ * @param negative pressureHeads Array of soil water pressure heads (h) for each soil layer (cm). 
+ * @param fiRootProportions Array of fine root proportions in each layer.
+ * @param h1 The upper limit of soil water pressure head (cm) where alpha is 0.
+ * @param h2 The lower limit where alpha starts decreasing (alpha = 1).
+ * @param h3 The lower limit where alpha starts increasing (alpha = 1).
+ * @param h4 The lower limit where alpha is 0.
+ * @return The overall reduction factor (alpha) for water uptake across all soil layers.
+ */
+double calcmeanAlpha() {
+    double weightedAlpha = 0.0;
+    meanSoilWaterPotential = 0.0;
+
+    for (int i = 0; frIDs != null && i < frIDs.length; i++) {
+        FineRoot fr = getFineRootAt(i);
+        Soil soil = getSoilAt(i);
+
+        if (fr != null && soil != null) {
+            double alpha = calcAlpha(soil.waterPotential, soil.h1, soil.h2, soil.h3, soil.h4);
+            weightedAlpha += alpha * fr.fiRootProportion;
+            meanSoilWaterPotential += soil.waterPotential * fr.fiRootProportion;
+        }
+    }
+
+    println("water logging: " + weightedAlpha);
+    return weightedAlpha;
+}
+
+
+} //end of the whole method

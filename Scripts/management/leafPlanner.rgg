@@ -1,0 +1,2544 @@
+// ============================================================================
+// management/LeafPlanner.rgg
+// T1 Leaf-area reconciliation & T2 pruning
+// ============================================================================
+
+import static plantBase.*;
+import static budBase.*;
+import static budApple.*;
+import static shootBase.*;
+import static shoot.*;
+import static leaf.*;
+import static absOrgan.*;
+import static globalParameters.*;
+import static plantParameters.*;
+import static modelOptions.*;
+import static extraTools.*;
+import static archReader.*;
+import static budApple.*;
+import static budPlanner.*;
+
+import budReflectionUtils.*;
+/**
+ * LeafPlanner covers three related but conceptually distinct processes:
+ *
+ *  1) T1 – Leaf twinning (early leaf-area reconciliation)
+ *     -----------------------------------------------
+ *     Entry point:
+ *       - runFromProjectParams_T1(boolean dryRun)
+ *         → calls runTwinning_T1(dryRun) internally.
+ *
+ *     Purpose:
+ *       - Early numeric adjustment of leaf area (LA) to match a target.
+ *       - Used around early season to gently steer total LA towards a desired level.
+ *
+ *     Configuration:
+ *       - loadConfig_T1() → wraps loadConfig_Twinning(1) as the primary source.
+ *       - Whole-tree mode:
+ *           • cfg.gridMode = false
+ *           • cfg.targetLA = leafAreaTargetPerTree_T1
+ *           • If deviation is small (|relΔ| <= maxDeltaFrac):
+ *               - If LA < target → scale leaves/petioles/internodes up.
+ *               - If LA > target → remove a fraction of leaves.
+ *         - Grid mode ("gridBased"):
+ *           • cfg.gridMode = true
+ *           • cfg.gridNx/Nz, gridXmin/Xmax, gridZmin/Zmax
+ *           • cfg.gridLATargets = leafAreaTargetsGrid_T1
+ *           • Per cell: scale organs up if LA < target, or prune leaves if LA > target.
+ *         - Upright-region mode ("uprightRegions", aliases "upright_region",
+ *           "upright-region", "upright_regions", "upright-regions", "upright3"):
+ *           • cfg.uprightRegionMode = true
+ *           • Uprights are order-root groups defined by MgmtUprightOrder.
+ *           • Each upright is split by Z-span into region 0=bottom,
+ *             1=middle, 2=top.
+ *           • The stage total target LA is distributed by region length:
+ *             regionTargetLA = totalTargetLA * regionLength / totalRegionLength.
+ *           • Leaf area is counted from Leaf.area for leaves attached to
+ *             internodes in each region.
+ *           • Regions above target remove local leaves; regions below target
+ *             can scale local organs only when the deviation is within
+ *             cfg.maxDeltaFrac.
+ *
+ *     Notes:
+ *       - T1 is a pure leaf twinning step:
+ *           • No structural change to shoot topology.
+ *           • No vegetative/fruitful shoot logic.
+ *           • Does not record pruning stats (recordPruneStats remains false).
+ *
+ *
+ *  2) T2 – Leaf twinning (late leaf-area reconciliation)
+ *     -----------------------------------------------
+ *     Entry point:
+ *       - runFromProjectParams_T2(boolean dryRun)
+ *         → calls runTwinning_T2(dryRun) internally.
+ *
+ *     Purpose:
+ *       - Late-season numeric LA adjustment toward a second set of targets.
+ *       - Same class of operation as T1 (twinning), but using T2 target values
+ *         and typically executed later in the season or in calibration runs.
+ *
+ *     Configuration:
+ *       - loadConfig_Twinning(2):
+ *           • Whole-tree mode:
+ *               - cfg.gridMode = false
+ *               - cfg.targetLA = leafAreaTargetPerTree_T2
+ *               - Uses the same whole-tree logic as T1 (runWholeTree_T1).
+ *           • Grid mode:
+ *               - cfg.gridMode = true
+ *               - cfg.gridNx/Nz, grid extents
+ *               - cfg.gridLATargets = leafAreaTargetsGrid_T2
+ *               - Uses the same grid-based logic as T1 (runGridBased_T1).
+ *           • Upright-region mode:
+ *               - cfg.uprightRegionMode = true
+ *               - Uses the same bottom/middle/top region reconciliation as T1,
+ *                 but with leafAreaTargetPerTree_T2.
+ *
+ *     Notes:
+ *       - T2 twinning is conceptually the “second twinning stage”, not pruning:
+ *           • Same numeric reconciliation logic as T1 (whole-tree or grid).
+ *           • Uses T2 targets instead of T1 targets.
+ *           • Does not remove whole shoots; no veg/fruit shoot classification.
+ *           • Does not use or update prune* stats.
+ *
+ *
+ *  3) Leaf pruning (management pruning, uses T2 config)
+ *     -----------------------------------------------
+ *     Entry point:
+ *       - runFromProjectParams_Prune(boolean dryRun)
+ *
+ *     Purpose:
+ *       - Management-level leaf pruning later in the season (often around/after veraison),
+ *         separate from T1/T2 twinning.
+ *       - Performs structural removal of vegetative shoots and additional leaf removal
+ *         to achieve pruning objectives.
+ *
+ *     Configuration:
+ *       - loadConfig_T2():
+ *           • Reads T2-related options from modelOptions/global options:
+ *               - leafAreaTargetPerTree_T2 (optional twinning target for stage 2)
+ *               - leafTargetMode ("gridBased" vs whole-tree)
+ *               - leafAreaTargetsGrid_T2 (if grid-based)
+ *               - leafPruningDOY
+ *               - leafPruningMode (0 = random, 1 = veg-first)
+ *               - leafPruningFraction
+ *               - desiredLeafArea_postPrune (pruneTargetLA)
+ *
+ *     Behaviour:
+ *       - DOY gate:
+ *           • If pruneDOY > 0 and current DOY != pruneDOY → skip pruning.
+ *
+ *       - Step 1: vegetative shoot removal
+ *           • pruneVegetativeShoots_T2(dryRun):
+ *               - Detects vegetative shoot roots:
+ *                   · basal internodes (rank==1) classified as vegetative
+ *                     via shootType / organType heuristics.
+ *               - For each vegetative shoot:
+ *                   · Collects all internodes and leaves.
+ *                   · Accumulates leaf area and biomass.
+ *                   · Removes leaves first, then internodes (unless dryRun).
+ *               - Updates VegPruneStats and global prune* stats when recordPruneStats is true.
+ *
+ *       - Step 2: residual LA-based pruning
+ *           • After veg-shoot removal, compute LA_afterVeg.
+ *           • Compute required removal fraction:
+ *               - If pruneMode = 0, pruneTargetLA > 0 and LA_afterVeg > pruneTargetLA:
+ *                   · toRemoveFrac = (LA_afterVeg - pruneTargetLA) / LA_afterVeg.
+ *               - Else if pruneMode = 1 and pruneFraction > 0:
+ *                   · use cfg.pruneFraction directly.
+ *
+ *           • removeFractionLeaves_T2(toRemoveFrac, dryRun, cfg):
+ *               - Collects remaining leaves.
+ *               - Computes nRemove = round(totalLeaves * frac).
+ *               - Currently removes leaves randomly (vegetative leaves have already
+ *                 been removed in Step 1).
+ *               - Updates prune* stats only when recordPruneStats is true.
+ * 			• pruneMode 2 → vegetative shoot removal with LA target constraint
+ *
+ *     Notes:
+ *       - Pruning is a separate management activity:
+ *           • Uses T2 configuration/targets to define desired post-pruning LA,
+ *             but is not itself a "twinning stage".
+ *           • Changes shoot topology by removing whole vegetative shoots.
+ *           • Maintains explicit pruning statistics (VegPruneStats, pruneLeafAreaRemoved, etc.).
+ *           • T1/T2 twinning do NOT touch these pruning stats.
+ *
+ *
+ *  Summary:
+ *    - T1 and T2 are *leaf twinning* stages (numeric LA reconciliation through scaling
+ *      and/or leaf removal), using stage-specific targets. Upright-region mode is
+ *      still twinning/reconciliation, not leafPruningDOY management pruning.
+ *    - Leaf pruning is a distinct management operation that:
+ *        · reuses the T2 config block,
+ *        · removes vegetative shoots,
+ *        · optionally removes additional leaves to meet a post-prune LA target
+ *          or pruning fraction,
+ *        · and records pruning-specific stats.
+ */
+
+public class LeafPlanner {
+	
+  // --------------------------------------------------------------------------
+  // PRUNING STATS (T2 ONLY, NOT TWINNING)
+  // --------------------------------------------------------------------------
+  public static double pruneLeafAreaRemoved          = 0.0;
+  public static double pruneLeafBiomassRemoved       = 0.0;
+  public static double pruneInternodeBiomassRemoved  = 0.0;
+
+  // optional counts (handy for debugging or future outputs)
+  public static int pruneLeavesRemoved               = 0;
+  public static int pruneInternodesRemoved           = 0;
+
+  // internal flag: only true during T2 pruning (and not in dryRun)
+  static boolean recordPruneStats                    = false;
+  // Minimum vertical span (m) for a root to be managed as an upright-region upright.
+  static final double UPRIGHT_REGION_MIN_SPAN_M      = 2.0;
+  // --------------------------------------------------------------------------
+  // CONFIG STRUCTURE
+  // --------------------------------------------------------------------------
+  static final class Cfg {
+	  String targetMode;      // "none", "wholeTree", "gridBased", "uprightRegions"
+	  boolean uprightRegionMode; // true => bottom/middle/top upright-region LA reconciliation
+	  double targetLA;        // whole-tree target (T1 & twinning)
+	  double maxDeltaFrac;    // allowed deviation for whole-tree mode
+	  boolean gridMode;       // if true → use grid-based LA targets
+	  double[] uprightRegionTargets; // explicit per-upright x 3 targets (m2)
+	
+	  int gridNx, gridNz;
+	  double gridXmin, gridXmax;
+	  double gridZmin, gridZmax;
+	  double[] gridLATargets; // per-cell leaf-area targets
+	
+	  // T2 pruning
+	  double pruneFraction;   // fraction of leaves to remove (0–1)
+	  double pruneTargetLA;   // target total LA after pruning
+	  int pruneDOY;           // DOY at which pruning is executed
+		  int pruneMode;          // 0 = Apply a fixed pruning intensity, 1 remove fraction based LA_afterVeg and pruneTargetLA
+		}
+
+	  // Cached candidate for dense+rank leaf removal priority.
+	  static final class LeafCand {
+	    Leaf leaf;
+	    int rank;
+	    int cell;
+	    double density;
+	    double area;
+	  }
+
+	  // Per-cell excess tracker for grid-based pruning order.
+	  static final class CellExcess {
+	    int cell;
+	    double excessArea;
+	    double excessDensity;
+	    java.util.List leaves;
+	  }
+
+  // --------------------------------------------------------------------------
+  // PRUNING STATS (EXPORTED)
+  // --------------------------------------------------------------------------
+  /** Stats from the last call to runFromProjectParams_Prune. */
+  public static VegPruneStats lastVegPruneStats = null;
+
+  /** Simple POJO used to export pruning results. */
+  public static final class VegPruneStats {
+    int shootsRemoved;
+    int internodesRemoved;
+    int leavesRemoved;
+
+    double leafAreaRemoved;
+    double leafBiomassRemoved;
+    double internodeBiomassRemoved;
+
+    public String toString() {
+      return "VegPruneStats{shoots=" + shootsRemoved
+           + ", internodes=" + internodesRemoved
+           + ", leaves=" + leavesRemoved
+           + ", LA_removed=" + leafAreaRemoved + "}";
+    }
+  }
+  
+      /** Returns stats from the last pruning pass, or null if none. */
+  public static VegPruneStats getLastVegPruneStats() {
+    return lastVegPruneStats;
+  }
+
+  // --------------------------------------------------------------------------
+  // ENTRY POINT FOR T1 STAGE
+  // --------------------------------------------------------------------------
+public static void runFromProjectParams_T1(boolean dryRun) {
+
+  // -------------------------------------------------
+  // 1. Load configuration
+  // -------------------------------------------------
+  Cfg cfg = loadConfig_T1();
+
+  if (cfg == null) {
+    println("[LeafPlanner/T1] No valid configuration → nothing to do.");
+    return;
+  }
+
+  boolean noWholeTreeTarget = (!cfg.gridMode && cfg.targetLA <= 0.0);
+  boolean noGridTarget = (cfg.gridMode &&
+                          (cfg.gridLATargets == null || cfg.gridLATargets.length == 0));
+
+  if (noWholeTreeTarget && noGridTarget) {
+    println("[LeafPlanner/T1] No whole-tree or grid-based target → nothing to do.");
+    return;
+  }
+
+  // compute current leaf area
+  double LA = computeLeafAreaAllLeaves();
+
+  // For logging: derive an aggregate "target total LA" if grid-based.
+  double targetTotal = cfg.targetLA;
+  if (cfg.gridMode && cfg.gridLATargets != null) {
+    double sum = 0.0;
+    for (int i = 0; i < cfg.gridLATargets.length; i++) {
+      sum += cfg.gridLATargets[i];
+    }
+    targetTotal = sum;
+  }
+
+  println("==========================================================");
+  println("[LeafPlanner/T1] START (T1 leaf-area reconciliation)");
+  println("  current LA≈ " + round3(LA));
+  println("  target  LA≈ " + round3(targetTotal));
+  println("  gridMode = " + cfg.gridMode);
+  println("  dryRun   = " + dryRun);
+  println("==========================================================");
+
+  runTwinning_T1(dryRun);
+  
+  derive();
+}
+
+// --------------------------------------------------------------------------
+// ENTRY POINT FOR T2 LEAF TWINNING (calibration, not pruning)
+// --------------------------------------------------------------------------
+public static void runFromProjectParams_T2(boolean dryRun) {
+  Cfg cfg = loadConfig_Twinning(2);
+  if (cfg == null) {
+    println("[LeafPlanner/T2-twinning] No valid leaf target for T2 → skip.");
+    return;
+  }
+
+  double LA = computeLeafAreaAllLeaves();
+
+  double targetTotal = cfg.targetLA;
+  if (cfg.gridMode && cfg.gridLATargets != null) {
+    double sum = 0.0;
+    int i;
+    for (i = 0; i < cfg.gridLATargets.length; i++) {
+      sum += cfg.gridLATargets[i];
+    }
+    targetTotal = sum;
+  }
+
+  println("==========================================================");
+  println("[LeafPlanner/T2-twinning] START (twinning stage 2)");
+  println("  current LA≈ " + round3(LA));
+  println("  target  LA≈ " + round3(targetTotal));
+  println("  gridMode = " + cfg.gridMode);
+  println("  dryRun   = " + dryRun);
+  println("==========================================================");
+
+  runTwinning_T2(dryRun);
+
+  // geometry/derived updates after twinning
+  derive();
+
+  double LA_final = computeLeafAreaAllLeaves();
+  println("[LeafPlanner/T2-twinning] END: LA≈" + round3(LA_final)
+        + " (ΔLA≈" + round3(LA_final - LA) + ")");
+}
+
+
+  // --------------------------------------------------------------------------
+  // ENTRY POINT FOR T2 LEAF PRUNING
+  // --------------------------------------------------------------------------
+public static void runFromProjectParams_Prune(boolean dryRun) {
+  Cfg cfg = loadConfig_T2();
+  if (cfg == null) {
+    println("[LeafPlanner/T2] ERROR: loadConfig_T2() returned null → skip pruning.");
+    lastVegPruneStats = null;   // no stats
+    return;
+  }
+
+  int curDOY = dayOfYear;
+
+  // DOY + hour gate if you want it
+  if (cfg.pruneDOY > 0 && curDOY != cfg.pruneDOY) {
+    println("[LeafPlanner/T2] pruneDOY mismatch → skip. (DOY=" + curDOY
+          + ", pruneDOY=" + cfg.pruneDOY + ")");
+    lastVegPruneStats = null;
+    return;
+  }
+
+  if (cfg.gridMode && useAutoFitTwinningGridBoundsMode()) {
+    autoFitGridBoundsToCurrentLeafCanopy(cfg, "[LeafPlanner/T2-prune]");
+  }
+
+	// --- reset pruning stats (T2 only) ------------------------------------
+	pruneLeafAreaRemoved         = 0.0;
+	pruneLeafBiomassRemoved      = 0.0;
+	pruneInternodeBiomassRemoved = 0.0;
+	pruneLeavesRemoved           = 0;
+	pruneInternodesRemoved       = 0;
+	recordPruneStats             = !dryRun;   // only log stats in real runs
+
+  println("==========================================================");
+  println("[LeafPlanner/T2] START (leaf pruning)");
+  println("  DOY=" + curDOY);
+  println("  pruneMode=" + cfg.pruneMode);
+  println("  pruneFraction=" + cfg.pruneFraction);
+  println("  pruneTargetLA=" + cfg.pruneTargetLA);
+  println("==========================================================");
+
+  double LA_pre = computeLeafAreaAllLeaves();
+  debugLeafSummary("before prune @ step 1");
+  // 1) vegetative shoots
+  VegPruneStats stats;
+	if (cfg.pruneMode == 2) {
+	  stats = pruneVegetativeShoots_T2_untilTarget(dryRun, cfg);
+	} else {
+	  stats = pruneVegetativeShoots_T2(dryRun); // existing behaviour for 0/1
+	}
+	
+
+  
+  derive();
+
+  double LA_afterVeg = computeLeafAreaAllLeaves();
+
+  double toRemoveFrac = 0.0;
+  if (cfg.pruneTargetLA > 0.0 && LA_afterVeg > cfg.pruneTargetLA) {
+    toRemoveFrac = (LA_afterVeg - cfg.pruneTargetLA) / LA_afterVeg;
+  }
+
+  println("Initial LA: " + round3(LA_pre)
+        + " \n after remove veg shoots:  " + round3(LA_afterVeg)
+        + "\n extra LA prune based on LA Target: need to remove fraction≈"
+        + round3(toRemoveFrac));
+
+  // 2) residual LA-based pruning
+  if (!dryRun) {
+    if (cfg.pruneTargetLA > 0.0 && toRemoveFrac > 0.0 && cfg.pruneMode == 1) {
+      removeFractionLeaves_T2(toRemoveFrac, false, cfg);
+    } else if (cfg.pruneFraction > 0.0 && cfg.pruneMode == 0) {
+      removeFractionLeaves_T2(cfg.pruneFraction, false, cfg);
+    }
+    derive();
+  }
+
+  double LA_final = computeLeafAreaAllLeaves();
+  println("[LeafPlanner/T2] END: final LA≈" + round3(LA_final)
+        + " | vegShoots=" + stats.shootsRemoved
+        + " internodesRemoved=" + stats.internodesRemoved
+        + " leavesRemoved=" + stats.leavesRemoved
+        + " LA_removed_veg=" + round3(stats.leafAreaRemoved));
+        
+  // switch stats flag off for safety
+  recordPruneStats = false;
+}
+
+/**
+ * Leaf pruning mode 2: Vegetative-shoot pruning with leaf-area constraint.
+ *
+ * <p><b>Purpose</b></p>
+ * <ul>
+ *   <li>Remove entire vegetative shoots while respecting a target
+ *       post-pruning total leaf area.</li>
+ *   <li>Prevents over-pruning by stopping vegetative shoot removal
+ *       once the remaining leaf area would fall below the specified
+ *       target.</li>
+ * </ul>
+ *
+ * <p><b>Behaviour</b></p>
+ * <ol>
+ *   <li>Compute current total leaf area (LA<sub>current</sub>).</li>
+ *   <li>Define a removable leaf-area budget:
+ *       LA<sub>budget</sub> = LA<sub>current</sub> − pruneTargetLA.</li>
+ *   <li>Identify all vegetative shoot roots (rank&nbsp;==&nbsp;1).</li>
+ *   <li>For each vegetative shoot:
+ *     <ul>
+ *       <li>Estimate its total leaf area contribution.</li>
+ *       <li>If removing the shoot would exceed the remaining budget,
+ *           stop vegetative pruning.</li>
+ *       <li>Otherwise, remove all leaves and internodes belonging to
+ *           that shoot and update the budget.</li>
+ *     </ul>
+ *   </li>
+ *   <li>After vegetative shoot removal, optional residual leaf pruning
+ *       may be applied according to {@code pruneFraction} or remaining
+ *       configuration.</li>
+ * </ol>
+ *
+ * <p><b>Key properties</b></p>
+ * <ul>
+ *   <li>Guarantees final leaf area ≥ {@code desiredLeafArea_postPrune}
+ *       (within numerical tolerance).</li>
+ *   <li>Removes whole vegetative shoots only while sufficient leaf
+ *       area remains.</li>
+ *   <li>Records pruning statistics consistently with other T2 pruning
+ *       modes.</li>
+ * </ul>
+ *
+ * <p><b>Notes</b></p>
+ * <ul>
+ *   <li>This mode differs from {@code pruneMode = 1} (veg-first) by
+ *       enforcing a hard leaf-area stop condition.</li>
+ *   <li>Intended for management pruning scenarios where maintaining
+ *       canopy photosynthetic capacity is critical.</li>
+ *   <li>Used only during T2 pruning; T1/T2 twinning stages are unaffected.</li>
+ * </ul>
+ */
+static VegPruneStats pruneVegetativeShoots_T2_untilTarget(boolean dryRun, Cfg cfg) {
+  VegPruneStats stats = new VegPruneStats();
+
+  if (cfg == null || cfg.pruneTargetLA <= 0.0) {
+    println("[LeafPlanner/T2] pruneMode=2 but pruneTargetLA<=0 → fallback to full veg removal.");
+    return pruneVegetativeShoots_T2(dryRun);
+  }
+
+  double LA_before = computeLeafAreaAllLeaves();
+  double LA_budget = LA_before - cfg.pruneTargetLA;
+
+  println("[LeafPlanner/T2] pruneMode=2 (veg-first constrained):"
+        + " LA_before=" + round3(LA_before)
+        + " pruneTargetLA=" + round3(cfg.pruneTargetLA)
+        + " removableBudget=" + round3(Math.max(0.0, LA_budget)));
+
+  if (LA_budget <= 0.0) {
+    println("[LeafPlanner/T2] LA already <= target → skip veg shoot removal.");
+    return stats;
+  }
+
+  // 1) Gather veg roots
+  java.util.List roots = new java.util.ArrayList(); // List<Internode>
+  for (Internode itn : (* Internode *)) {
+    if (!isVegetativeShootRoot(itn)) continue;
+    roots.add(itn);
+  }
+  if (roots.isEmpty()) {
+    println("[LeafPlanner/T2] pruneMode=2: no vegetative shoots detected.");
+    return stats;
+  }
+
+  // 2) Build shoot candidates with precomputed LA cost
+  final class ShootCand {
+    Internode root;
+    java.util.List internodes;
+    java.util.List leaves;
+    double shootLA;
+    double shootLeafBm;
+    double shootInternBm;
+  }
+
+  java.util.List cands = new java.util.ArrayList(); // List<ShootCand>
+
+  for (int r = 0; r < roots.size(); r++) {
+    Internode root = (Internode) roots.get(r);
+
+    java.util.List shootInternodes = new java.util.ArrayList();
+    java.util.List shootLeaves     = new java.util.ArrayList();
+    collectShootOrgans(root, shootInternodes, shootLeaves);
+
+    double shootLA = 0.0;
+    double shootLeafBm = 0.0;
+    double shootInternBm = 0.0;
+
+    for (int i = 0; i < shootLeaves.size(); i++) {
+      Leaf lf = (Leaf) shootLeaves.get(i);
+      double a = 0.0;
+      try { a = Math.max(0.0, lf.area); } catch (Throwable t) {}
+      shootLA += a;
+      shootLeafBm += getBiomass(lf);
+    }
+
+    for (int i = 0; i < shootInternodes.size(); i++) {
+      Internode itn2 = (Internode) shootInternodes.get(i);
+      shootInternBm += getBiomass(itn2);
+    }
+
+    ShootCand sc = new ShootCand();
+    sc.root = root;
+    sc.internodes = shootInternodes;
+    sc.leaves = shootLeaves;
+    sc.shootLA = shootLA;
+    sc.shootLeafBm = shootLeafBm;
+    sc.shootInternBm = shootInternBm;
+
+    cands.add(sc);
+  }
+
+  // 3) Greedy strategy: remove small-LA veg shoots first to avoid overshooting below target
+  java.util.Collections.sort(cands, new java.util.Comparator() {
+    public int compare(Object a, Object b) {
+      ShootCand A = (ShootCand) a;
+      ShootCand B = (ShootCand) b;
+      if (A.shootLA < B.shootLA) return -1;
+      if (A.shootLA > B.shootLA) return  1;
+      return 0;
+    }
+  });
+
+  // 4) Remove while respecting budget
+  double removedLA = 0.0;
+  double eps = 1e-9;
+
+  for (int k = 0; k < cands.size(); k++) {
+    ShootCand sc = (ShootCand) cands.get(k);
+    if (sc.shootLA <= 0.0) continue;
+
+    double remainingBudget = LA_budget - removedLA;
+
+    // If removing this shoot would exceed the budget, stop.
+    if (sc.shootLA > remainingBudget + eps) {
+      println("[LeafPlanner/T2] pruneMode=2: stop veg removal to protect target."
+            + " nextShootLA=" + round3(sc.shootLA)
+            + " remainingBudget=" + round3(remainingBudget));
+      break;
+    }
+
+    // accumulate stats
+    stats.shootsRemoved++;
+    stats.internodesRemoved       += sc.internodes.size();
+    stats.leavesRemoved           += sc.leaves.size();
+    stats.leafAreaRemoved         += sc.shootLA;
+    stats.leafBiomassRemoved      += sc.shootLeafBm;
+    stats.internodeBiomassRemoved += sc.shootInternBm;
+
+    if (recordPruneStats && !dryRun) {
+      pruneLeafAreaRemoved         += sc.shootLA;
+      pruneLeafBiomassRemoved      += sc.shootLeafBm;
+      pruneInternodeBiomassRemoved += sc.shootInternBm;
+      pruneLeavesRemoved           += sc.leaves.size();
+      pruneInternodesRemoved       += sc.internodes.size();
+    }
+
+    if (!dryRun) {
+      for (int i = 0; i < sc.leaves.size(); i++) {
+        removeLeaf((Leaf) sc.leaves.get(i));
+      }
+      for (int i = 0; i < sc.internodes.size(); i++) {
+        removeInternode((Internode) sc.internodes.get(i));
+      }
+    }
+
+    removedLA += sc.shootLA;
+
+    println("[LeafPlanner/T2] pruneMode=2 removed veg shoot:"
+          + " shootLA=" + round3(sc.shootLA)
+          + " cumRemovedLA=" + round3(removedLA)
+          + " remainingBudget=" + round3(LA_budget - removedLA));
+  }
+
+  println("[LeafPlanner/T2] pruneMode=2 veg removal SUMMARY:"
+        + " shoots=" + stats.shootsRemoved
+        + " LA_removed=" + round3(stats.leafAreaRemoved)
+        + " LA_budget=" + round3(LA_budget)
+        + " LA_before=" + round3(LA_before)
+        + " LA_est_after≈" + round3(LA_before - stats.leafAreaRemoved));
+
+  return stats;
+}
+
+
+// --------------------------------------------------------------------------
+// CONFIG LOADERS FOR T1/T2 MANAGEMENT
+// --------------------------------------------------------------------------
+
+static Cfg loadConfig_T1() {
+  // Reuse the twinning configuration for stage 1 as the default.
+  Cfg cfg = loadConfig_Twinning(1);
+  if (cfg != null) {
+    return cfg;
+  }
+
+  // Fallback: simple whole-tree target only
+  cfg = new Cfg();
+  cfg.gridMode = false;
+  cfg.maxDeltaFrac = 0.30;
+  cfg.targetLA = leafAreaTargetPerTree_T1;  // may be <=0 → caller will handle
+  return cfg;
+}
+
+// --------------------------------------------------------------------------
+// T2 config loader (leaf pruning)
+// --------------------------------------------------------------------------
+static Cfg loadConfig_T2() {
+  Cfg cfg = new Cfg();
+
+  // Allowed whole-tree deviation (for T1; not essential for T2 but harmless)
+  cfg.maxDeltaFrac = 0.30;
+
+  // Target LA for T2 twinning (if you want to use it)
+  try {
+    cfg.targetLA = modelOptions.leafAreaTargetPerTree_T2;
+  } catch (Throwable t) {
+    cfg.targetLA = 0.0;
+  }
+
+  // Pruning settings
+  try {
+    cfg.pruneDOY = modelOptions.leafPruningDOY;
+  } catch (Throwable t) {
+    cfg.pruneDOY = 0;
+  }
+
+  try {
+    cfg.pruneMode = modelOptions.leafPruningMode;
+  } catch (Throwable t) {
+    cfg.pruneMode = 0; 
+  }
+
+  try {
+    cfg.pruneFraction = modelOptions.leafPruningFraction;
+  } catch (Throwable t) {
+    cfg.pruneFraction = 0.0;
+  }
+
+  try {
+    cfg.pruneTargetLA = modelOptions.desiredLeafArea_postPrune;
+  } catch (Throwable t) {
+    cfg.pruneTargetLA = 0.0;
+  }
+
+  // Grid vs whole-tree mode for T2
+  cfg.gridMode = false;
+  cfg.uprightRegionMode = false;
+  cfg.targetMode = normalizeLeafTargetMode(modelOptions.leafTargetMode);
+  try {
+    if ("gridBased".equals(cfg.targetMode)) {
+      cfg.gridMode = true;
+    } else if ("uprightRegions".equals(cfg.targetMode)) {
+      cfg.uprightRegionMode = true;
+    }
+  } catch (Throwable t) {}
+
+  if (cfg.gridMode) {
+    try { cfg.gridNx   = modelOptions.twinningNx;   } catch (Throwable t) {}
+    try { cfg.gridNz   = modelOptions.twinningNz;   } catch (Throwable t) {}
+    try { cfg.gridXmin = modelOptions.twinningXMin; } catch (Throwable t) {}
+    try { cfg.gridXmax = modelOptions.twinningXMax; } catch (Throwable t) {}
+    try { cfg.gridZmin = modelOptions.twinningZMin; } catch (Throwable t) {}
+    try { cfg.gridZmax = modelOptions.twinningZMax; } catch (Throwable t) {}
+
+    try {
+      cfg.gridLATargets = modelOptions.leafAreaTargetsGrid_T2;
+    } catch (Throwable t) {
+      cfg.gridLATargets = null;
+    }
+  }
+
+  return cfg;   // IMPORTANT: never return null
+}
+
+    // --------------------------------------------------------------------------
+  // VEG-FIRST PRUNING HELPERS (T2)
+  // --------------------------------------------------------------------------
+
+  /** True if this internode is the basal internode (rank==1) of a vegetative shoot. */
+/** True if this internode is the basal internode (rank==1) of a vegetative shoot. */
+static boolean isVegetativeShootRoot(Internode itn) {
+  if (itn == null) return false;
+
+  // --- 1) Basal test: rank == 1 ---
+  int rk = 0;
+  try {
+    rk = itn.rank;
+  } catch (Throwable t) {
+    // very defensive: fallback via reflection if needed
+    try {
+      java.lang.reflect.Field f = itn.getClass().getField("rank");
+      Object v = f.get(itn);
+      if (v instanceof Number) rk = ((Number) v).intValue();
+    } catch (Throwable t2) { /* ignore */ }
+  }
+  if (rk != 1) return false;
+
+  // --- 2) Prefer the shootType flag you set at initiation ("_V" / "_F") ---
+  String st = null;
+  try {
+    // use your helper if available
+    st = BudReflectionUtils.getStringField(itn, "shootType");
+  } catch (Throwable t) {
+    // fallback: plain reflection
+    try {
+      java.lang.reflect.Field f = itn.getClass().getField("shootType");
+      Object v = f.get(itn);
+      if (v != null) st = String.valueOf(v);
+    } catch (Throwable ignore) {}
+  }
+
+  if (st != null && st.length() > 0) {
+    String u = st.toUpperCase();
+    if (u.indexOf('V') >= 0) return true;   // "_V" → vegetative
+    if (u.indexOf('F') >= 0) return false;  // "_F" → fruitful
+  }
+
+  // --- 3) Fallback: inspect organType (if it’s still around) ---
+  String ot = null;
+  try {
+    java.lang.reflect.Field f = itn.getClass().getField("organType");
+    Object v = f.get(itn);
+    if (v != null) ot = String.valueOf(v);
+  } catch (Throwable t) { /* ignore */ }
+
+  if (ot != null && ot.length() > 0) {
+    String u = ot.toUpperCase();
+    // your Excel strings: AnnualShoot_B_V / AnnualShoot_B_F / oldShoot ...
+    if (u.indexOf("ANNUALSHOOT_B_V") >= 0) return true;
+    if (u.indexOf("ANNUALSHOOT_B_F") >= 0) return false;
+  }
+
+  // Unknown → treat as non-vegetative for safety
+  return false;
+}
+
+
+  /**
+   * Collects all internodes and leaves belonging to the shoot whose basal
+   * internode is {@code root}. Uses descendant edges from the root.
+   */
+  static void collectShootOrgans(Internode root,
+                                 java.util.List internodesOut,
+                                 java.util.List leavesOut) {
+    if (root == null) return;
+
+    if (!internodesOut.contains(root)) internodesOut.add(root);
+
+    // all descendant internodes of this shoot (axis + laterals)
+    for (Internode itn : (* root (-->)+ i:Internode *)) {
+      if (!internodesOut.contains(itn)) internodesOut.add(itn);
+    }
+
+    // for each internode, collect all leaves reachable downstream (via petiole etc.)
+    for (int k = 0; k < internodesOut.size(); k++) {
+      Internode itn = (Internode) internodesOut.get(k);
+      for (Leaf lf : (* itn (-->)+ l:Leaf *)) {
+        if (!leavesOut.contains(lf)) leavesOut.add(lf);
+      }
+    }
+  }
+
+ 
+
+  static void removeInternode(Internode itn) {
+    try {
+      [ itn ==>> ; ];
+    } catch (Throwable t) {}
+  }
+
+  static void debugVegRootsSample(int max) {
+  int seen = 0, vegRoots = 0;
+  for (Internode itn : (* Internode *)) {
+    if (itn.rank != 1) continue;
+    boolean veg = isVegetativeShootRoot(itn);
+    if (veg) vegRoots++;
+    if (seen < max) {
+      String st = BudReflectionUtils.getStringField(itn, "shootType");
+      String ot = null;
+      try { ot = String.valueOf(itn.organType); } catch (Throwable t) {}
+      println("[LeafPlanner/DEBUG] rank=1 root cand: shootType=" + st
+            + " organType=" + ot + " -> vegRoot=" + veg);
+      seen++;
+    }
+  }
+  println("[LeafPlanner/DEBUG] veg-root candidates (rank==1)=" + seen
+        + " | vegetative roots detected=" + vegRoots);
+}
+
+  static VegPruneStats pruneVegetativeShoots_T2(boolean dryRun) {
+    VegPruneStats stats = new VegPruneStats();
+
+    java.util.List roots = new java.util.ArrayList(); // List<Internode>
+
+    // 1) Find vegetative shoot roots (rank==1 vegetative internodes)
+    for (Internode itn : (* Internode *)) {
+      if (!isVegetativeShootRoot(itn)) continue;
+      roots.add(itn);
+    }
+
+    println("[LeafPlanner/T2] veg-first: found " + roots.size()
+          + " vegetative shoots (rank==1 internodes).");
+
+    if (roots.isEmpty()) return stats;
+
+    java.util.Iterator it = roots.iterator();
+    while (it.hasNext()) {
+      Internode root = (Internode) it.next();
+      java.util.List shootInternodes = new java.util.ArrayList();
+      java.util.List shootLeaves     = new java.util.ArrayList();
+
+      collectShootOrgans(root, shootInternodes, shootLeaves);
+
+      double shootLA         = 0.0;
+      double shootLeafBm     = 0.0;
+      double shootInternBm   = 0.0;
+
+      int i;
+
+      // leaf stats
+      for (i = 0; i < shootLeaves.size(); i++) {
+        Leaf lf = (Leaf) shootLeaves.get(i);
+        double a  = Math.max(0.0, lf.area);
+        double bm = getBiomass(lf);
+
+        shootLA     += a;
+        shootLeafBm += bm;
+      }
+
+      // internode biomass
+      for (i = 0; i < shootInternodes.size(); i++) {
+        Internode itn2 = (Internode) shootInternodes.get(i);
+        double bm = getBiomass(itn2);
+        shootInternBm += bm;
+      }
+
+      // accumulate stats
+      stats.shootsRemoved++;
+      stats.internodesRemoved       += shootInternodes.size();
+      stats.leavesRemoved           += shootLeaves.size();
+      stats.leafAreaRemoved         += shootLA;
+      stats.leafBiomassRemoved      += shootLeafBm;
+      stats.internodeBiomassRemoved += shootInternBm;
+
+      // global T2 pruning stats (only if enabled for this run)
+      if (recordPruneStats && !dryRun) {
+        pruneLeafAreaRemoved         += shootLA;
+        pruneLeafBiomassRemoved      += shootLeafBm;
+        pruneInternodeBiomassRemoved += shootInternBm;
+        pruneLeavesRemoved           += shootLeaves.size();
+        pruneInternodesRemoved       += shootInternodes.size();
+      }
+
+      if (!dryRun) {
+        // delete leaves first, then wood
+        for (i = 0; i < shootLeaves.size(); i++) {
+          Leaf lf = (Leaf) shootLeaves.get(i);
+          removeLeaf(lf);
+        }
+        for (i = 0; i < shootInternodes.size(); i++) {
+          Internode itn2 = (Internode) shootInternodes.get(i);
+          removeInternode(itn2);
+        }
+      }
+
+      println("[LeafPlanner/T2] veg-shoot #" + stats.shootsRemoved
+            + " internodes=" + shootInternodes.size()
+            + " leaves="    + shootLeaves.size()
+            + " LA_removed=" + round3(shootLA)
+            + " leafBm_removed≈" + round3(shootLeafBm)
+            + " internBm_removed≈" + round3(shootInternBm));
+    }
+
+    println("[LeafPlanner/T2] veg-first SUMMARY:"
+          + " shoots=" + stats.shootsRemoved
+          + " internodes=" + stats.internodesRemoved
+          + " leaves=" + stats.leavesRemoved
+          + " LA_removed_total=" + round3(stats.leafAreaRemoved)
+          + " leafBm_removed_total≈" + round3(stats.leafBiomassRemoved)
+          + " internBm_removed_total≈" + round3(stats.internodeBiomassRemoved));
+
+    return stats;
+  }
+
+// ========================================================================
+// T1 — WHOLE-TREE MODE
+//   - If LA < target  and |relΔ| <= maxDeltaFrac → scale leaf/petiole/internode
+//   - If LA > target  and |relΔ| <= maxDeltaFrac → prune leaves (remove fraction)
+//   - If |relΔ| > maxDeltaFrac → do nothing here (handled by bud planner / rerun)
+// ========================================================================
+static void runWholeTree_T1(Cfg cfg, double LA, boolean dryRun) {
+
+  double target = cfg.targetLA;
+  if (target <= 0.0) {
+    println("[LeafPlanner/T1] whole-tree: targetLA<=0 → skip.");
+    return;
+  }
+
+  // diff > 0  → we need MORE leaf area
+  // diff < 0  → we have TOO MUCH leaf area
+  double diff   = target - LA;
+  double rel    = diff / target;          // relative deviation
+  double absRel = Math.abs(rel);
+
+  println("[LeafPlanner/T1] whole-tree: LA=" + round3(LA)
+        + " target=" + round3(target)
+        + " relΔ=" + round3(rel)
+        + " maxΔ=" + round3(cfg.maxDeltaFrac)
+        + " dryRun=" + dryRun);
+
+  // Large deviation → handled outside this method (bud planner / rerun)
+  if (absRel > cfg.maxDeltaFrac) {
+    println("[LeafPlanner/T1] |relΔ|=" + round3(absRel)
+          + " > maxDeltaFrac=" + round3(cfg.maxDeltaFrac)
+          + "Warning adjustment bud-planner /and re-sim).");
+   
+  }
+
+  // --------------------------------------------------------------------
+  // CASE 1: LA BELOW TARGET → scale organs up (length-based twinning)
+  // --------------------------------------------------------------------
+  if (LA < target) {
+    double lengthFactor = 1.0 + rel;  // rel>0 here
+
+    if (lengthFactor <= 0.0) {
+      println("[LeafPlanner/T1] WARN: lengthFactor<=0 (" + lengthFactor
+            + ") → clamp to 0.1");
+      lengthFactor = 0.1;
+    }
+
+    println("[LeafPlanner/T1] whole-tree: LA<target → scale organ lengths by "
+          + round3(lengthFactor) + " (no topology change).");
+
+    if (!dryRun) {
+      scaleOrgansWholeTree(lengthFactor);   // your existing helper
+    }
+    return;
+  }
+
+  // --------------------------------------------------------------------
+  // CASE 2: LA ABOVE TARGET → prune (remove leaves)
+  // --------------------------------------------------------------------
+  if (LA > target) {
+    double toRemoveLA = LA - target;
+    double frac       = toRemoveLA / Math.max(LA, 1e-9);  // ∈ (0,1)
+
+    if (frac <= 0.0) {
+      println("[LeafPlanner/T1] whole-tree: LA>target but frac<=0 → nothing to prune.");
+      return;
+    }
+
+    println("[LeafPlanner/T1] whole-tree: LA>target → prune leaves."
+          + " ΔLA≈" + round3(toRemoveLA) + " m²"
+          + " → fraction≈" + round3(frac));
+
+    // Count logic unchanged; only candidate ordering changed (dense + low-rank first).
+    removeFractionLeaves(frac, dryRun, cfg, "[LeafPlanner] whole-tree");
+    return;
+  }
+
+  // --------------------------------------------------------------------
+  // CASE 3: LA == target (within double precision) → nothing to do
+  // --------------------------------------------------------------------
+  println("[LeafPlanner/T1] whole-tree: LA already at target → no action.");
+}
+
+// ------------------------------------------------------------------
+// T1 helper: scale leaf, petiole and internode sizes for plant #1
+// ------------------------------------------------------------------
+static void scaleOrgansForWholeTree_T1(double lengthFactor, double areaScale) {
+  if (lengthFactor <= 0.0 || areaScale <= 0.0) {
+    println("[LeafPlanner/T1] scaleOrgansForWholeTree_T1: invalid factors.");
+    return;
+  }
+
+  println("[LeafPlanner/T1] scaleOrgansForWholeTree_T1:"
+        + " lengthFactor=" + round3(lengthFactor)
+        + " areaScale="    + round3(areaScale));
+
+  // --- LEAVES ------------------------------------------------------
+  for (Leaf lf : (* Leaf *)) {
+    try {
+      // keep same convention as computeLeafAreaAllLeaves
+      if (lf.plantNumber != 1) continue;
+    } catch (Throwable t) {
+      // if plantNumber is missing, just apply to all
+    }
+
+    try { lf.length *= lengthFactor; } catch (Throwable t) {}
+    try { lf.width  *= lengthFactor; } catch (Throwable t) {}
+
+    // area ≈ length * width, so scale by areaScale
+    try { lf.area   *= areaScale;    } catch (Throwable t) {}
+
+    // optional: biomass roughly ∝ area
+    try { lf.biomass *= areaScale;   } catch (Throwable t) {}
+  }
+
+  // --- PETIOLES ----------------------------------------------------
+  // (guarded in try to avoid compile/runtime issues if Petiole is absent)
+  try {
+    for (Petiole pt : (* Petiole *)) {
+      try {
+        if (pt.plantNumber != 1) continue;
+      } catch (Throwable t) {}
+
+      try { pt.length  *= lengthFactor; } catch (Throwable t) {}
+      try { pt.width   *= lengthFactor; } catch (Throwable t) {}
+      try { pt.biomass *= lengthFactor; } catch (Throwable t) {}
+    }
+  } catch (Throwable t) {
+    println("[LeafPlanner/T1] WARNING: Petiole scaling failed or Petiole type missing.");
+  }
+
+  // --- INTERNODES --------------------------------------------------
+  for (Internode itn : (* Internode *)) {
+    try {
+      if (itn.plantNumber != 1) continue;
+    } catch (Throwable t) {}
+
+    try { itn.length  *= lengthFactor; } catch (Throwable t) {}
+    try { itn.diameter *= lengthFactor; } catch (Throwable t) {}
+
+    // internode volume ~ length, so biomass ∝ length
+    try { itn.biomass *= lengthFactor; } catch (Throwable t) {}
+  }
+}
+
+
+// ------------------------------------------------------------------------
+// Whole-tree scaling of leaf, petiole and internode lengths (plant 1)
+// ------------------------------------------------------------------------
+static void scaleOrgansWholeTree(double lengthFactor) {
+  if (lengthFactor <= 0.0) return;
+
+  int nLeaves = 0;
+  int nPet    = 0;
+  int nItn    = 0;
+
+  // --- LEAVES ----------------------------------------------------------
+  for (Leaf lf : (* l:Leaf, (l.plantNumber == 1) *)) {
+    double oldL = lf.length;
+    double oldW = lf.width;
+    double oldA = lf.area;
+
+    lf.length = oldL * lengthFactor;
+    lf.width  = oldW * lengthFactor;
+
+    // area ~ length * width → scale ~ factor^2
+    lf.area   = oldA * lengthFactor * lengthFactor;
+
+    nLeaves++;
+  }
+
+  // --- PETIOLES --------------------------------------------------------
+  try {
+    for (Petiole pt : (* p:Petiole, (p.plantNumber == 1) *)) {
+      pt.length = pt.length * lengthFactor;
+      pt.width   *= lengthFactor; 
+      // If you store biomass/area on petioles, you can update it here similarly.
+      nPet++;
+    }
+  } catch (Throwable t) {
+    // Petiole class or plantNumber may not exist in all species → ignore gracefully
+  }
+
+  // --- INTERNODES ------------------------------------------------------
+  try {
+    for (Internode itn : (* i:Internode, (i.plantNumber == 1) *)) {
+      itn.length = itn.length * lengthFactor;
+      itn.diameter *= lengthFactor; 
+      // Optional: update itn.area / itn.biomass if those are maintained explicitly.
+      nItn++;
+    }
+  } catch (Throwable t) {
+    // be robust if some variants don't expose plantNumber etc.
+  }
+
+  println("[LeafPlanner/T1] scaleOrgansWholeTree: factor="
+        + round3(lengthFactor)
+        + " leaves=" + nLeaves
+        + " petioles=" + nPet
+        + " internodes=" + nItn);
+}
+
+// ========================================================================
+// T1 — GRID-BASED MODE (per-cell rescaling + leaf removal when too dense)
+// ========================================================================
+static void runGridBased_T1(Cfg cfg, double LA, boolean dryRun) {
+  if (useAutoFitTwinningGridBoundsMode()) {
+    autoFitGridBoundsToCurrentLeafCanopy(cfg, "[LeafPlanner/T1-grid]");
+  }
+
+  int cells = cfg.gridNx * cfg.gridNz;
+  if (cells <= 0 || cfg.gridLATargets == null
+      || cfg.gridLATargets.length != cells) {
+    println("[LeafPlanner/T1] GRID: invalid configuration → skip.");
+    return;
+  }
+
+  double[] LA_by_cell             = new double[cells];
+  java.util.List[] leaves_by_cell = new java.util.ArrayList[cells];
+
+  // --------------------------------------------------------------------
+  // 1) Accumulate LA per grid cell and record which leaves live there
+  // --------------------------------------------------------------------
+  for (Leaf lf : (* l:Leaf, (l.plantNumber == 1) *)) {
+    try { lf.update3D(); } catch (Throwable t) {}
+
+    double xr = localXRow(lf);
+    double zr = zBase(lf);
+
+    int c = gridIndex(cfg, xr, zr);
+    if (c < 0) continue;
+
+    if (leaves_by_cell[c] == null) leaves_by_cell[c] = new java.util.ArrayList();
+    leaves_by_cell[c].add(lf);
+    LA_by_cell[c] += Math.max(0.0, lf.area);
+  }
+
+  println("[LeafPlanner/T1] GRID REPORT (before scaling/removal):");
+  for (int c = 0; c < cells; c++) {
+    double targ = cfg.gridLATargets[c];
+    double cur  = LA_by_cell[c];
+    double rel  = (targ > 0.0) ? ((targ - cur) / targ) : 0.0;
+    println("  cell " + c
+          + " LA_cur=" + round3(cur)
+          + " LA_targ=" + round3(targ)
+          + " relΔ=" + round3(rel));
+  }
+
+  if (dryRun) {
+    println("[LeafPlanner/T1] GRID: dryRun=true → no scaling/removal applied.");
+    return;
+  }
+
+  // --------------------------------------------------------------------
+  // 2) Per-cell adjustment:
+  //    - If LA_cur < LA_targ → scale leaves UP (lengthFactor > 1).
+  //    - If LA_cur > LA_targ → defer pruning, then process densest excess
+  //      cells first (excessLA per ground area DESC).
+  // --------------------------------------------------------------------
+  java.util.List excessCells = new java.util.ArrayList();
+  double dx = (cfg.gridXmax - cfg.gridXmin) / Math.max(1, cfg.gridNx);
+  double dz = (cfg.gridZmax - cfg.gridZmin) / Math.max(1, cfg.gridNz);
+  double cellArea = Math.max(1e-9, dx * dz);
+
+  for (int c = 0; c < cells; c++) {
+    double targ = cfg.gridLATargets[c];
+    double cur  = LA_by_cell[c];
+
+    java.util.List list = leaves_by_cell[c];
+    if (targ <= 0.0) continue;        // no target in this cell
+    if (list == null || list.isEmpty()) continue;
+
+    double diff = targ - cur;         // >0 → want more LA, <0 → too much
+
+    if (diff > 0.0 && cur > 0.0) {
+      double rel          = diff / targ;      // relative deviation
+      double lengthFactor = 1.0 + rel;        // > 1 because diff>0
+      if (lengthFactor < 1.0) lengthFactor = 1.0;
+
+      println("[LeafPlanner/T1] cell " + c
+            + " LA_cur=" + round3(cur)
+            + " < LA_targ=" + round3(targ)
+            + " → scaleUP lengthFactor=" + round3(lengthFactor)
+            + " (leaves=" + list.size() + ")");
+
+      scaleOrgansInGridCell(list, lengthFactor, c);
+    } else if (diff < 0.0) {
+      CellExcess ce = new CellExcess();
+      ce.cell = c;
+      ce.excessArea = cur - targ;
+      ce.excessDensity = ce.excessArea / cellArea;
+      ce.leaves = list;
+      excessCells.add(ce);
+    }
+  }
+
+  if (!excessCells.isEmpty()) {
+    java.util.Collections.sort(excessCells, new java.util.Comparator() {
+      public int compare(Object a, Object b) {
+        CellExcess A = (CellExcess) a;
+        CellExcess B = (CellExcess) b;
+        if (A.excessDensity < B.excessDensity) return 1;
+        if (A.excessDensity > B.excessDensity) return -1;
+        if (A.excessArea < B.excessArea) return 1;
+        if (A.excessArea > B.excessArea) return -1;
+        return 0;
+      }
+    });
+
+    String order = "[LeafPlanner/T1] grid excess order:";
+    for (int i = 0; i < excessCells.size(); i++) {
+      CellExcess ce = (CellExcess) excessCells.get(i);
+      if (i < 12) {
+        order = order + " cell" + ce.cell
+              + "(excessLA=" + round3(ce.excessArea)
+              + ", excessDens=" + round3(ce.excessDensity) + ")";
+      }
+    }
+    println(order);
+
+    for (int i = 0; i < excessCells.size(); i++) {
+      CellExcess ce = (CellExcess) excessCells.get(i);
+      println("[LeafPlanner/T1] cell " + ce.cell
+            + " LA_cur=" + round3(LA_by_cell[ce.cell])
+            + " > LA_targ=" + round3(cfg.gridLATargets[ce.cell])
+            + " → remove leaves, excessLA=" + round3(ce.excessArea)
+            + " excessDens=" + round3(ce.excessDensity)
+            + " (leaves=" + ce.leaves.size() + ")");
+
+      pruneLeavesInGridCell_DenseRank(ce.leaves, ce.excessArea, ce.cell);
+    }
+  }
+}
+
+// ------------------------------------------------------------------------
+// Helper: prune leaves in a grid cell until 'excessArea' is removed
+// ------------------------------------------------------------------------
+static void pruneLeavesInGridCell_DenseRank(java.util.List leavesInCell,
+                                            double excessArea,
+                                            int cellIndex) {
+  if (leavesInCell == null || leavesInCell.isEmpty()) return;
+  if (excessArea <= 0.0) return;
+
+  java.util.List typed = new java.util.ArrayList();
+  int i;
+  for (i = 0; i < leavesInCell.size(); i++) {
+    Object o = leavesInCell.get(i);
+    if (o instanceof Leaf) typed.add((Leaf) o);
+  }
+  if (typed.isEmpty()) return;
+
+  // Cell density is constant within a cell, so rank ASC then area DESC.
+  java.util.Collections.sort(typed, new java.util.Comparator() {
+    public int compare(Object a, Object b) {
+      Leaf A = (Leaf) a;
+      Leaf B = (Leaf) b;
+
+      int ra = leafRank(A);
+      int rb = leafRank(B);
+      if (ra < rb) return -1;
+      if (ra > rb) return 1;
+
+      double aa = 0.0, bb = 0.0;
+      try { aa = A.area; } catch (Throwable t) {}
+      try { bb = B.area; } catch (Throwable t) {}
+      if (aa < bb) return 1;
+      if (aa > bb) return -1;
+      return 0;
+    }
+  });
+
+  double removedLA = 0.0;
+  int removedCount = 0;
+
+  int dbg = Math.min(10, typed.size());
+  String dbgLine = "[LeafPlanner/T1] cell " + cellIndex + " lowRank candidate preview:";
+  for (i = 0; i < dbg; i++) {
+    Leaf lfDbg = (Leaf) typed.get(i);
+    double aa = 0.0;
+    try { aa = Math.max(0.0, lfDbg.area); } catch (Throwable t) {}
+    dbgLine = dbgLine + " [r=" + leafRank(lfDbg) + ",A=" + round3(aa) + "]";
+  }
+  println(dbgLine);
+
+  for (i = 0; i < typed.size() && removedLA < excessArea; i++) {
+    Leaf lf = (Leaf) typed.get(i);
+    if (lf == null) continue;
+    double a = 0.0;
+    try { a = Math.max(0.0, lf.area); } catch (Throwable t) {}
+    if (a <= 0.0) continue;
+
+    removedLA += a;
+    removedCount++;
+    removeLeaf(lf);
+  }
+
+  println("[LeafPlanner/T1] cell " + cellIndex
+        + " removedLeaves=" + removedCount
+        + " removedLA=" + round3(removedLA)
+        + " requestedExcess=" + round3(excessArea)
+        + " using lowRank-first priority.");
+}
+
+// ------------------------------------------------------------------
+// Scale leaf + petiole + internode geometry for one grid cell.
+//
+// - leavesInCell: all Leaf instances that were assigned to cell c
+//                 (e.g. leaves_by_cell[c]).
+// - lengthFactor: scale factor for lengths (L' = L * lengthFactor).
+//                 Leaf area/biomass are scaled ~ lengthFactor².
+// - cellIndex   : just for logging.
+// ------------------------------------------------------------------
+static void scaleOrgansInGridCell(java.util.List leavesInCell,
+                                  double lengthFactor,
+                                  int cellIndex) {
+  if (leavesInCell == null || leavesInCell.isEmpty()) return;
+  if (lengthFactor <= 0.0) {
+    println("[LeafPlanner/T1] scaleOrgansInGridCell: lengthFactor<=0 → skip (cell "
+          + cellIndex + ")");
+    return;
+  }
+
+  double areaFactor = lengthFactor * lengthFactor;
+
+  // Make sure we don't scale the same petiole / internode multiple times
+  // if several leaves in this cell are attached to the same organs.
+  java.util.Set seenPet = new java.util.HashSet();   // Set<Petiole>
+  java.util.Set seenItn = new java.util.HashSet();   // Set<Internode>
+
+  int nLeaves = 0;
+  int nPet    = 0;
+  int nItn    = 0;
+
+  int i;
+  for (i = 0; i < leavesInCell.size(); i++) {
+    Leaf lf = null;
+    try {
+      lf = (Leaf) leavesInCell.get(i);
+    } catch (Throwable t) {
+      continue;
+    }
+    if (lf == null) continue;
+
+    // ----------------- LEAF SCALING ---------------------------------
+    try { lf.length *= lengthFactor; }   catch (Throwable t) {}
+    try { lf.width  *= lengthFactor; }   catch (Throwable t) {}
+    try { lf.potLength *= lengthFactor; } catch (Throwable t) {}
+
+    try { lf.area    *= areaFactor; }    catch (Throwable t) {}
+
+    nLeaves++;
+
+    // ----------------- PETIOLE SCALING ------------------------------
+    try {
+      Petiole pt = null;
+      try {
+        // any upstream petiole on the same axis will do
+        pt = first((* lf (<--)+ p:Petiole *));
+      } catch (Throwable t2) {
+        pt = null;
+      }
+
+      if (pt != null && !seenPet.contains(pt)) {
+        seenPet.add(pt);
+
+        try { pt.length  *= lengthFactor; } catch (Throwable t2) {}
+        try { pt.width   *= lengthFactor; } catch (Throwable t2) {}
+        // If you maintain biomass/area on petioles, you can treat them
+        // like slender rods: biomass ∝ length.
+        nPet++;
+      }
+    } catch (Throwable t) {
+      // be robust across species where Petiole may differ
+    }
+
+    // ----------------- INTERNODE SCALING ----------------------------
+    try {
+      Internode itn = null;
+      try {
+        // go upstream from the leaf to its supporting internode
+        //The last object in the query is the query target
+        itn = first((* lf (<--)+ Internode *));
+      } catch (Throwable t2) {
+        itn = null;
+      }
+
+      if (itn != null && !seenItn.contains(itn)) {
+        seenItn.add(itn);
+
+        try { itn.length   *= lengthFactor; } catch (Throwable t2) {}
+        try { itn.diameter *= lengthFactor; } catch (Throwable t2) {}
+
+        // Very rough: biomass scales ~ length for a fixed diameter,
+        //leave biomass for the organ update itself. 
+
+        nItn++;
+      }
+    } catch (Throwable t) {
+      // ignore if Internode / biomass fields differ across architectures
+    }
+  }
+
+  println("[LeafPlanner/T1] scaleOrgansInGridCell cell=" + cellIndex
+        + " factor=" + round3(lengthFactor)
+        + " leaves=" + nLeaves
+        + " petioles=" + nPet
+        + " internodes=" + nItn);
+}
+
+
+  // ========================================================================
+  // SUPPORT METHODS
+  // ========================================================================
+// T1 twinning
+public static void runTwinning_T1(boolean dryRun) {
+  Cfg cfg = loadConfig_Twinning(1);
+  if (cfg == null) {
+    println("[LeafPlanner/T1] No valid leaf target for T1 → skip.");
+    return;
+  }
+  double LA = computeLeafAreaAllLeaves();
+  if (cfg.uprightRegionMode) runUprightRegion_T1(cfg, LA, dryRun, 1);
+  else if (!cfg.gridMode) runWholeTree_T1(cfg, LA, dryRun);
+  else runGridBased_T1(cfg, LA, dryRun);
+}
+
+// T2 twinning
+public static void runTwinning_T2(boolean dryRun) {
+  Cfg cfg = loadConfig_Twinning(2);
+  if (cfg == null) {
+    println("[LeafPlanner/T2] No valid leaf target for T2 → skip.");
+    return;
+  }
+  double LA = computeLeafAreaAllLeaves();
+  if (cfg.uprightRegionMode) runUprightRegion_T1(cfg, LA, dryRun, 2);
+  else if (!cfg.gridMode) runWholeTree_T1(cfg, LA, dryRun);  // same logic is fine
+  else runGridBased_T1(cfg, LA, dryRun);
+}
+
+static Cfg loadConfig_Twinning(int stage) {
+  Cfg cfg = new Cfg();
+
+  cfg.targetMode = normalizeLeafTargetMode(modelOptions.leafTargetMode);
+  cfg.gridMode = "gridBased".equalsIgnoreCase(cfg.targetMode);
+  cfg.uprightRegionMode = "uprightRegions".equalsIgnoreCase(cfg.targetMode);
+  cfg.maxDeltaFrac = 0.30;
+
+  if (!cfg.gridMode && !cfg.uprightRegionMode) {
+    double tgt = 0.0;
+    if (stage == 1) {
+      tgt = modelOptions.leafAreaTargetPerTree_T1;
+    } else {
+      // stage == 2
+      tgt = modelOptions.leafAreaTargetPerTree_T2;
+    }
+
+    // If still <= 0 → no leaf twinning for this stage
+    if (tgt <= 0.0) return null;
+
+    cfg.targetLA = tgt;
+  } else if (cfg.uprightRegionMode) {
+    if (stage == 1) {
+      cfg.targetLA = modelOptions.leafAreaTargetPerTree_T1;
+      cfg.uprightRegionTargets = modelOptions.leafAreaTargetsUprightRegion_T1;
+    } else {
+      cfg.targetLA = modelOptions.leafAreaTargetPerTree_T2;
+      cfg.uprightRegionTargets = modelOptions.leafAreaTargetsUprightRegion_T2;
+    }
+    if ((cfg.uprightRegionTargets == null || cfg.uprightRegionTargets.length == 0)
+        && cfg.targetLA <= 0.0) {
+      return null;
+    }
+  } else if (cfg.gridMode) {
+    cfg.gridNx   = modelOptions.twinningNx;
+    cfg.gridNz   = modelOptions.twinningNz;
+    cfg.gridXmin = modelOptions.twinningXMin;
+    cfg.gridXmax = modelOptions.twinningXMax;
+    cfg.gridZmin = modelOptions.twinningZMin;
+    cfg.gridZmax = modelOptions.twinningZMax;
+
+    // NEW: stage-specific grid targets after naming refactor
+    if (stage == 1) {
+      cfg.gridLATargets = leafAreaTargetsGrid_T1;
+    } else {
+      cfg.gridLATargets = leafAreaTargetsGrid_T2;
+    }
+
+    if (cfg.gridLATargets == null || cfg.gridLATargets.length == 0) {
+      // nothing to do for grid mode
+      return null;
+    }
+  }
+  return cfg;
+}
+
+/**
+ * Normalize user-facing leaf target mode aliases.
+ * Accepted upright-region aliases are "uprightRegions", "upright_region",
+ * "upright-region", "upright_regions", "upright-regions", and "upright3".
+ */
+static String normalizeLeafTargetMode(String modeRaw) {
+  if (modeRaw == null) return "none";
+  String mode = modeRaw.trim();
+  if ("grid".equalsIgnoreCase(mode) || "gridBased".equalsIgnoreCase(mode)
+      || "grid_based".equalsIgnoreCase(mode) || "grid-based".equalsIgnoreCase(mode)) return "gridBased";
+  if ("upright3".equalsIgnoreCase(mode) || "upright_region".equalsIgnoreCase(mode)
+      || "upright-region".equalsIgnoreCase(mode) || "upright_regions".equalsIgnoreCase(mode)
+      || "upright-regions".equalsIgnoreCase(mode) || "uprightRegions".equalsIgnoreCase(mode)) return "uprightRegions";
+  if ("wholeTree".equalsIgnoreCase(mode) || "whole_tree".equalsIgnoreCase(mode)
+      || "whole-tree".equalsIgnoreCase(mode)) return "wholeTree";
+  if ("none".equalsIgnoreCase(mode)) return "none";
+  return mode;
+}
+
+  // compute leaf area
+  static double computeLeafAreaAllLeaves() {
+    double s = 0;
+    s = sum((* l:Leaf, (l.plantNumber == 1) *)[area]);
+    return s;
+  }
+
+  static final class UprightRegionLA {
+    Internode root;
+    int uprightIdx;
+    int idx;
+    int flatIdx;
+    double xRow;
+    double uprightZMin;
+    double uprightZMax;
+    double zMin;
+    double zMax;
+    double lenM;
+    double areaNow;
+    double targetArea;
+    java.util.List leaves;
+  }
+
+  static final class UprightOrderSnap {
+    Internode root;
+    double zMin;
+    double zMax;
+    double xRow;
+    int n;
+  }
+
+  static java.util.List computeUprightRegionLA(double totalTargetLA, double[] explicitTargets) {
+    int regionCount = 3;
+    int uprightOrder = Math.max(1, MgmtUprightOrder);
+    double eps = 1.0e-9;
+    java.util.Map up2min = new java.util.HashMap();
+    java.util.Map up2max = new java.util.HashMap();
+    java.util.Map up2root = new java.util.HashMap();
+    java.util.Map up2xsum = new java.util.HashMap();
+    java.util.Map up2count = new java.util.HashMap();
+    java.util.Map root2regs = new java.util.HashMap();
+    java.util.List regs = new java.util.ArrayList();
+
+    for (Internode itn : (* i:Internode, (i.plantNumber == 1) *)) {
+      Internode root = orderRootKey(itn, uprightOrder);
+      if (root == null) continue;
+      Double mn = (Double) up2min.get(root);
+      Double mx = (Double) up2max.get(root);
+      Double xsum = (Double) up2xsum.get(root);
+      Integer n = (Integer) up2count.get(root);
+      double a = zBase(itn), b = zTip(itn);
+      double lo = (a < b) ? a : b;
+      double hi = (a < b) ? b : a;
+      if (mn == null || lo < mn.doubleValue()) up2min.put(root, Double.valueOf(lo));
+      if (mx == null || hi > mx.doubleValue()) up2max.put(root, Double.valueOf(hi));
+      up2xsum.put(root, Double.valueOf(((xsum != null) ? xsum.doubleValue() : 0.0) + localXRow(itn)));
+      up2count.put(root, Integer.valueOf(((n != null) ? n.intValue() : 0) + 1));
+      up2root.put(root, root);
+    }
+
+    java.util.List roots = new java.util.ArrayList();
+    java.util.Iterator it = up2root.keySet().iterator();
+    while (it.hasNext()) {
+      Internode root = (Internode) it.next();
+      UprightOrderSnap snap = new UprightOrderSnap();
+      snap.root = root;
+      snap.zMin = ((Double) up2min.get(root)).doubleValue();
+      snap.zMax = ((Double) up2max.get(root)).doubleValue();
+      if ((snap.zMax - snap.zMin) <= UPRIGHT_REGION_MIN_SPAN_M) continue;
+      Integer n = (Integer) up2count.get(root);
+      Double xsum = (Double) up2xsum.get(root);
+      snap.n = (n != null) ? n.intValue() : 0;
+      snap.xRow = (snap.n > 0 && xsum != null) ? (xsum.doubleValue() / snap.n) : localXRow(root);
+      roots.add(snap);
+    }
+    try {
+      java.util.Collections.sort(roots, new java.util.Comparator() {
+        public int compare(Object a, Object b) {
+          UprightOrderSnap x = (UprightOrderSnap) a;
+          UprightOrderSnap y = (UprightOrderSnap) b;
+          if (x.xRow < y.xRow) return -1;
+          if (x.xRow > y.xRow) return 1;
+          if (x.zMin < y.zMin) return -1;
+          if (x.zMin > y.zMin) return 1;
+          int hx = System.identityHashCode(x.root);
+          int hy = System.identityHashCode(y.root);
+          if (hx < hy) return -1;
+          if (hx > hy) return 1;
+          return 0;
+        }
+      });
+    } catch (Throwable t) {}
+
+    int ui;
+    for (ui = 0; ui < roots.size(); ui++) {
+      UprightOrderSnap snap = (UprightOrderSnap) roots.get(ui);
+      Internode root = snap.root;
+      double uMin = snap.zMin;
+      double uMax = snap.zMax;
+      double h = uMax - uMin;
+      double dz = h / (double) regionCount;
+      java.util.List rootRegs = new java.util.ArrayList();
+      int i;
+      for (i = 0; i < regionCount; i++) {
+        UprightRegionLA r = new UprightRegionLA();
+        r.root = root;
+        r.uprightIdx = ui;
+        r.idx = i;
+        r.flatIdx = ui * regionCount + i;
+        r.xRow = snap.xRow;
+        r.uprightZMin = uMin;
+        r.uprightZMax = uMax;
+        r.zMin = (h > eps) ? (uMin + dz * i) : uMin;
+        r.zMax = (h > eps) ? ((i == regionCount - 1) ? uMax : (uMin + dz * (i + 1))) : uMax;
+        r.lenM = Math.max(0.0, r.zMax - r.zMin);
+        r.areaNow = 0.0;
+        r.targetArea = -1.0;
+        r.leaves = new java.util.ArrayList();
+        regs.add(r);
+        rootRegs.add(r);
+      }
+      root2regs.put(root, rootRegs);
+    }
+
+    double sumLen = 0.0;
+    int ri;
+    for (ri = 0; ri < regs.size(); ri++) {
+      UprightRegionLA r = (UprightRegionLA) regs.get(ri);
+      sumLen += r.lenM;
+    }
+
+    for (Leaf lf : (* l:Leaf, (l.plantNumber == 1) *)) {
+      Internode site = first((* lf (<--)+ i:Internode *));
+      if (site == null) continue;
+      Internode root = orderRootKey(site, uprightOrder);
+      if (root == null) continue;
+      double m = 0.5 * (zBase(site) + zTip(site));
+      java.util.List rootRegs = (java.util.List) root2regs.get(root);
+      if (rootRegs == null || rootRegs.isEmpty()) continue;
+      UprightRegionLA ref = (UprightRegionLA) rootRegs.get(0);
+      int regionIdx = uprightRegionIndex(m, ref.uprightZMin, ref.uprightZMax, regionCount);
+      if (regionIdx < 0 || regionIdx >= rootRegs.size()) regionIdx = 1;
+      UprightRegionLA r = (UprightRegionLA) rootRegs.get(regionIdx);
+      if (r != null) {
+        r.leaves.add(lf);
+        r.areaNow += Math.max(0.0, lf.area);
+      }
+    }
+
+    if (explicitTargets != null && explicitTargets.length > 0) {
+      for (ri = 0; ri < regs.size(); ri++) {
+        UprightRegionLA r = (UprightRegionLA) regs.get(ri);
+        if (r.flatIdx >= explicitTargets.length) continue;
+        double raw = explicitTargets[r.flatIdx];
+        if (Double.isNaN(raw) || Double.isInfinite(raw) || raw < 0.0) continue;
+        r.targetArea = raw;
+      }
+    } else if (totalTargetLA > 0.0 && sumLen > 0.0) {
+      for (ri = 0; ri < regs.size(); ri++) {
+        UprightRegionLA r = (UprightRegionLA) regs.get(ri);
+        r.targetArea = totalTargetLA * (r.lenM / sumLen);
+      }
+    }
+    return regs;
+  }
+
+  static void runUprightRegion_T1(Cfg cfg, double LA, boolean dryRun, int stage) {
+    if (cfg == null) return;
+    boolean explicitMode = (cfg.uprightRegionTargets != null && cfg.uprightRegionTargets.length > 0);
+    if (!explicitMode && cfg.targetLA <= 0.0) return;
+    java.util.List regs = computeUprightRegionLA(cfg.targetLA, cfg.uprightRegionTargets);
+    if (regs == null || regs.isEmpty()) {
+      println("[LeafPlanner/T" + stage + "] WARN uprightRegions: no uprights found; skipping.");
+      return;
+    }
+    int uprightCount = regs.size() / 3;
+    if (explicitMode) {
+      int expectedTargets = uprightCount * 3;
+      int actualTargets = cfg.uprightRegionTargets.length;
+      println("[LeafPlanner/T" + stage + "] Upright-region explicit target mode:"
+            + " uprightCount=" + uprightCount
+            + " regionCount=3"
+            + " expectedTargets=" + expectedTargets
+            + " actualTargets=" + actualTargets);
+      if (actualTargets < expectedTargets) {
+        println("[LeafPlanner/T" + stage + "] WARN explicit upright-region targets shorter than expected; missing bins left unchanged.");
+      } else if (actualTargets > expectedTargets) {
+        println("[LeafPlanner/T" + stage + "] WARN explicit upright-region targets longer than expected; extra values ignored.");
+      }
+    }
+    int removedLeaves = 0;
+    int scaledRegs = 0;
+    int i;
+    for (i = 0; i < regs.size(); i++) {
+      UprightRegionLA r = (UprightRegionLA) regs.get(i);
+      if (r.targetArea < 0.0 || Double.isNaN(r.targetArea) || Double.isInfinite(r.targetArea)) continue;
+      if (r.areaNow > r.targetArea && !r.leaves.isEmpty()) {
+        double excess = r.areaNow - r.targetArea;
+        java.util.List L = new java.util.ArrayList();
+        L.addAll(r.leaves);
+        try {
+          java.util.Collections.sort(L, new java.util.Comparator() {
+            public int compare(Object a, Object b) {
+              Leaf x = (Leaf) a; Leaf y = (Leaf) b;
+              if (x.area < y.area) return -1;
+              if (x.area > y.area) return 1;
+              return 0;
+            }
+          });
+        } catch (Throwable t) {}
+        double removedA = 0.0;
+        int j;
+        for (j = 0; j < L.size() && removedA < excess; j++) {
+          Leaf lf = (Leaf) L.get(j);
+          removedA += Math.max(0.0, lf.area);
+          if (!dryRun) removeLeaf(lf);
+          removedLeaves++;
+        }
+      } else if (r.areaNow > 0.0 && r.areaNow < r.targetArea) {
+        double rel = (r.targetArea - r.areaNow) / Math.max(1e-9, r.areaNow);
+        if (rel > 0.0 && rel <= cfg.maxDeltaFrac) {
+          double f = Math.sqrt(r.targetArea / Math.max(1e-9, r.areaNow));
+          if (!dryRun) scaleOrgansInGridCell(r.leaves, f, -(i + 1));
+          scaledRegs++;
+        }
+      }
+    }
+    if (!dryRun) derive();
+    java.util.List after = computeUprightRegionLA(cfg.targetLA, cfg.uprightRegionTargets);
+    println("[LeafPlanner/T" + stage + "] uprightRegions: regions=" + regs.size()
+          + " removedLeaves=" + removedLeaves + " scaledRegions=" + scaledRegs);
+    for (i = 0; i < after.size(); i++) {
+      UprightRegionLA r = (UprightRegionLA) after.get(i);
+      println("  [LeafPlanner/T" + stage + "] idx=" + r.flatIdx
+            + " upright=" + r.uprightIdx
+            + " region=" + uprightRegionName(r.idx)
+            + " xRow=" + round3(r.xRow)
+            + " z=[" + round3(r.zMin) + "," + round3(r.zMax) + "]"
+            + " LA_now=" + round3(r.areaNow)
+            + " LA_target=" + round3(r.targetArea));
+    }
+  }
+
+  static int uprightRegionIndex(double z, double uMin, double uMax, int regionCount) {
+    double eps = 1.0e-9;
+    int n = (regionCount > 0) ? regionCount : 3;
+    double h = uMax - uMin;
+    if (h < eps) return Math.min(1, n - 1);
+    double t = (z - uMin) / h;
+    if (t < (1.0 / 3.0)) return 0;
+    if (t < (2.0 / 3.0)) return Math.min(1, n - 1);
+    return n - 1;
+  }
+
+  static String uprightRegionName(int idx) {
+    if (idx == 0) return "low";
+    if (idx == 1) return "mid";
+    if (idx == 2) return "upper";
+    return "region" + idx;
+  }
+    /**
+   * T2-specific removal, aware of cfg.pruneMode.
+   * 
+   * (0 and 1 both remove leaves on vegetative shoots first)
+   * 0 = Apply a fixed pruning intensity, 
+   * 1 remove fraction based LA_afterVeg and pruneTargetLA
+   */
+  static void removeFractionLeaves_T2(double frac, boolean dryRun, Cfg cfg) {
+    if (frac <= 0.0) return;
+
+    // collect all leaves once
+    java.util.List all = new java.util.ArrayList();
+    for (Leaf lf : (* Leaf *)) {
+      all.add(lf);
+    }
+    if (all.isEmpty()) return;
+
+	int nRemove = (int) Math.round(all.size() * frac);
+	if (nRemove <= 0) return;
+    
+    // Note: Step 1 removed all vegetative shoots, so at this point there are no
+	// vegetative leaves left. removeFractionLeaves_T2 should therefore NOT try
+	// to treat "vegetative leaves" specially – it should just work on all
+	// remaining leaves.
+    removeLeavesDenseRank(all, nRemove, dryRun,
+        "[LeafPlanner/T2] dense+lowRank (after veg shoot removal)", cfg);
+    
+    /* if (cfg == null || cfg.pruneMode == 0) {
+      // fall back to simple random removal (current behavior)
+      removeLeavesRandom(all, nRemove, dryRun, "[LeafPlanner/T2] random");
+    } else if (cfg.pruneMode == 1) {
+      removeLeavesVegFirst(all, nRemove, dryRun);
+    } else {
+      // unknown mode → be safe & use random
+      removeLeavesRandom(all, nRemove, dryRun, "[LeafPlanner/T2] random(fallback)");
+    } */
+    
+  }
+
+
+  // remove a fraction of leaves globally
+  static void removeFractionLeaves(double frac, boolean dryRun) {
+    removeFractionLeaves(frac, dryRun, null, "[LeafPlanner] dense+lowRank");
+  }
+
+  static void removeFractionLeaves(double frac, boolean dryRun, Cfg cfgOrNull, String label) {
+    if (frac <= 0) return;
+    java.util.List L = new java.util.ArrayList();
+    for (Leaf lf : (* Leaf *)) L.add(lf);
+
+    if (L.isEmpty()) return;
+
+    int nRemove = (int)Math.round(L.size() * frac);
+    removeLeavesDenseRank(L, nRemove, dryRun, label, cfgOrNull);
+  }
+
+  // ------------------------------------------------------------------
+  // Dense+rank candidate scoring helpers
+  // ------------------------------------------------------------------
+  static int leafRank(Leaf lf) {
+    if (lf == null) return 999999;
+
+    int r = getIntField(lf, "rank", Integer.MIN_VALUE);
+    if (r != Integer.MIN_VALUE) return r;
+
+    try {
+      Internode itn = first((* lf (<--)+ i:Internode *));
+      if (itn != null) return getIntField(itn, "rank", 999999);
+    } catch (Throwable t) {}
+
+    return 999999;
+  }
+
+  static Cfg ensureDensityGridCfg(Cfg baseCfg, java.util.List leaves) {
+    Cfg cfg = new Cfg();
+    if (baseCfg != null) {
+      cfg.gridMode = baseCfg.gridMode;
+      cfg.gridNx = baseCfg.gridNx;
+      cfg.gridNz = baseCfg.gridNz;
+      cfg.gridXmin = baseCfg.gridXmin;
+      cfg.gridXmax = baseCfg.gridXmax;
+      cfg.gridZmin = baseCfg.gridZmin;
+      cfg.gridZmax = baseCfg.gridZmax;
+    }
+
+    if (cfg.gridNx <= 0) {
+      try { cfg.gridNx = Math.max(2, twinningNx); } catch (Throwable t) {}
+    }
+    if (cfg.gridNz <= 0) {
+      try { cfg.gridNz = Math.max(2, twinningNz); } catch (Throwable t) {}
+    }
+
+    if (!useAutoFitTwinningGridBoundsMode()) {
+      try { cfg.gridXmin = twinningXMin; } catch (Throwable t) {}
+      try { cfg.gridXmax = twinningXMax; } catch (Throwable t) {}
+      try { cfg.gridZmin = twinningZMin; } catch (Throwable t) {}
+      try { cfg.gridZmax = twinningZMax; } catch (Throwable t) {}
+    }
+
+    if (cfg.gridNx > 0 && cfg.gridNz > 0
+        && cfg.gridXmax > cfg.gridXmin && cfg.gridZmax > cfg.gridZmin) {
+      return cfg;
+    }
+
+    double xmin = 1e30, xmax = -1e30;
+    double zmin = 1e30, zmax = -1e30;
+    int i;
+    for (i = 0; i < leaves.size(); i++) {
+      Leaf lf = (Leaf) leaves.get(i);
+      if (lf == null) continue;
+      double xr = localXRow(lf);
+      double zr = zBase(lf);
+      if (xr < xmin) xmin = xr;
+      if (xr > xmax) xmax = xr;
+      if (zr < zmin) zmin = zr;
+      if (zr > zmax) zmax = zr;
+    }
+
+    if (xmin > xmax) { xmin = -1.0; xmax = 1.0; }
+    if (zmin > zmax) { zmin = 0.0; zmax = 2.0; }
+
+    double pad = 0.05;
+    cfg.gridXmin = xmin - pad;
+    cfg.gridXmax = xmax + pad;
+    cfg.gridZmin = zmin - pad;
+    cfg.gridZmax = zmax + pad;
+
+    int nx = 6, nz = 6;
+    try { nx = Math.max(2, twinningNx); } catch (Throwable t) {}
+    try { nz = Math.max(2, twinningNz); } catch (Throwable t) {}
+    cfg.gridNx = nx;
+    cfg.gridNz = nz;
+
+    // keep non-zero span for robust indexing
+    if (cfg.gridXmax <= cfg.gridXmin) cfg.gridXmax = cfg.gridXmin + 0.1;
+    if (cfg.gridZmax <= cfg.gridZmin) cfg.gridZmax = cfg.gridZmin + 0.1;
+
+    return cfg;
+  }
+
+  static void autoFitGridBoundsToCurrentLeafCanopy(Cfg cfg, String label) {
+    if (cfg == null) return;
+    if (cfg.gridNx <= 0 || cfg.gridNz <= 0) return;
+
+    double xmin = 1e30, xmax = -1e30;
+    double zmax = -1e30;
+    int seen = 0;
+
+    for (Leaf lf : (* l:Leaf, (l.plantNumber == 1) *)) {
+      if (lf == null) continue;
+      double xr = localXRow(lf);
+      double zr = zBase(lf);
+      if (Double.isNaN(xr) || Double.isInfinite(xr)) continue;
+      if (Double.isNaN(zr) || Double.isInfinite(zr)) continue;
+      if (xr < xmin) xmin = xr;
+      if (xr > xmax) xmax = xr;
+      if (zr > zmax) zmax = zr;
+      seen++;
+    }
+
+    if (seen == 0) {
+      for (Internode itn : (* i:Internode, (i.plantNumber == 1) *)) {
+        if (itn == null) continue;
+        double xr = localXRow(itn);
+        double zr = zBase(itn);
+        if (Double.isNaN(xr) || Double.isInfinite(xr)) continue;
+        if (Double.isNaN(zr) || Double.isInfinite(zr)) continue;
+        if (xr < xmin) xmin = xr;
+        if (xr > xmax) xmax = xr;
+        if (zr > zmax) zmax = zr;
+        seen++;
+      }
+    }
+
+    if (seen == 0) return;
+    if (xmin > xmax) { xmin = -0.5; xmax = 0.5; }
+    if (zmax < 0.0) zmax = 0.5;
+
+    double oldXmin = cfg.gridXmin;
+    double oldXmax = cfg.gridXmax;
+    double oldZmin = cfg.gridZmin;
+    double oldZmax = cfg.gridZmax;
+
+    double xPad = 0.05;
+    double zPad = 0.05;
+    cfg.gridXmin = xmin - xPad;
+    cfg.gridXmax = xmax + xPad;
+    cfg.gridZmin = 0.0;
+    cfg.gridZmax = zmax + zPad;
+
+    if (cfg.gridXmax <= cfg.gridXmin) cfg.gridXmax = cfg.gridXmin + 0.1;
+    if (cfg.gridZmax <= cfg.gridZmin) cfg.gridZmax = cfg.gridZmin + 0.1;
+
+    if (Math.abs(oldXmin - cfg.gridXmin) > 1e-9
+        || Math.abs(oldXmax - cfg.gridXmax) > 1e-9
+        || Math.abs(oldZmin - cfg.gridZmin) > 1e-9
+        || Math.abs(oldZmax - cfg.gridZmax) > 1e-9) {
+      println(label + " auto-fit grid bounds:"
+            + " x=[" + round3(cfg.gridXmin) + "," + round3(cfg.gridXmax) + "]"
+            + " z=[" + round3(cfg.gridZmin) + "," + round3(cfg.gridZmax) + "]"
+            + " fromCanopyMinX=" + round3(xmin)
+            + " maxX=" + round3(xmax)
+            + " maxZ=" + round3(zmax)
+            + " n=" + seen);
+    }
+  }
+
+  static boolean useAutoFitTwinningGridBoundsMode() {
+    try {
+      return "AUTO_FIT".equalsIgnoreCase(twinningGridBoundsMode);
+    } catch (Throwable t) {}
+    return false;
+  }
+
+  static double[] computeCellDensity(Cfg cfg, java.util.List leaves, java.util.List[] leavesByCellOut) {
+    int cells = cfg.gridNx * cfg.gridNz;
+    double[] LA = new double[cells];
+    int i;
+
+    for (i = 0; i < cells; i++) {
+      if (leavesByCellOut != null) leavesByCellOut[i] = new java.util.ArrayList();
+    }
+
+    for (i = 0; i < leaves.size(); i++) {
+      Leaf lf = (Leaf) leaves.get(i);
+      if (lf == null) continue;
+
+      double xr = localXRow(lf);
+      double zr = zBase(lf);
+      int c = gridIndex(cfg, xr, zr);
+      if (c < 0) continue;
+
+      double a = 0.0;
+      try { a = Math.max(0.0, lf.area); } catch (Throwable t) {}
+      LA[c] += a;
+
+      if (leavesByCellOut != null) leavesByCellOut[c].add(lf);
+    }
+
+    double dx = (cfg.gridXmax - cfg.gridXmin) / Math.max(1, cfg.gridNx);
+    double dz = (cfg.gridZmax - cfg.gridZmin) / Math.max(1, cfg.gridNz);
+    double cellArea = Math.max(1e-9, dx * dz);
+
+    double[] dens = new double[cells];
+    for (i = 0; i < cells; i++) dens[i] = LA[i] / cellArea;
+    return dens;
+  }
+
+  static void shuffleDenseRankTieBlocks(java.util.List cands) {
+    if (cands == null || cands.size() < 2) return;
+    int i = 0;
+    while (i < cands.size()) {
+      LeafCand A = (LeafCand) cands.get(i);
+      int j = i + 1;
+      while (j < cands.size()) {
+        LeafCand B = (LeafCand) cands.get(j);
+        boolean sameDensity = Math.abs(A.density - B.density) < 1e-9;
+        boolean sameRank = (A.rank == B.rank);
+        boolean sameArea = Math.abs(A.area - B.area) < 1e-9;
+        if (!(sameDensity && sameRank && sameArea)) break;
+        j++;
+      }
+
+      if (j - i > 1) {
+        java.util.List block = new java.util.ArrayList();
+        int k;
+        for (k = i; k < j; k++) block.add(cands.get(k));
+        try { java.util.Collections.shuffle(block, new java.util.Random()); } catch (Throwable t) {}
+        for (k = i; k < j; k++) cands.set(k, block.get(k - i));
+      }
+      i = j;
+    }
+  }
+
+  static void removeLeavesDenseRank(java.util.List leavesAll,
+                                    int nRemove,
+                                    boolean dryRun,
+                                    String label,
+                                    Cfg densityCfgOrNull) {
+    if (leavesAll == null || leavesAll.isEmpty() || nRemove <= 0) return;
+
+    Cfg cfg = ensureDensityGridCfg(densityCfgOrNull, leavesAll);
+    int cells = cfg.gridNx * cfg.gridNz;
+    java.util.List[] leavesByCell = new java.util.ArrayList[cells];
+    double[] dens = computeCellDensity(cfg, leavesAll, leavesByCell);
+
+    java.util.List cands = new java.util.ArrayList();
+    int i;
+    for (i = 0; i < leavesAll.size(); i++) {
+      Leaf lf = (Leaf) leavesAll.get(i);
+      if (lf == null) continue;
+
+      double xr = localXRow(lf);
+      double zr = zBase(lf);
+      int c = gridIndex(cfg, xr, zr);
+
+      LeafCand cd = new LeafCand();
+      cd.leaf = lf;
+      cd.rank = leafRank(lf);
+      cd.cell = c;
+      cd.density = (c >= 0 && c < dens.length) ? dens[c] : 0.0;
+      try { cd.area = Math.max(0.0, lf.area); } catch (Throwable t) { cd.area = 0.0; }
+      cands.add(cd);
+    }
+    if (cands.isEmpty()) return;
+
+    java.util.Collections.sort(cands, new java.util.Comparator() {
+      public int compare(Object a, Object b) {
+        LeafCand A = (LeafCand) a;
+        LeafCand B = (LeafCand) b;
+
+        if (A.density < B.density) return 1;
+        if (A.density > B.density) return -1;
+
+        if (A.rank < B.rank) return -1;
+        if (A.rank > B.rank) return 1;
+
+        if (A.area < B.area) return 1;
+        if (A.area > B.area) return -1;
+        return 0;
+      }
+    });
+
+    shuffleDenseRankTieBlocks(cands);
+
+    if (!dryRun) {
+      int dbgN = Math.min(10, cands.size());
+      String dbg = label + " topCandidates:";
+      for (i = 0; i < dbgN; i++) {
+        LeafCand c = (LeafCand) cands.get(i);
+        dbg = dbg + " [cell=" + c.cell
+            + ",dens=" + round3(c.density)
+            + ",rank=" + c.rank
+            + ",A=" + round3(c.area) + "]";
+      }
+      println(dbg);
+    }
+
+    int removed = 0;
+    for (i = 0; i < cands.size() && removed < nRemove; i++) {
+      LeafCand cd = (LeafCand) cands.get(i);
+      Leaf lf = cd.leaf;
+      if (lf == null) continue;
+
+      if (!dryRun) {
+        if (recordPruneStats) {
+          double a = cd.area;
+          double bm = getBiomass(lf);
+          pruneLeafAreaRemoved += a;
+          pruneLeafBiomassRemoved += bm;
+          pruneLeavesRemoved++;
+        }
+        removeLeaf(lf);
+      }
+      removed++;
+    }
+
+    println(label + " removed " + removed + " leaves (target=" + nRemove
+          + ") using dense+lowRank priority.");
+  }
+
+  static void removeLeavesRandom(java.util.List L, int nRemove,
+                                 boolean dryRun, String label){
+    if (L == null || L.isEmpty() || nRemove <= 0) return;
+    try { java.util.Collections.shuffle(L, new java.util.Random()); } catch(Throwable t){}
+
+    int removed = 0;
+    int i;
+    for (i = 0; i < L.size() && removed < nRemove; i++){
+      Leaf lf = (Leaf) L.get(i);
+
+      if (lf == null) continue;
+
+      if (!dryRun) {
+        // stats only for *pruning* (T2), not for twinning
+        if (recordPruneStats) {
+          double a  = Math.max(0.0, lf.area);
+          double bm = getBiomass(lf);
+          pruneLeafAreaRemoved    += a;
+          pruneLeafBiomassRemoved += bm;
+          pruneLeavesRemoved++;
+        }
+        removeLeaf(lf);
+      }
+      removed++;
+    }
+    println(label + " removed " + removed + " leaves (target=" + nRemove + ")");
+  }
+
+  
+    // Veg-first: delete leaves on vegetative shoots first,
+  // then, if needed, from other shoots.
+  static void removeLeavesVegFirst(java.util.List allLeaves,
+                                   int nRemove,
+                                   boolean dryRun) {
+    if (allLeaves == null || allLeaves.isEmpty() || nRemove <= 0) return;
+
+    java.util.List veg    = new java.util.ArrayList();
+    java.util.List others = new java.util.ArrayList();
+
+    for (int i=0; i<allLeaves.size(); i++){
+      Leaf lf = (Leaf) allLeaves.get(i);
+      if (isLeafOnVegetativeShoot(lf)) veg.add(lf);
+      else                             others.add(lf);
+    }
+
+    try { java.util.Collections.shuffle(veg,    new java.util.Random()); } catch(Throwable t){}
+    try { java.util.Collections.shuffle(others, new java.util.Random()); } catch(Throwable t){}
+
+    int removed = 0;
+
+    // 1) remove from vegetative shoots
+    for (int i=0; i<veg.size() && removed<nRemove; i++){
+      Leaf lf = (Leaf) veg.get(i);
+      if (!dryRun) removeLeaf(lf);
+      removed++;
+    }
+
+    // 2) if still needed, from other shoots
+    for (int i=0; i<others.size() && removed<nRemove; i++){
+      Leaf lf = (Leaf) others.get(i);
+      if (!dryRun) removeLeaf(lf);
+      removed++;
+    }
+
+    println("[LeafPlanner/T2] veg-first removed " + removed
+         + " leaves (target=" + nRemove
+         + ", vegPool=" + veg.size()
+         + ", otherPool=" + others.size() + ")");
+  }
+
+
+  static void removeLeaf(Leaf lf) {
+    try { 
+      [ Petiole (-->)+ lf ==>> ; ];
+      
+    } catch(Throwable t){}
+  }
+
+  // simple leaf area scaling
+  static void scaleLeafSizes(double scale){
+    if (scale <= 0) return;
+    for (Leaf lf : (* Leaf *)) {
+      lf.area *= scale;
+    }
+  }
+
+    /**
+   * Heuristic: a leaf is considered "vegetative" if
+   *   - its parent ShootBase (or Shoot) has an explicit vegetative flag or type, or
+   *   - it ultimately comes from a BudAppleService with budType==1 (veg).
+   *
+   * Adjust the internal tests to your actual shoot type coding if needed.
+   */
+  static boolean isLeafOnVegetativeShoot(Leaf lf) {
+    if (lf == null) return false;
+
+
+    return false;
+  }
+
+  // local row coordinate; same as BudPlanner.xRowLocal
+  // local row coordinate; same logic as BudPlanner.xRowLocal
+static double localXRow(Organ obj){
+  try { obj.update3D(); } catch(Throwable t){}
+
+  // use wrapper Double to allow null-checks
+  Double xwD = getDoubleField(obj, "x");
+  if (xwD == null) xwD = getDoubleField(obj, "X");
+
+  Double ywD = getDoubleField(obj, "y");
+  if (ywD == null) ywD = getDoubleField(obj, "Y");
+
+  double xw = (xwD != null) ? xwD.doubleValue() : 0.0;
+  double yw = (ywD != null) ? ywD.doubleValue() : 0.0;
+
+  double dx = xw - tx;
+  double dy = yw - ty;
+  double th = rowOrientation * Math.PI / 180.0;
+
+  return dx * Math.cos(th) + dy * Math.sin(th);
+}
+
+
+  static int gridIndex(Cfg cfg, double xr, double zr){
+    if (xr < cfg.gridXmin || xr > cfg.gridXmax) return -1;
+    if (zr < cfg.gridZmin || zr > cfg.gridZmax) return -1;
+
+    double dx = (cfg.gridXmax - cfg.gridXmin)/cfg.gridNx;
+    double dz = (cfg.gridZmax - cfg.gridZmin)/cfg.gridNz;
+
+    int ix = (int)((xr - cfg.gridXmin)/dx);
+    int iz = (int)((zr - cfg.gridZmin)/dz);
+
+    if (ix<0 || ix>=cfg.gridNx) return -1;
+    if (iz<0 || iz>=cfg.gridNz) return -1;
+
+    return iz*cfg.gridNx + ix;
+  }
+  static double round3(double v) {
+    return Math.round(v * 1000.0) / 1000.0;
+  }
+
+
+  // --- Safe field readers (fallbacks) ---
+  static Double getDoubleField(Object obj, String name) {
+    try {
+      if (obj == null)
+        return null;
+      java.lang.reflect.Field f = obj.getClass().getField(name);
+      Object v = f.get(obj);
+      if (v instanceof Number)
+        return Double.valueOf(((Number) v).doubleValue());
+      if (v instanceof String)
+        return Double.valueOf(Double.parseDouble((String) v));
+    } catch (Throwable t) {
+      /* ignore */ }
+    return null;
+  }
+  static double zBase(Organ itn) {
+    Double v = getDoubleField(itn, "z");
+    if (v == null)
+      v = getDoubleField(itn, "Z");
+    if (v == null)
+      v = getDoubleField(itn, "zCoord");
+    return (v != null) ? v.doubleValue() : 0.0;
+  }
+
+  static double zTip(Organ itn) {
+    Double v = getDoubleField(itn, "endZ");
+    if (v == null)
+      v = getDoubleField(itn, "tipZ");
+    if (v == null)
+      v = getDoubleField(itn, "Z_end");
+    return (v != null) ? v.doubleValue() : zBase(itn);
+  }
+
+  static Internode orderRootKey(Internode itn, int targetOrder) {
+    if (itn == null)
+      return null;
+    int ord = (targetOrder > 0) ? targetOrder : 1;
+    Internode anchor = itn;
+    if (anchor.order != ord) {
+      Internode anc = first((* itn (<--)+ j:Internode, (j.order == ord) *));
+      if (anc != null)
+        anchor = anc;
+    }
+    Internode cur = anchor;
+    int guard = 0;
+    while (guard++ < 2000) {
+      Internode prev = first((* cur (<--)+ j:Internode, (j.order == anchor.order) *));
+      if (prev == null)
+        break;
+      cur = prev;
+    }
+    return cur;
+  }
+
+  
+  // --- Read static global/model option fields safely via reflection ---------
+static double getDoubleOption(String fieldName, double defaultVal) {
+  String[] classes = new String[] { "modelOptions", "globalParameters", "plantParameters" };
+  int i;
+
+  for (i = 0; i < classes.length; i++) {
+    try {
+      Class cls = Class.forName(classes[i]);
+      java.lang.reflect.Field f = cls.getField(fieldName);
+      Object v = f.get(null);
+      if (v instanceof Number) {
+        return ((Number) v).doubleValue();
+      }
+      if (v instanceof String) {
+        return Double.valueOf(Double.parseDouble((String) v)).doubleValue();
+      }
+    } catch (Throwable t) {
+      // ignore and try next
+    }
+  }
+  return defaultVal;
+}
+
+static int getIntOption(String fieldName, int defaultVal) {
+  double d = getDoubleOption(fieldName, Double.NaN);
+  if (d == d) { // not NaN
+    return (int) Math.round(d);
+  }
+  return defaultVal;
+}
+  // Approximate biomass used for pruning stats
+  static double getBiomass(Object organ) {
+    Double d;
+
+    d = getDoubleField(organ, "dryMass");
+    if (d != null) return Math.max(0.0, d.doubleValue());
+
+    d = getDoubleField(organ, "DW");
+    if (d != null) return Math.max(0.0, d.doubleValue());
+
+    d = getDoubleField(organ, "freshMass");
+    if (d != null) return Math.max(0.0, d.doubleValue());
+
+    d = getDoubleField(organ, "FW");
+    if (d != null) return Math.max(0.0, d.doubleValue());
+
+    d = getDoubleField(organ, "mass");
+    if (d != null) return Math.max(0.0, d.doubleValue());
+
+    d = getDoubleField(organ, "biomass");
+    if (d != null) return Math.max(0.0, d.doubleValue());
+
+    return 0.0;
+  }
+
+ // ------------------------------------------------------------------
+  // Simple debug helper: print #leaves and total LA
+  // ------------------------------------------------------------------
+  public static void debugLeafSummary(String tag) {
+    int n = 0;
+    double la = 0.0;
+    n = (int) count((* l:Leaf, (l.plantNumber == 1)*));
+    la = sum((* l:Leaf, (l.plantNumber == 1) *)[area]);
+
+    println("[LeafPlanner] DEBUG [" + tag + "]: nLeaves=" + n
+      + "  totalLA=" + round3(la) + " m^2");
+  }
+
+  // --- Safe int field reader (for rank/nodeNumber/cordonNumber, etc.) -------
+	static int getIntField(Object obj, String name, int defaultVal) {
+	  try {
+		if (obj == null) return defaultVal;
+		java.lang.reflect.Field f = obj.getClass().getField(name);
+		Object v = f.get(obj);
+		if (v instanceof Number) return ((Number)v).intValue();
+		if (v instanceof String) return Integer.parseInt((String)v);
+	  } catch (Throwable t) { /* ignore */ }
+	  return defaultVal;
+	}
+/** 
+ * Returns a list of internodes that have no descendant internodes 
+ * (tips of axes / shoots).
+ */
+static java.util.List findShootTips() {
+  java.util.List tips = new java.util.ArrayList(); // List<Internode>
+
+  for (Internode itn : (* Internode *)) {
+    boolean hasDescendant = false;
+    // any descendant internode reachable via "-->"
+    for (Internode child : (* itn (-->)+ c:Internode *)) {
+      hasDescendant = true;
+      break;
+    }
+    if (!hasDescendant) {
+      tips.add(itn);
+    }
+  }
+
+  println("[LeafPlanner] found " + tips.size() + " shoot tips.");
+  return tips;
+}
+
+static PlantBase findPlantBaseForInternode(Internode itn) {
+  int pn = 0;
+  if(itn == null) { println("Input tnternode is null"); return null;};
+  
+  try { pn = itn.plantNumber; } catch (Throwable t) {
+    pn = getIntField(itn, "plantNumber", 0);
+  }
+
+  for (PlantBase pb : (* PlantBase *)) {
+    try {
+      if (pb.plantNumber == pn) return pb;
+    } catch (Throwable t) {
+      if (getIntField(pb, "plantNumber", -1) == pn) return pb;
+    }
+  }
+  return null;
+}
+
+static Leaf findTemplateLeaf(Internode itn) {
+  // try leaves downstream of this internode
+  for (Leaf lf : (* itn (-->)+ l:Leaf *)) {
+    return lf;
+  }
+  // fallback: any leaf on the same plant
+  int pn = getIntField(itn, "plantNumber", 0);
+  for (Leaf lf : (* Leaf *)) {
+    int pl = getIntField(lf, "plantNumber", 0);
+    if (pl == pn) return lf;
+  }
+  return null;
+}
+
+
+/**
+ * Connects newItn after 'tip' in the shoot, and attaches newLeaf to newItn.
+ * 
+ * You MUST replace the comments with your actual graph-grammar 
+ * rewrite(s) – e.g. the same logic your architecture generator uses to 
+ * insert a new phytomer.
+ */
+static void connectNewPhytomer(Internode tip, Internode newItn, Leaf newLeaf) {
+  try {
+    // PSEUDO-CODE (replace with your own RGG rules):
+
+    // 1) Attach newItn after tip along the axis:
+    // [ tip ==>> tip --> newItn ];
+    [ 
+    	t:tip ==> t ni:newItn [nl:newLeaf] 
+    	{
+    		
+    	
+    	
+    	}
+      ;
+    ]
+
+    // 2) Attach a Petiole + Leaf (if you use explicit petioles):
+    // [ newItn ==>> newItn --> pet:Petiole --> newLeaf ];
+
+    // For now this function is intentionally empty so that code compiles.
+  } catch (Throwable t) {
+    println("[LeafPlanner] WARNING: failed to connect new phytomer: " + t);
+  }
+}
+}

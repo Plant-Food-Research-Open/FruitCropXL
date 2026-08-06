@@ -1,0 +1,50 @@
+import static extraTools.*;
+import java.io.Serializable;
+import static developApple.*;
+import static developGrapevine.*;
+import static developGrapevineStructuralVariation.*;
+
+
+public class DevelopServiceFactory implements Serializable {
+	public static DevelopService getService(String special_scenario, String species, boolean useStructuralVariation) {
+	 	if ("apple".equals(species)) 
+		{
+				return new DevelopApple();			
+		}
+		else if ("grapevine".equals(species))
+		{
+			if (useStructuralVariation) {
+				return new DevelopGrapevineStructuralVariation();
+			} else {
+				return new DevelopGrapevine();
+			}
+		}
+		else 
+		{
+			return new DevelopApple();
+		}
+	}
+}
+
+public abstract class DevelopService implements Serializable {
+
+	/**
+	 * The develop method simulates the development of an apple plant based on various conditions and rules.
+	 * This method is responsible for gemination, phytomer production, apex termination, and other plant behaviors.
+	 * 
+	 * <p><b>File Configuration:</b> The method uses a static file named "develop_apple.rgg" to identify the standard development file.</p>
+	 * 
+	 * <h3>Method Responsibilities:</h3>
+	 * <ul>
+	 *   <li><b>Gemination:</b> Initiates an apex if a bud should break.</li>
+	 *   <li><b>Apex Update:</b> Updates the water potential for each apex.</li>
+	 *   <li><b>Phytomer Production:</b> Produces a vegetative phytomer if conditions are met.</li>
+	 *   <li><b>Apex Termination:</b> Terminates an apex if conditions are met.</li>
+	 *   <li><b>Harvesting:</b> Harvests the plant if conditions are met.</li>
+	 *   <li><b>Pruning:</b> Prunes the plant on a specific day if enabled.</li>
+	 * </ul>
+	 * 
+	 * @see #isFileConfigCorrect() for checking file configuration.
+	 */
+	public abstract void develop();
+}

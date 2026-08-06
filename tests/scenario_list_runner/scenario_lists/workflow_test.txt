@@ -1,0 +1,12 @@
+model.options.dynamicApple.json
+model.options.dynamicGrapevine.json
+model.options.ANTONY.2010.json
+model.options.Bobeica.2013.json
+model.options.DAI.2012.12L.json
+model.options.DAI.2012.3L.json
+model.options.PN.MA07.json
+model.options.optimal.canopy.architecture.smallShoot.json
+model.options.3D.root.json
+model.options.Sauvignon.blanc.NZ.json
+model.options.Sauvignon.blanc.SV.json
+model.options.FOPS-D34.json

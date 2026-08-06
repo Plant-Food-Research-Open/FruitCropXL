@@ -1,0 +1,730 @@
+//java modules
+import de.grogra.vecmath.Matrix34d;
+import de.grogra.vecmath.Math2;
+import java.util.Arrays;
+import java.util.ArrayList;
+import java.util.List;
+//rgg modules
+import static absOrgan.*;
+import static plantBase.*;
+import static java.lang.Math.*;
+import static globalParameters.*;
+import static plantParameters.*;
+import static modelOptions.*;
+import static initialConditions.*;
+import static extraTools.*;
+import static carbonTransport.*;
+import static soil.*;
+import static environment.*;
+import static archReader.*;
+import static rootSystem.*;
+import static fineRoot.*;
+import static structuralRoot.*;
+
+import io.github.fruitcropxl.config.adapters.*;
+import io.github.fruitcropxl.config.params.*;
+import io.github.fruitcropxl.config.params.groups.*;
+import io.github.fruitcropxl.config.params.structures.*;
+
+/**
+ * StructuralRoot module extends the GrowingOrgan class and represents the
+ * characteristics and behavior of structural roots in a plant, which is 
+ * mainly conducting carbon balance calculations
+ */
+module StructuralRoot extends GrowingOrgan {
+	/***************************************************************************/
+	/* this part is for state and other variables*/
+	/**************************************************************************/
+	// Existing class members...
+	/** Total length, just for structural root */
+	double stRootProportion;
+	double deltaRadius;
+	double deltaRadius_PT;
+	int layer;
+	/** grid x, y index based x, y position and soil grid size*/
+	int gridX, gridY;
+	//effective legnth used in carbon transport
+	double transportLength;
+	long frID; // initializing the array;
+	long verticalParentID;
+		//hydraulic conductivity for shoot 
+	//Rx decrease with diameter, and increase with length. The trunk crossing area for the reference Rx value is 35 cm^2
+	//the diameter is 6.66 cm. from W�nsche J.N., Palmer J.W. & Greer D.H. (2000) Hall and Minchin., 2013
+	//const float Rx = 3.62e-4;  //362 kg-1 s m-1 MPa = 362/1e6 mg-1 s m-1 MPa; resistance per meter length of xylem  Rx times length get the resistance for one internode from Hall and Minchin., 2013
+	//from Rami et al., 2018 HydroShoot
+	float cx1 				; //= 1.171;  //shape parameters for the curve of shoot Ks decrease with water potential
+	float cx2 				; //= 1.6;  //relationship between diameter and Ks
+	float cx3 				; //= 2.0; //c?2 and c?3 are dimensionless shape parameters, mostly given within the ranges of [2.5, 2.8] and [2.0, 5.0], respectively (Tyree and Zimmermann, 2002).
+	float phi_stem 			; //= -0.76; //shape factor regulating the steepness of the reduction in K due to caviation
+ 	
+
+	
+	/**
+	 * Retrieves the FineRoot object corresponding to the given node ID.
+	 *
+	 * @param id The node ID of the FineRoot.
+	 * @return The FineRoot object, or null if the ID is invalid or the node is not a FineRoot.
+	 */
+	protected FineRoot getFineRoot() {
+		if (this.frID > 0) {
+			Object node = graph().getNodeForId(frID);
+			if (node instanceof FineRoot) {
+				return (FineRoot) node;
+			}
+		}
+		long selfId = this.getId();
+		int selfPlantNumber = this.plantNumber;
+		long selfVoxelID = this.ID;
+		int selfLayer = this.layer;
+		FineRoot linkedRoot = first((* f:FineRoot,
+			(f.parentID == selfId
+			 && f.plantNumber == selfPlantNumber
+			 && f.ID == selfVoxelID
+			 && f.layer == selfLayer) *));
+		if (linkedRoot != null) {
+			this.frID = linkedRoot.getId();
+			return linkedRoot;
+		}
+		// Legacy fallback for simple-root graphs where FineRoot is still nested below StructuralRoot.
+		linkedRoot = first((* this (-->)+ FineRoot*));
+		if (linkedRoot != null) {
+			this.frID = linkedRoot.getId();
+			linkedRoot.storeParentId(this);
+			return linkedRoot;
+		}
+		return null;
+	}
+
+	public void loadParameters() {
+		
+		// Set the context for file name parameters
+		CategoryStore config = ((DocumentCategoryNameGroup) CONFIG.getGroup(FILE_NAME_PLANT_PARAMETERS, 
+			DocumentCategoryNameGroup.class)).getCategoryStore();
+
+		
+		// Context for root-carbon category
+		/** Configuration context for carbon-related parameters */
+		config.setCategoryContext("structuralRoot-carbon");
+		//common parameters
+		maintenanceCoff        = config.getDouble("MTNCE", 7e-05);
+		growthCoff             = config.getDouble("GROWTHRQ", 1.2);
+		maxRes                 = config.getDouble("RESERVES", 0.3);
+		C_content              = config.getDouble("C_CONTENT", 0.46);
+		
+		km_sec                 = config.getDouble("KM_SECONDARY", 0.14); 
+		configureReserveKmAbsolute(config, 0.56, 0.112);
+		configureReserveTurnover(config, 0.0060, 0.0010);
+		secondaryGrowthRate = config.getDouble("SEC_GROWTH_RATE", 2e-06);
+		k_age = config.getDouble("k_age", 0.1);
+		try {
+			secBase = config.getDouble("SEC_BASE", 0.04);
+		} catch (Throwable t) {
+			// compatibility fallback: older structuralRoot-carbon categories omit organ-level timing keys
+			secBase = 0.04;
+		}
+		try {
+			secBump = config.getDouble("SEC_BUMP", 0.10);
+		} catch (Throwable t) {
+			// compatibility fallback: older structuralRoot-carbon categories omit organ-level timing keys
+			secBump = 0.10;
+		}
+		if (Double.isNaN(secBase) || Double.isInfinite(secBase) || secBase < 0.0) {
+			secBase = 0.04;
+		}
+		if (Double.isNaN(secBump) || Double.isInfinite(secBump) || secBump < 0.0) {
+			secBump = 0.10;
+		}
+		secBase = Math.max(0.0, Math.min(secBase, SEC_BASE));
+		secBump = Math.max(0.0, Math.min(secBump, SEC_BUMP));
+		
+		//times 1e6 to convert from mg/cm3 into mg/m3
+		density = config.getDouble("DENSITY", 750) * 1e6;
+		
+		// Context for root-water category
+		/** Configuration context for root water-related parameters */
+		config.setCategoryContext("structuralRoot-water");
+		waterContent = config.getDouble("WATER_CONTENT", 0.7);
+		
+		
+		config.setCategoryContext("structuralRoot-nitrogen");
+		/** Clamps for Nm and LMA. */
+		Nm_min  = config.getDouble("Nm_min",  0.005);  // 0.5% N
+		Nm_max  = config.getDouble("Nm_max",  0.020);  // 6.0% N
+
+		/** Set the context for common plant level water parameters*/
+		config.setCategoryContext("internode-water");
+				
+		cx1		 = config.getDouble("cx1", 1.171);
+		cx2		 = config.getDouble("cx2", 2.6);
+		cx3		 = config.getDouble("cx3", 2);
+		phi_stem = config.getDouble("phi_stem", -2.5);
+				
+	    /** Set the context for file name parameters*/
+        CategoryStore config_Init = ((DocumentCategoryNameGroup) CONFIG.getGroup(FILE_NAME_INITIAL_CONDITIONS, 
+			DocumentCategoryNameGroup.class)).getCategoryStore();
+		
+		config_Init.setCategoryContext("structuralRoot");
+		fNSC                   = config_Init.getDouble("fNSC", 0.1);
+		structure_C            = 1- fNSC; 
+		this.Nm  			   = config_Init.getDouble("Nm",  0.020);  // 2.0% N
+		
+
+	}
+	
+	
+	/**
+     * Initializes the StructuralRoot instance with the given plant base and layer.
+     *
+     * @param layer Layer index.
+     * @param pb    Plant base object.
+     */
+	void initiate_pb(int layer, PlantBase pb)
+	{
+		//initialize the parameters
+		loadParameters();
+		//IDENTIFIERS
+		this.plantNumber = pb.plantNumber;
+		this.border = pb[border];
+		this.plantBaseID = pb.getId();
+		this.layer = layer;
+		this.rank = layer;
+		cpn = 0;
+		order = 0;
+		this.length =0;
+		
+		assignAge(pb, this.cpn);
+		
+		//CARBON
+		DocumentHybridCategoryNameGroup soilParameters = ((DocumentHybridCategoryNameGroup) CONFIG.getGroup(FILE_NAME_SOIL_PARAMETERS, 
+			DocumentHybridCategoryNameGroup.class));
+
+		ParamTable treeModelVariables = soilParameters.getTableStore().getTable("treeModelVariables");
+
+		// Assign default values from layer_1
+		stRootProportion = treeModelVariables.getDouble(ConfigLoader.getTableLayerName(layer), "stRootProportion", 0.3);
+		
+		biomass = BIOMASS_ROOT * (1 - PERCENT_FINE_ROOT) * stRootProportion; //direct input mg
+	   
+		//try to link the biomass with the trunk or aboveground biomass
+		this.diameter = WOOD_DIAMETER/StrRootToTrunk;
+		
+		area = Math.PI * (diameter*diameter/4);
+		
+		//rough estimation, used for carbon demand estimation
+		this.length = biomass/density /area; // the total length of the structural root calculated by biomass
+		
+		freshWeight = biomass/(1-waterContent);
+		carbon_total = biomass * C_content;
+		carbon_structure = carbon_total * structure_C;  //mg, amount of structure carbon
+		carbon_nonStructure = carbon_total * fNSC;    //mg, amount of starch carbon
+		fNSCtoSC = carbon_nonStructure/carbon_structure; 
+		//NITROGEN
+		nitrogen_total = biomass * Nm;
+		nitrogen_structure = biomass * Nm_min; 
+		nitrogen_nonStructure = nitrogen_total * (1 - N_CONTENT_MOBILE) -  nitrogen_structure;
+		nitrogen_mobile = nitrogen_total * N_CONTENT_MOBILE;
+	
+		//water potential initialize		
+		this.waterPotential_b = inputWaterPotential;
+		this.waterPotential = inputWaterPotential;
+		this.organType = "StructuralRoot";
+		calcKmax();
+		calcKa();
+		
+	}
+	
+		 /**
+     * Initializes the StructuralRoot instance with the given plant identifier,
+     * root length, and diameter. Mainly be used for 3D root segments
+     *
+     * @param pi        Plant identifier object.
+     * @param length_   Length of the structural root.
+     * @param diameter_ Diameter of the structural root.
+     * @return          Initialized StructuralRoot object.
+     */
+	StructuralRoot initiate_pi(PlantIdentifier pi, float length_, float diameter_)
+	{
+		//initialize the parameters
+		loadParameters();
+		//IDENTIFIERS
+		this.pi = pi;
+		this.plantNumber = pi.plantNumber;
+		this.border = pi[border];
+		if(plantBaseID <= 0) {
+				PlantBase pb = first((* this (<--)+ PlantBase*));
+				if(pb != null) {
+					this.plantBaseID = pb.getId();
+				}
+		   }
+		
+		this.length = length_;
+		this.diameter = diameter_;
+		 
+		age = 100;
+		ageD = 365; 
+		
+		area = Math.PI * (diameter*diameter/4);
+		biomass = area * this.length * density;
+		freshWeight = biomass/(1-waterContent);
+		carbon_total = biomass * C_content;
+		carbon_structure = carbon_total * structure_C;  //mg, amount of structure carbon
+		carbon_nonStructure = carbon_total * fNSC;    //mg, amount of starch carbon
+		fNSCtoSC = carbon_nonStructure/carbon_structure; 
+		
+		//NITROGEN
+		nitrogen_total = biomass * Nm;
+		nitrogen_structure = biomass * Nm_min; 
+		nitrogen_nonStructure = nitrogen_total * (1 - N_CONTENT_MOBILE) -  nitrogen_structure;
+		nitrogen_mobile = nitrogen_total * N_CONTENT_MOBILE;
+	
+		//water potential initialize		
+		this.waterPotential_b = inputWaterPotential;
+		this.waterPotential = inputWaterPotential+1e-2;;
+		this.organType = "StructuralRoot";
+		calcKmax();
+		calcKa();
+		
+		
+		return this;
+	}
+	
+	
+		
+	/**
+     * Initializes the StructuralRoot instance with the given plant base and layer.
+     *
+     * @param layer Layer index.
+     * @param pb    Plant base object.
+     */
+	void initiate_node(PlantBase pb, RootMeristem rm)
+	{
+		//initialize the parameters
+		loadParameters();
+		//IDENTIFIERS
+		this.plantNumber = pb.plantNumber;
+		this.border = pb[border];
+		this.plantBaseID = pb.getId();
+				
+		cpn = 0;
+		order = 0;
+		
+		assignAge(pb, this.cpn);
+		//from the xnode
+		this.layer = rm.N.vLayer;
+		this.ID = rm.N.id;
+		this.rank = layer;
+		gridX = rm.N.gridX;
+		gridY = rm.N.gridY;
+		this.diameter = rm.N.diameter;
+
+		//CARBON
+		this.stRootProportion =  Math.max(0.001, rm.N.fractionOfStructuralRoot);		
+		this.biomass =   Math.max(1, rm.N.structuralRootDM); //direct input mg
+	   
+		//try to link the biomass with the trunk or aboveground biomass
+		this.diameter = WOOD_DIAMETER/StrRootToTrunk;
+		area = Math.PI * (diameter*diameter/4);
+		//rough estimation, used for carbon demand estimation
+		this.length = biomass/density/area; // the total length of the structural root calculated by biomass
+		
+		CategoryStore config = ((DocumentCategoryNameGroup) CONFIG.getGroup(FILE_NAME_INITIAL_CONDITIONS, 
+			DocumentCategoryNameGroup.class)).getCategoryStore();
+			
+		config.setCategoryContext("structuralRoot");
+			fNSC                   = config.getDouble("fNSC", 0.1);
+			structure_C            = 1- fNSC; 
+			
+		
+			
+		freshWeight = biomass/(1-waterContent);
+		carbon_total = biomass * C_content;
+		carbon_structure = carbon_total * structure_C;  //mg, amount of structure carbon
+		carbon_nonStructure = carbon_total * fNSC;    //mg, amount of starch carbon
+		fNSCtoSC = carbon_nonStructure/carbon_structure; 
+		//NITROGEN
+		nitrogen_total = biomass * Nm;
+		nitrogen_structure = biomass * Nm_min; 
+		nitrogen_nonStructure = nitrogen_total * (1 - N_CONTENT_MOBILE) -  nitrogen_structure;
+		nitrogen_mobile = nitrogen_total * N_CONTENT_MOBILE;
+	
+		//water potential initialize		
+		this.waterPotential_b = rm.N.waterPotential;
+		this.waterPotential = rm.N.waterPotential;
+		this.organType = "StructuralRoot";
+		calcKmax();
+		calcKa();
+		
+	}
+	    /**
+     * Method for initiate the carbon transport variables
+     */
+    @Override
+	public void initializeCarbonTransport() {
+		double length_cm = ensureTransportLength() * 1e2;
+	    double area_cm2   = this.area * 1e4;
+		float Rs = ( R0 * PhloemResistanceRatio_mixture(initial_c0, FRACTION_SORBITOL)/(PressureRatio(initial_c0)*R_ct*Tk));   // resistance per unit length (initial case)
+		this.r =  Rs * length_cm / area_cm2; //r is in unit of cm //divided by diameter
+
+		float h_internode_rs = 0; //1/o.Ka /3.6; 	// hydraulic resistance
+		this.xp = 0;//(-Jw * h_internode_rs * initial_c0)/(PressureRatio(initial_c0)*R*Tk);  //need to update this term
+		
+		this.cpb = this.cpt =  SOURCEcp;
+		 
+		//this.cpt = SOURCEcp - cpn * ini_length * SOURCEj * Rs;
+		//this.cpb = SOURCEcp - (cpn - 1) * length * SOURCEj * Rs;
+		this.j = j;
+	}
+
+	@Override
+	public void updateCTRs(double carbonConcentration) {
+		double length_cm = ensureTransportLength() * 1e2;
+	    double area_cm2   = this.area * 1e4;
+		float Rs = ( R0 * PhloemResistanceRatio_mixture(carbonConcentration, FRACTION_SORBITOL)/(PressureRatio(carbonConcentration)*R_ct*Tk));   // resistance per unit length (initial case)
+		this.r =  Rs * length_cm / area_cm2; //r is in unit of cm //divided by diameter
+		float h_internode_rs = 1/this.Ka/3.6; 	// hydraulic resistance
+	  
+		if (this.waterFlux == 0 | Double.isNaN(this.waterFlux)) {
+			 this.xp = 0;
+		} else {	  		
+			 this.xp = Double.isNaN(this.waterFlux)? 
+			 0 : 
+			 Math.max(0,(this.waterFlux * 3.6 * h_internode_rs * carbonConcentration)/
+								  (PressureRatio(carbonConcentration)*R_ct*Tk));
+		}
+	}
+	
+    
+	// ---- methods for adding StructuralRoot for easy seraching----
+
+	// Backlink list of child structural roots (store their graph ids)
+	private ArrayList childStructuralRootIDs;
+	
+	// lazy init
+	private void ensureChildSRList() {
+		if (childStructuralRootIDs == null) childStructuralRootIDs = new ArrayList();
+	}
+	
+	/** Add a child SR id (allows duplicates). */
+	public void addChildStructuralRootId(long id) {
+		ensureChildSRList();
+		childStructuralRootIDs.add(Long.valueOf(id));
+	}
+	
+	/** Add only if not present (recommended). */
+	public void addChildStructuralRootIdOnce(long id) {
+		ensureChildSRList();
+		int i, n = childStructuralRootIDs.size();
+		for (i = 0; i < n; i++) {
+			if (((Long) childStructuralRootIDs.get(i)).longValue() == id) return;
+		}
+		childStructuralRootIDs.add(Long.valueOf(id));
+	}
+	
+	/** Count children. */
+	public int getChildStructuralRootCount() {
+		return (childStructuralRootIDs == null) ? 0 : childStructuralRootIDs.size();
+	}
+	
+	/** Get child id at index. */
+	public long getChildStructuralRootIdAt(int idx) {
+		return ((Long) childStructuralRootIDs.get(idx)).longValue();
+	}
+	
+	/** Optional: expose raw list (no generics). */
+	public java.util.List getChildStructuralRootIds() {
+		ensureChildSRList();
+		return childStructuralRootIDs;
+	}
+	
+	/** Helper: fetch a StructuralRoot by id (typed). */
+	public StructuralRoot getStructuralRoot(long id) {
+		Organ o = (Organ) graph().getNodeForId(id);
+		return (o instanceof StructuralRoot) ? (StructuralRoot) o : null;
+	}
+	
+	/** Backlinking store: set parent and also register this as child on the parent. */
+	public void storeParentAndBacklink(Node parent) {
+		if (parent == null) return;
+		this.parentID = parent.getId();                 // or verticalParentID, if that’s your field
+		if (parent instanceof StructuralRoot) {
+			((StructuralRoot) parent).addChildStructuralRootIdOnce(this.getId());
+		}
+		// If you also want PlantBase to track SR children, add a similar list there.
+	}
+
+	
+	 /**
+	 * Calculates the primary and secondary tissue carbon demand (PTCTRAM).
+	 *
+	 * @param sugarConcentration_phloem Carbon concentration.
+	 */
+	@Override
+	void calcPTCTRAM(double sugarConcentration_phloem) 
+	{ 
+		calcLeakage(sugarConcentration_phloem);
+		double radius = this.diameter / 2;
+		deltalength = 0;
+        deltaRadius_PT = secondaryGrowthRate();          
+		structureDM_PRI_PT = 0;
+        structureDM_SEC_PT = C_content * growthCoff * 2.0 * Math.PI * radius * length * density *deltaRadius_PT;
+       				
+		maintenanceDM_PT = calcMaintanceRespiration(this.fNSCtoSC); 
+		reserveDM_PT = reserveSynthesis();
+		loading_PT =  reserveHydrolysis(); 
+	}
+	
+	/**
+     * Calculates carbon loading into the root.
+     *
+     * @param sugarConcentration_phloem Carbon concentration in the phloem.
+     */
+    @Override 
+	void calcLoading(double sugarConcentration_phloem)
+	{
+		loading =  fNSC > MINIMUM_NSC ? reserveHydrolysis() * 
+				   sourceLoading(sugarConcentration_phloem, sourceLoading_b, sourceLoading_cp) : 0;
+	    
+	} 
+	
+	/**
+     * Calculates carbon unloading from the root.
+     *
+     * @param sugarConcentration_phloem sugar concentration in the phloem.
+     */
+    @Override
+	void calcUnloading(double sugarConcentration_phloem)
+	{
+		//internode has two structural demand part, length growth and diameter
+		//diameter growth has two parts: short-term logistic expansion for young
+		//internodes, and long-term radial expansion that is proportional to the internode’s surface area.
+		double radius = this.diameter / 2;
+		
+		deltalength = 0;
+        deltaRadius = secondaryGrowthRate()*
+        			  sinkUnloading(sugarConcentration_phloem, km_sec); 
+		structureDM_PRI = 0;
+        structureDM_SEC = C_content * growthCoff * 2.0 * Math.PI * radius * length * density *deltaRadius;
+		structureDM = structureDM_PRI + structureDM_SEC;
+		
+		maintenanceDM = calcMaintanceRespiration(this.fNSCtoSC) * 
+         				sinkUnloading(sugarConcentration_phloem, KM_MTNCE);
+		reserveDM = reserveSynthesis() * 
+					sinkUnloading(sugarConcentration_phloem, km_res);			
+		
+		unloading = structureDM + maintenanceDM + reserveDM;			
+		
+	}
+	
+	
+	
+	/**
+     * Calculates water flux in the root.
+     *
+     * @param f_waterFlux Factor for water flux reduction.
+     */
+    @Override
+	void calcWaterFlux(double f_waterFlux) 
+	{
+		double waterFluxPotential = plantBaseID <= 0? 1e-5 : getPlantBase().waterFluxPotential;		
+		waterFlux = f_waterFlux * waterFluxPotential; 
+	}
+	
+	/**
+     * Calculates water potential in the root.
+     */
+    @Override
+	void calcWaterPotential() 
+	{
+		FineRoot fr = getFineRoot();
+		this.waterPotential_b = (fr != null) ? fr.waterPotential : inputWaterPotential;
+		this.waterPotential = waterPotential_b - 1/Ka * this.waterFlux - Dw * gacc * this.length*1e-3;;
+		if(Double.isNaN(this.waterPotential)) this.waterPotential = inputWaterPotential;
+	}
+	//As the root conductance already been calculated in fine roots, so Kmax was set to a very high value to avoid double accounting
+	void calcKmax() {
+		double tl = ensureTransportLength();
+		Kmax = Math.max(cx2 * Math.pow(diameter, cx3), cx2 * Math.pow(0.005, cx3))
+				/ tl * 1e6; //mg  s-1 m MPa-1
+		if (Double.isNaN(Kmax) || Double.isInfinite(Kmax) || Kmax <= 0.0) {
+			Kmax = Math.max(cx2 * Math.pow(0.005, cx3), 1e-12) / 1e-3 * 1e6;
+		}
+	}
+	
+	void calcKa() {
+		Ka = Kmax * 1/(1 + Math.pow(this.waterPotential/phi_stem, cx1));
+		if (Double.isNaN(Ka) || Double.isInfinite(Ka) || Ka <= 0.0) {
+			Ka = Kmax;
+		}
+	}
+	
+	/**
+	* Adds the neighbouring FineRoot
+	* @param fr   The FineRoot object to be stored.
+	*/
+	void addFineRoot(FineRoot fr)
+	{
+		this.frID = fr.getId();
+	}
+
+	
+
+/** Effective axial link length (m) between this SR and its parent (by IDs). */
+private double effectiveLinkLength() {
+    // Use the soil cell scale as a hub ↔ base stub length (m)
+    // If you have a soil object, prefer that; otherwise fall back to grid size.
+    double hubToBaseLen_m;
+    if (this.getFineRoot() != null && this.getFineRoot().getSoil() != null) {
+        // Assumed already in m; if it's meters, multiply by 100
+        hubToBaseLen_m = this.getFineRoot().getSoil().length;
+    } else {
+        // refer to the global, NOT a field on StructuralRoot
+        hubToBaseLen_m = soilGridSize;              // or rootSystem.soilGridSize
+    }
+
+    // Fetch parent as Object, then type-check
+    Object pobj = null;
+    if (parentID > 0) {
+        pobj = graph().getNodeForId(parentID);
+    } else if (verticalParentID > 0) {
+        pobj = graph().getNodeForId(verticalParentID);
+    }
+
+    if (pobj == null) {
+        return hubToBaseLen_m;                      // no parent -> short stub
+    }
+    if (pobj instanceof PlantBase) {
+        return hubToBaseLen_m;                      // hub to base
+    }
+    if (pobj instanceof StructuralRoot) {
+        StructuralRoot pr = (StructuralRoot) pobj;
+
+        // Use global grid scales; DON'T use this.soilGridSize / this.soildepth
+        double gsize_m = soilGridSize;              // or rootSystem.soilGridSize
+        double lthick_m ;
+        
+        if (pr.getFineRoot() != null && pr.getFineRoot().getSoil() != null) {
+        	lthick_m = pr.getFineRoot().getSoil().length;  // or rootSystem.soildepth
+         } else {lthick_m = 0.3;}
+        // Center-to-center distance (m)
+        double dx = (double) (this.gridX - pr.gridX) * gsize_m;
+        double dy = (double) (this.gridY - pr.gridY) * gsize_m;
+        double dz = (double) (this.layer - pr.layer) * lthick_m;
+
+        double d = Math.sqrt(dx*dx + dy*dy + dz*dz);
+        if (d < 1e-3) d = 1e-3;                      // avoid zero
+        return d;
+    }
+
+    // Unexpected parent type -> safe fallback
+    return hubToBaseLen_m;
+}
+
+private double ensureTransportLength() {
+	if (Double.isNaN(this.transportLength) ||
+		Double.isInfinite(this.transportLength) ||
+		this.transportLength <= 1e-3) {
+		this.transportLength = Math.max(1e-3, effectiveLinkLength());
+	}
+	return this.transportLength;
+}
+
+	
+	/**
+	 * Updates the state of the StructuralRoot instance in each time step. This includes
+	 * updating the length, diameter, carbon content, and other state variables.
+	 *
+	 */
+	@Override
+	void update() {
+		super.update();
+		
+		// Check if PlantBase and FineRoot are initialized
+		if(plantBaseID <= 0) {
+			PlantBase pb = first((* this (<--)+ PlantBase*));
+			if(pb != null) {
+				this.plantBaseID = pb.getId();
+			}
+		}
+		
+			getFineRoot();
+		//for the first structural root at layer 0, the parent organ is none as it is as the branch of plantbase
+		// when using complex soil and root, all structural root at layer 0 is as the branch of plantbase
+	// Find/set the vertical parent within the same (gridX,gridY) column.
+	if (this.layer == 0) {
+		// Layer 0: attach to PlantBase (recommended) or mark as sentinel.
+		if (this.verticalParentID <= 0) {
+			// Option A: real PlantBase parent
+				this.verticalParentID = plantBaseID;
+				this.getPlantBase().childStructuralRootID = this.getId();
+		}
+	} else if (this.verticalParentID <= 0) {
+		// Layers > 0: parent is the cell directly above (same x,y), layer-1
+		StructuralRoot vr = first((* s:StructuralRoot,
+								   (s.plantNumber == this.plantNumber &
+									s.layer == this.layer - 1 &
+									s.gridX == this.gridX &
+									s.gridY == this.gridY) *));
+		if (vr != null) {
+			this.verticalParentID = vr.getId();      // not nodeID
+			// or: this.storeParentId(vr);
+			//println("verticalParentID: " + this.verticalParentID);
+		} 
+	}
+
+		
+		//println(" str location: " + location(this));
+		// Update the diameter of structural root and calc length based on diameter and density 
+		if(organGrowthMethod.equals("TempLimited")) {
+			this.diameter = diameter + 2 * deltaRadius_PT;
+		} else if(organGrowthMethod.equals("TempWaterLimited")) { 
+			this.diameter = diameter + 2 * deltaRadius_PT;
+		} else if(organGrowthMethod.equals("TempWaterCarbonLimited")){
+			this.diameter = diameter + 2 * deltaRadius;
+		} else {
+			this.diameter = diameter + 2 * deltaRadius;
+		}
+			    
+		// Calculate the change in biomass and carbon content
+		// Store previous biomass value
+		biomass_pre = biomass;
+		
+		/** update organ carbon and nitrogen status */
+		if(organGrowthMethod.equals("TempLimited")) {
+			biomass = getPlantBase().biomassTrunk * StrRootToTrunk;
+			this.initCN_content(this.biomass);
+		} else {
+			delta_str = structureDM - growthCost;
+			delta_NSC = maintenanceDM + reserveDM + leakage 
+						- loading - carbonMobilizationCost - maintenanceDM_PT;
+						
+			updateCarbonStatus(delta_str, delta_NSC);		
+			
+			if(Double.isNaN(this.biomass)) {
+				this.initCN_content(this.biomass_pre);
+			}
+		}
+		
+		area = Math.PI * (diameter*diameter/4);
+		//rough estimation, used for carbon demand estimation
+		length = biomass/density/area; // the total length of the structural root calculated by biomass
+		
+		// Recalculate maximum hydraulic conductivity and axial hydraulic conductance
+		calcKmax();
+		calcKa();
+		this.waterFlux = (getFineRoot() != null) ? getFineRoot().waterFlux : 0;
+		km_res = adjustKmResSeasonally(daysSinceWinterSolstice, km_res_early, km_res_late);
+		
+		ensureTransportLength();
+	}
+} 
+==> 
+if (useComplexRoot == false) (
+    Cylinder(
+        (getFineRoot() != null && getFineRoot().getSoil() != null) 
+            ? getFineRoot().getSoil().length 
+            : soilGridSize, 
+        diameter / 2
+    ).(setShader(new RGBAShader(165, 42, 42)), setLayer(rootLayer))
+) else (
+    //Sphere(soilGridSize / 3).(setShader(ORANGE), setLayer(rootLayer))
+);

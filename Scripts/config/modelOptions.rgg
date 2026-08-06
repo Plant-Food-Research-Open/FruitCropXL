@@ -1,0 +1,3633 @@
+import de.grogra.pf.io.PropertyFileReader;
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.io.FileReader;
+import java.io.FileNotFoundException;
+import java.io.StringWriter;
+import java.io.PrintWriter;
+import java.lang.RuntimeException;
+import java.util.StringTokenizer;
+import java.util.ArrayList;
+import java.util.Vector;
+import java.util.Arrays;
+import java.io.Serializable;
+import de.grogra.pf.ui.registry.RunAfterSave;
+import de.grogra.pf.ui.registry.RunAfterLoad;
+import de.grogra.pf.registry.RegistryContext;
+// Jackson Writerff
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
+import com.fasterxml.jackson.databind.DeserializationContext;
+import com.fasterxml.jackson.databind.JsonDeserializer;
+import com.fasterxml.jackson.dataformat.csv.CsvParser;
+import com.fasterxml.jackson.dataformat.csv.CsvMapper;
+import com.fasterxml.jackson.dataformat.csv.CsvSchema;
+
+//plant modules
+import static globalParameters.*;
+import static initialConditions.*;
+import static plantParameters.*;
+import static phenology.*;
+import static extraTools.*;
+import static environment.*;
+import static soil.*;
+import static outputTables.*;
+import static main.*;
+import static validation.*;
+import static validationTests.*;
+import static shoot.*;
+import static absOrgan.*;
+import static fieldBase.*;
+import static fruitBase.*;
+import static interfaces.*;
+import static leaf.*;
+import static photosynthesisAndTranspiration.*;
+import static lightInterception.*;
+
+// Config Module
+import io.github.fruitcropxl.config.params.groups.*;
+import io.github.fruitcropxl.config.params.structures.*;
+import io.github.fruitcropxl.config.util.exceptions.KeyNotFoundException;
+
+
+//*********************************Model input*********************************/
+
+//********************************* planting-system *********************************/
+/** Type of training system (0 for fruit-cutting, 1 for cane pruning, 2 for spur pruning).*/
+global int trainingSystem = 0;
+/** Total number of strips in the field. */
+global int nrStrips = 1;
+/** Distance between adjacent strips (try to prevent overlap between tiles!). */
+global double stripDistance = 0.2;
+/** Row orientation. 0 is for east-west, 90 is for south-north (rotate counter-clockwise). */
+global float rowOrientation = 90;
+/** Number of rows in the field. */
+global int nrRows = 6;
+/** Number of plants in a row. */
+global int nrPlants = 18;
+/** Number of border rows on either side of the field. */
+global int borderRows = 1;
+/** Number of border plants on either side of a row. */
+global int borderPlants = 1;
+/** Total number of plants in the entire field. */
+global long totalPlants = nrRows * nrPlants * nrStrips;
+/** Identifies the individual from which the charts are made. */
+global int INDI_ID_A = 1;
+/** Distance between rows. */
+global double rowDistance = 0.2;
+/** Distance between plants in a row. */
+global double plantDistance = 0.1;
+// These should use the same rowOrientation you use in Axiom/RH
+global double ROW_THETA_RAD = Math.toRadians(rowOrientation);
+global double ROW_COS       = Math.cos(ROW_THETA_RAD);
+global double ROW_SIN       = Math.sin(ROW_THETA_RAD);
+
+
+
+//********************************* mean climate *********************************/
+/** Temperature in absolute format. */
+global float Tk;
+/** Maximum temperature (Degrees Celsius). */
+global float Tmax = 25;
+/** Minimum temperature (Degrees Celsius). */
+global float Tmin = 10;
+/** Maximum relative humidity. */
+global float RHmax = 0.8;
+/** Minimum relative humidity. */
+global float RHmin = 0.5;
+/** Ambient temperature (Degrees Celsius). */
+global float Ta = 25;
+/** Relative humidity. */
+global float rh = 0.7;
+/** Ambient CO2 concentration (ppm, needs to be converted into ubar). */
+global float cca = 400;
+/** Wind speed (m/s). */
+global float wind = 1.0;
+/** Oxygen partial pressure of the air (mbar). */
+global float O = 210;
+/** Enable light treatment scaling on incoming global radiation from climate input. */
+global boolean useLightTreatment = false;
+/** Intensity factor (-) for scaling incoming global radiation when light treatment is enabled. */
+global double lightTreatmentIntensity = 1.0;
+/**
+ * Ground shader selection mode from model options (mean_climate.groundShaderMode).
+ * Supported: AUTO, ORCHARD, EXTENDAY, BLACK.
+ * AUTO defaults to ORCHARD.
+ */
+global String groundShaderMode = "AUTO";
+/** Ensure invalid ground-shader selection warning is printed only once per process. */
+global boolean warnedGroundShaderMode = false;
+/** Start day of year (DOY, 1..366) for light treatment window. */
+global int lightTreatmentStartDOY = 1;
+/** End day of year (DOY, 1..366) for light treatment window. */
+global int lightTreatmentEndDOY = 365;
+/** Start day after winter solstice (DAWS) for light treatment window. */
+global int lightTreatmentStartDAWS = 0;
+/** End day after winter solstice (DAWS) for light treatment window. */
+global int lightTreatmentEndDAWS = 365;
+/** Enable leaf-level PAR fallback when field LAI is too low for full light interception. */
+global boolean enableLAILeafPhotosynthesisFallback = false;
+/** Field LAI threshold (-) at or below which leaf-level PAR fallback is used. */
+global double leafPhotosynthesisFallbackLAI = 1.0e-4;
+/** Fraction (-) of global radiation used as incident PAR proxy for LAI fallback. */
+global double leafPhotosynthesisFallbackFpar = 0.30;
+/** Keep LAI fallback active until leaves have usable light from normal interception. */
+global boolean continueFallbackUntilLeafLightValid = true;
+/** Enable previous-day carbon-balance control for woody secondary growth. */
+global boolean enableDailyCarbonStressControls = true;
+/** Deprecated no-op compatibility field; maintenance respiration is not scaled by daily carbon balance. */
+global double maintenanceStressScaleWhenDailyCarbonNegative = 1.0;
+/** Scale (-) for trunk, cordon and internode secondary radial growth under negative plant carbon gain. */
+global double negativeCarbonWoodySecondaryGrowthScale = 0.20;
+/** Deprecated no-op compatibility field; annual internode primary growth is no longer throttled here. */
+global boolean enableAnnualInternodePrimaryThrottleWhenCarbonStressed = false;
+/** Deprecated no-op compatibility field; retained for saved GroIMP project loading only. */
+global double annualInternodePrimaryStressScale = 1.0;
+/** Deprecated no-op compatibility field; retained for saved GroIMP project loading only. */
+global double annualInternodePrimaryThrottleMaxLAI = 0.0;
+/** unit for estimating organ age based on different thermal unit */
+global double thermaltimeUnit = 1.0;  
+//********************************* simulation time *********************************/
+/** Starting year of the model simulation. */
+global int START_YEAR = 2012;
+/** Starting date of the model simulation. */
+global int START_DAY = 1;
+/** Starting year of the model simulation. */
+global int START_HOUR = 1;
+/** Thermal time after budburst on the starting day. */
+global double START_TT_AFTER_BUDBURST;
+/** harvest/removal time in days after winter solstice days). */
+global int harvestDAWS;
+
+
+//********************************* morphology *********************************/
+/** Number of cordons (1 or 2 for the moment). */
+global int CORDEN_NUM = 1;
+/** Number of leaves under different leaf number treatment. */
+global int SHOOT_NUM = 1;
+/** The leaf number to start with. */
+global int STARTING_LEAF_NUMBER;
+/** Number of leaves at initiation. Mainly for global architecture. */
+global int ENDING_LEAF_NUMBER;
+/** Control the number of phytomers at initiation. Mainly for global architecture. */
+global int ENDING_PHYTOMER_NUM;
+/** For controlling the apex growth. Used in shoot curvature calculation in structural variations. */
+global int MAX_PHYTOMER_NUM;
+/** The first internode for grapevine in fruit cuttings, only used in some cases now. */
+global float INTERNODE_0;
+
+
+// ============================================================================
+// Twinning Plans 
+// ============================================================================
+// see details at twinning planner, BudPlanner, LeafPlanner, FruitPlanner
+// Twinning T1/T2 = “calibration” events → they can adjust both leaf and fruit.
+// Leaf pruning / fruit pruning = separate management operations → each has its own DOY and can happen independently.
+// If the target for a component is 0 or missing, we just skip that component at that stage.
+// If leafAreaTargetPerTree_T1 <= 0 → no leaf twinning at T1.
+// If leafAreaTargetPerTree_T2 <= 0 → no leaf twinning at T2.
+// leafPruningDOY and fruitPruningDOY controls the separate pruning pass, not TwinningPlanner.
+// ============================================================================
+
+// ============================================================================
+// Twinning planner options
+global boolean useTwinningPlanner = false;
+global String  twinningStage  = "AUTO";   // "T0", "T1", "T2", ...
+
+/**
+ * DOY at which Twinning Stage T0 (pre‑season, bud-level planning) is executed.
+ * If <= 0, the T0 twinning step is NOT auto-triggered by the TwinningPlanner.
+ */
+global int twinningDOY_T0 = -1;
+
+/**
+ * DOY at which Twinning Stage T1 (in‑season apex/leaf tuning) is executed.
+ * If <= 0, the T1 twinning step is NOT auto-triggered.
+ */
+global int twinningDOY_T1 = -1;
+
+/**
+ * DOY at which Twinning Stage T2 (late‑season / summer pruning & fruit thinning)
+ * is executed. If <= 0, the T2 twinning step is NOT auto-triggered.
+ */
+global int twinningDOY_T2 = -1;
+
+/** If true, Stage-A planner only prints the plan (no structural edits). */
+global boolean dry_run = false;
+
+/** If true, growing organs can bypass carbon limitation until T1 twinning completes. */
+global boolean enablePotentialGrowthBeforeT1 = false;
+/** Runtime latch for the pre-T1 potential-growth mode; reset false immediately after T1. */
+global boolean preT1PotentialGrowthActive = false;
+/** Comma-separated object mask for T1 twinning, e.g. "leaf,fruit". */
+global String twinningObjects_T1 = "leaf";
+/** Comma-separated object mask for T2 twinning, e.g. "leaf,fruit". */
+global String twinningObjects_T2 = "leaf";
+
+// Twinning grid geometry
+/**
+ * Twinning grid geometry for gridBased leaf/fruit/bud targets.
+ * PREDEFINED uses xMin/xMax/zMin/zMax; AUTO_FIT fits to the current tree bounds.
+ * Upright-region modes do not use this rectangular grid: they use
+ * MgmtUprightOrder plus each upright's z/endZ span split into bottom/middle/top.
+ */
+global String twinningGridBoundsMode = "PREDEFINED";
+global int    twinningNx   = 3;
+global int    twinningNz   = 3;
+global double twinningXMin = -1.5;
+global double twinningXMax =  1.5;
+global double twinningZMin =  0.0;
+global double twinningZMax =  4.5;
+
+
+// ============================================================================
+// Bud Twinning
+// ============================================================================
+/**
+ * budTargetMode:
+ *
+ * 0 – Density-based, remove-only
+ *     - Use target budNumberPerMeter.
+ *     - Only remove buds when density is above the target.
+ *     - Prioritize removals in dense local zones, close-neighbor buds,
+ *       and buds on non-terminal parent internodes.
+ *     - Never add buds.
+ *
+ * 1 – Density-based local rebalance (fast)
+ *     - Use target budNumberPerMeter.
+ *     - Remove where local zones are too crowded.
+ *     - Add where local zones are too loose.
+ *     - Keep add-site eligibility spacing checks.
+ *     - Skip expensive global per-bud spacing cleanup.
+ *
+ * 2 – Leaf-area & fruit driven (pre-prune, no density step)
+ *     - Compute a target bud number from the leaf-area model (LA-driven).
+ *     - When removing buds, protect buds that support existing RAW fruits
+ *       (respect the RAW fruit floor).
+ *     - Ensure at least the number of floral buds required to hit the fruit
+ *       target.
+ *     - No additional budNumberPerMeter density clean-up step.
+ *
+ * 3 – Density constraint first, then LA & fruit
+ *     - Step 1: enforce budNumberPerMeter using remove-only (as in mode 0).
+ *     - Step 2: apply the LA- and fruit-based logic (as in mode 2).
+ *
+ * 4 – Whole-tree bud target
+ *     - Use a total bud target per tree.
+ *     - Remove and/or add buds anywhere inside the management domain
+ *       to reach the whole-tree target.
+ *
+ * 5 – Grid-based bud targets
+ *     - Split the management domain into grid cells.
+ *     - Each grid cell has its own bud target.
+ *     - Remove and/or add buds within each cell to reach its local target.
+ *     - Respect the RAW fruit floor when removing buds.
+ *
+ * 6 – Legacy density+spacing (slow)
+ *     - Run the previous mode-1 full pipeline.
+ *     - Includes expensive per-bud spacing cleanup and optional refill fallback.
+ *
+ * 8 – Upright 3-region density mode
+ *     - Identify each upright using MgmtUprightOrder.
+ *     - Split each upright into bottom/middle/top vertical regions.
+ *     - Target buds per region = round(region length * budNumberPerMeter).
+ *     - Remove excess buds within the region, preferring vegetative buds.
+ *     - Add missing buds within the region, respecting placement and spacing guards.
+ *     - Protect the RAW fruit floor when removing floral buds.
+ */
+
+global int budTargetMode = 0;  
+
+/** Bud density target in buds per meter for density modes, including upright-region mode 8. */
+global int budNumberPerMeter = 15;
+
+/**
+ * Core bud spacing control in meters.
+ * Applied along the same axis for:
+ * - mode 0/1 remove priority and add eligibility checks,
+ * - mode 6 legacy spacing cleanup.
+ *
+ * If you want one spacing knob for both bud and spur operations, keep
+ * `spurSpacingM` unset (or negative) and it will fall back to this value.
+ */
+global double minBudSpacingM = 0.10;
+
+/**
+ * Legacy mode-6 fallback switch.
+ * 1 = when upright candidates are spacing-saturated, allow density refill on
+ *     secondary axes.
+ * 0 = keep refill attempts on the primary upright axis only.
+ */
+global int allowAddOnSecondaryAxes = 1;
+
+/**
+ * Spur pre-balancing switch for modes 0/1.
+ * true  = run spur-bucket cap enforcement before density balancing.
+ * false = skip spur-bucket pre-balancing.
+ */
+global boolean enableSpurBalancer = false;
+
+/** Spur bucket root axis order (typically 4 for apple spur root internodes). */
+global int spurOrder = 4;
+
+/** Spur child axis order grouped with the same bucket (typically 5). */
+global int spurChildOrder = 5;
+
+/** Maximum buds retained per spur bucket (root + child orders). */
+global int maxBudsPerSpur = 1;
+
+/**
+ * Spur removal priority inside a bucket.
+ * true  = remove child-order buds first, then root-order buds.
+ * false = remove root-order buds first.
+ */
+global boolean removeFromChildFirst = true;
+
+/**
+ * Spur-centric addition preference (mode 1).
+ * true  = prefer empty spur candidates before generic zone-based candidates.
+ * false = use generic zone-based candidate flow directly.
+ */
+global boolean addSpurUnitWhenAdding = true;
+
+/**
+ * Spur-root spacing in meters for spur-centric candidate selection.
+ * If omitted in scenario JSON (or set negative), loader falls back to
+ * `minBudSpacingM` to support a single spacing control.
+ */
+global double spurSpacingM = 0.10;
+
+/** bud number per tree */
+global int budNumberTargetPerTree = 456; 
+
+/**
+ * Optional grid of bud targets per tree for twinning / pruning.
+ * 
+ * Values are stored in row-major order (z rows × x columns) with length
+ * nx * nz from the "twinningGrids" section. If null or length == 0, no
+ * grid-based bud target is enforced and the model falls back to simpler
+ * bud-number logic.
+ */
+global double[] budNumberTargetsGrid = null;
+/**
+ * Optional explicit upright-region bud targets for budPlanner targetMode 8.
+ * Flattened order is upright-major with three vertical regions per upright:
+ * U0_low, U0_mid, U0_upper, U1_low, ...
+ *
+ * Length should be number_of_detected_uprights * 3, where detected uprights
+ * are order-root groups with vertical span greater than 2.0 m. Missing entries
+ * are skipped; negative values mean "leave this upright-region unchanged".
+ */
+global double[] budNumberTargetsUprightRegion = null;
+
+/**
+ * Enable / disable apex potential tuning at T1.
+ * 0 = disabled (skip apex tuning even if T1 DOY matches),
+ * 1 = enabled (allow BudPlanner T1 apex adjustment to run).
+ */
+global boolean apexPotentialEnable_T1 = true;
+
+/**
+ * Baseline multiplicative scale for apex node / branch capacities at T1.
+ * 1.0 = no change; >1.0 increases potential (longer shoots, more nodes);
+ * <1.0 decreases potential (shorter shoots, fewer nodes).
+ *
+ * This is combined with any LA-based scale inside the T1 apex tuner.
+ */
+global double apexPotentialScale_T1 = 1.0;
+
+
+/**
+ * Maximum allowed relative deviation (fraction) between current expected
+ * leaf area and the T1 target before we consider that the system is "too far"
+ * and may need a reset / re-plan (e.g. change bud density & rerun).
+ *
+ * Example: 0.30 → 30% difference.
+ * If <= 0, the deviation check is effectively disabled.
+ */
+global double apexPotentialMaxDeviation_T1 = 0.30;
+
+// ============================================================================
+// Addition controls for bud planning
+// These fields are used by management/AddBudsByLeafArea.rgg.
+// Quick usage:
+//   - globalMgmtMainAxisOnly = 1 to restrict new buds to a specific order.
+//   - globalMgmtPlacementOrder = 3 to place only on your order-3 uprights.
+//   - globalMgmtUprightKeyMode = 0 (AUTO): axis3_ID → axis2_ID → order-root(order=globalMgmtUprightOrder).
+//   - globalMgmtMaxNewBudsAllow: safety cap on how many buds can be added.
+// ============================================================================
+
+/** If 1, restrict bud placement to a specific axis order (see globalMgmtPlacementOrder). If 0, allow any order. */
+global int  MgmtMainAxisOnly     = 1;    // {0,1}
+
+/** Which order to place buds on when main-axis restriction is enabled. Typical add sites are order 4 on apple uprights. */
+global int  MgmtPlacementOrder   = 4;    // ≥1 (e.g., 1=trunk/cane, 2=primary lateral, 3=upright, 4=internode)
+
+/** Which order defines an upright root for BudPlanner, LeafPlanner, and FruitPlanner upright-region modes. */
+global int  MgmtUprightOrder     = 3;    // ≥1; default 3 to match your current uprights
+
+/** Safety cap on total number of new buds the management module is allowed to add at t=0. */
+global int  MgmtMaxNewBudsAllow  = 100; // ≥0 (raise if your targets are large)
+
+// warning thresholds
+global double WARN_20 = 0.20;
+global double WARN_30 = 0.30;
+
+/**
+ * Root biomass reference mode.
+ * 0: legacy trunk-only reference.
+ * 1: aboveground perennial structure reference (trunk + cordon + old wood proxy).
+ */
+global int rootWoodRefMode = 1;
+
+/**
+ * Default structural root:wood ratio (root:woodRef, unitless) used when BIOMASS_ROOT is auto-initialized.
+ *Most likely for tall spindle (given TCA₈=19.2) palmer annual dry matter production:
+ *  Age 7: ~15.5–17.5 cm²
+ *   Age 5: ~11–13 cm²
+
+ */
+global double defaultStrRootToWood = 0.35;
+
+/**
+ * BIOMASS_ROOT auto-initialization threshold (mg).
+ * If BIOMASS_ROOT < threshold, root biomass is initialized from wood reference and ratio.
+ */
+global double rootBiomassAutoInitThreshold = 10.0;
+
+/**
+ * True after one post-architecture synchronization of root biomass reference
+ * under ArchReader / ArchReaderGPU initialization.
+ */
+global boolean rootBiomassPostArchSyncDone = false;
+/** True after one forced resync at step 1 after updatesService.updates() (ArchReader path). */
+global boolean rootBiomassPostStep1UpdateSyncDone = false;
+/**decide whether or not resetting bud at step 1 
+it will set to true if during twinning the 
+difference in leaf area is bigger than 30% compared to the expecteLeafArea_preprune*/
+global boolean resetBudNumber = false;
+
+
+
+// ============================================================================
+// Leaf twinning 
+// ============================================================================
+/**
+ * Leaf target mode for the leaf planner.
+ *
+ * Typical values:
+ *  "none"      = ignore leaf targets
+ *  "wholeTree" = use whole-tree totals only
+ *  "gridBased" = use grid-based targets (leafAreaTargetsGrid).
+ *  "uprightRegions" = split each upright into bottom/middle/top regions
+ *      and reconcile leaf area per region. Accepted aliases in LeafPlanner:
+ *      "upright_region", "upright-region", "upright_regions",
+ *      "upright-regions", and "upright3".
+ *
+ * Default "none" means no twinning-specific leaf control.
+ */
+global String leafTargetMode = "none";
+
+/** Crop load in terms of number of fruits per plant. */
+global double expectedLeafArea_prePrune = 27;  // m² planning objective
+
+/**
+ * Optional grid of leaf-area targets (m² per cell) at twinning. The array
+ * is flattened in row-major order (z rows × x columns) and should have
+ * length nx * nz from "twinningGrids".
+ *
+ * If null or length == 0, the model ignores grid-based leaf targets and
+ * instead uses whole-tree values (if any).
+ */
+global double[] leafAreaTargetsGrid_T1 = null;
+global double[] leafAreaTargetsGrid_T2 = null;
+/**
+ * Optional explicit upright-region leaf-area targets (m2 per upright-region).
+ * Flattened order is upright-major with three vertical regions per upright:
+ * U0_low, U0_mid, U0_upper, U1_low, ...
+ *
+ * Length should be number_of_detected_uprights * 3, where detected uprights
+ * are order-root groups with vertical span greater than 2.0 m. Missing entries
+ * are skipped; negative values mean "leave this upright-region unchanged".
+ */
+global double[] leafAreaTargetsUprightRegion_T1 = null;
+global double[] leafAreaTargetsUprightRegion_T2 = null;
+
+/**
+ * Target total leaf area (m2 per tree) at twinning stages 1 and 2.
+ * For wholeTree, this is the direct tree target. For uprightRegions, this is
+ * distributed across all upright bottom/middle/top regions proportional to
+ * region length. A negative value means no target specified.
+ */
+global double leafAreaTargetPerTree_T1 = -1.0;
+
+global double leafAreaTargetPerTree_T2 = -1.0;
+
+
+
+// ============================================================================
+// Leaf prunning
+/**
+ * Executes T2 (post-twinning) leaf pruning based on project configuration.
+ *
+ * <p>T2 pruning is a physical pruning stage that removes canopy biomass to
+ * meet post-pruning management targets. The procedure consists of two steps:
+ *
+ * <ol>
+ *   <li><b>Structural pruning</b>: removal of entire vegetative shoots
+ *       (including internodes and leaves) to achieve a coarse reduction
+ *       in canopy size.</li>
+ *   <li><b>Leaf-area-driven pruning</b>: proportional removal of remaining
+ *       leaves to meet either a target leaf area or a fixed pruning fraction.</li>
+ * </ol>
+ *
+ * <p>Pruning is applied only on the configured pruning DOY (if specified).
+ * When {@code dryRun == true}, no structural changes are made and no pruning
+ * statistics are recorded.
+ *
+ * <p>During real runs, removed leaf area, leaf biomass, and internode biomass
+ * are tracked for mass-balance reporting.
+ *
+ * @param dryRun if {@code true}, evaluates pruning logic without modifying
+ *               plant structure or recording pruning statistics
+ */
+// ============================================================================
+
+/**
+ * Day-of-year when the leaf prunning becomes active. A value of
+ * -1 indicates that no specific DOY is set and the twinning leaf target
+ * should be ignored.
+ */
+global int leafPruningDOY = 260;
+//summerPruneFrac can be calculated by actual leaf area later
+// the prunning method remove the vegetative shoots first and remove other leaf. 
+//if everything set well, this can set to 0, else it will affect the vegetative shoot removal
+// veg‑shoot only optional if you also set both LA targets
+global double leafPruningFraction = 0;   //   
+// (keep existing)
+//can set a small number as guard but not affecting the vegetative shoot removal
+global double desiredLeafArea_postPrune = 18;
+
+
+// NEW: pruning strategy for T2
+/**
+pruneMode = 1 — Target Leaf Area Mode
+Purpose: Achieve a specific post-pruning leaf area
+Behaviour:
+	After vegetative shoot removal, remaining leaf area is compared to
+	pruneTargetLA; If leaf area exceeds the target, a proportional fraction of leaves
+	is removed to reach the target
+
+pruneMode = 0 — Fractional Pruning Mode
+
+Purpose: Apply a fixed pruning intensity
+
+Behaviour:
+	A fixed fraction (pruneFraction) of remaining leaves is removed; No explicit leaf area target is enforced
+
+pruneMode = 2 → vegetative shoot removal with LA target constraint	
+*/
+
+global int leafPruningMode = 2;  
+
+
+
+/**
+ * Fruit target mode for the fruit planner.
+ *
+ * Typical values:
+ *  "none"      = no explicit fruit targets
+ *  "wholeTree" = use whole-tree fruit-number targets
+ *  "gridBased" = use fruitTargetsGrid for spatial crop-load control.
+ *  "uprightRegions" = distribute fruit/flower targets over each upright's
+ *      bottom/middle/top regions by region length. Accepted aliases in
+ *      FruitPlanner: "upright_region", "upright-region", "upright_regions",
+ *      "upright-regions", and "upright3".
+ *
+ * Default "none" keeps behaviour unchanged if the JSON block is omitted.
+ */
+global String fruitTargetMode = "none";
+
+global int expectedFruitNumber_prePrune = 750; //bud number * 0.8 * 1.8 fruits planning objective (pre-thinning)
+
+global int desiredFruitNumber_postPrune = 500; // Crop load goal, varies by plant type (e.g., FOPS apple ~400-500 or 2-cane grape ~45).
+
+/**
+ * Day-of-year when twinningFruitNumberTarget becomes active. A value of
+ * -1 means "unused / not specified".
+ */
+global int fruitPruningDOY = -1;
+
+// Mode for pruning:
+//   1 = everywhere: max 1 organ/cluster
+//   2 = height-based: below sepHeight → 1, above → 2
+global int fruitPruningMode = 1;
+
+/**
+ * Target total fruit number per tree at the twinning stage (e.g. after
+ * final thinning). A value of -1 indicates that no explicit twinning target
+ * was specified. In uprightRegions mode, this tree target is distributed over
+ * bottom/middle/top regions proportional to region length. In T2 gridBased
+ * mode, the planner instead uses the rounded sum of fruitTargetsGrid_T2 as the
+ * global floor/total target when that grid is available; fruitTargetPerTree_T2
+ * then acts only as a compatibility fallback.
+ */
+global int fruitTargetPerTree_T1 = -1;
+global int fruitTargetPerTree_T2 = -1;
+
+
+/**
+ * Optional grid of fruit-number targets per cell for spatial crop-load
+ * management. The array is flattened in row-major order (z rows × x
+ * columns) and should have length nx * nz.
+ *
+ * If null or length == 0, no grid-based fruit targeting is applied and the
+ * model uses wholeTree or uprightRegions targets only if those modes are selected.
+ */
+global double[] fruitTargetsGrid_T1 = null;
+global double[] fruitTargetsGrid_T2 = null;
+/**
+ * Optional explicit upright-region fruit-number targets (fruits per
+ * upright-region). Flattened order is upright-major with three vertical
+ * regions per upright: U0_low, U0_mid, U0_upper, U1_low, ...
+ *
+ * Length should be number_of_detected_uprights * 3, where detected uprights
+ * are order-root groups with vertical span greater than 2.0 m. Missing entries
+ * are skipped; negative values mean "leave this upright-region unchanged".
+ */
+global double[] fruitTargetsUprightRegion_T1 = null;
+global double[] fruitTargetsUprightRegion_T2 = null;
+// ---------------------------------------------------------------------------
+// Fruit adding options (numeric initialization / gap-filling)
+// ---------------------------------------------------------------------------
+/**
+ * FruitPlanner add-phase controls.
+ *
+ * Put these keys under category "fruitPlanner" in model options JSON, e.g.
+ * "fruitPlanner": {
+ *   "allowFruitAdding": true,
+ *   "maxFruitAddsPerTree": 50,
+ *   "maxFruitPerInternode": 2,
+ *   "fruitAddMode": "toTarget",
+ *   "fruitAddDebug": false,
+ *   "allowAddOnOccupiedCordon": true,
+ *   "maxFruitPerCordonPosition": 1,
+ *   "maxFruitPerCordonPositionFallback": 2,
+ *   "fruitInitFromNearbyTemplate": true
+ * }
+ *
+ * Notes:
+ * - Add runs in T1/T2 twinning via runTwinningStage(..., enableAdd=true).
+ * - Prune flow can pre-fill once before remove-only pruning.
+ * - maxFruitAddsPerTree is a hard cap per call.
+ */
+global boolean allowFruitAdding = true;               // master switch
+global int     maxFruitAddsPerTree = 550;           // safety cap per tree
+global int     maxFruitPerInternode = 2;               // avoid duplicates/crowding
+global String  fruitAddMode = "toTarget";              // "toTarget" | "onlyIfNone"
+global boolean fruitAddDebug = true;                  // extra diagnostics
+
+// Apple-specific fallback controls for cordon placement
+global boolean allowAddOnOccupiedCordon = true;        // second pass on occupied sites
+global int     maxFruitPerCordonPosition = 1;          // pass-1 cap (empty preferred)
+global int     maxFruitPerCordonPositionFallback = 2;  // pass-2 cap (allow +1)
+global boolean fruitInitFromNearbyTemplate = true;     // copy init state from nearby fruit
+
+global double fruitSeparationHeight = 1.7;
+/** Enable carbon-limited flower/fruitlet drop. */
+global boolean enableCarbonLimitedFruitDrop = false;
+
+
+
+
+
+
+//********************************* environment_soil *********************************/
+/**
+ * Specifies soil conditions, including the number of root and soil layers, soil water potential, soil water content, and grid cell size for complex soil simulation.
+ * These values are essential for initializing the model and will be overwritten when the climate file is read to avoid compile errors.
+ */
+
+/** Number of root and soil layers, essential for model initialization. */
+global int numofSoilLayers = 4;
+
+/** Mean of the input soil water potential, vital for simulating soil water availability. */
+global double inputWaterPotential = -0.1;
+
+/** Array representing soil water potential at different soil layers. */
+global double[] soilWaterPotentialArray = {-0.05, -0.1, -0.1, -0.1};
+
+/** Array representing volumetric water content at different soil layers. */
+global double[] soilWaterContentArray = {0.2, 0.25, 0.25, 0.25};
+
+/** Array representing soluble NO3 content at different soil layers. */
+global double[] soilSoluteNO3ContentArray = {0.0, 0.0, 0.0, 0.0};
+
+/** Array representing temperature at different soil layers. */
+global double[] soilTempContentArray = {0.0, 0.0, 0.0, 0.0};
+
+/**
+ * Height where the light intensity was measured.
+ * for validating the light penetration in canopy
+ * light sensors were placed in the same height
+ */
+global double [] output_height = {0.9, 1.4, 2, 3};
+
+/**
+ * Light-sensor placement heights.
+ * Keeps reported output_height bands unchanged and appends one extra top layer
+ * for the sky-reference sensor when light sensors are enabled.
+ */
+global double [] sensor_heights = {0.9, 1.4, 2, 3};
+
+private static void refreshSensorHeights() {
+	if (output_height == null || output_height.length == 0) {
+		sensor_heights = new double[0];
+		return;
+	}
+
+	int sensorCount = output_height.length;
+	if (useLightSensors == true) {
+		sensorCount++;
+	}
+
+	sensor_heights = new double[sensorCount];
+	System.arraycopy(output_height, 0, sensor_heights, 0, output_height.length);
+
+	if (useLightSensors == true) {
+		sensor_heights[output_height.length] = output_height[output_height.length - 1] * 1.5;
+	}
+}
+
+static void validateSoilWaterContent(double[] soilWaterContentArray) {
+
+    for (int i = 0; i < soilWaterContentArray.length; i++) {
+        float value = soilWaterContentArray[i];
+
+        if (value <= 0 || value != value) { // value != value checks for NaN in XL
+            println("Error: Invalid soil water content at index " + i + ": " + value);
+            
+            println("setting to default value");
+            soilWaterContentArray[i] = 0.25;
+        }
+    }
+
+    println("All soil water content values are valid.");
+}
+
+/** Grid cell size for the complex soil simulation, impacting the spatial resolution of soil processes. */
+global double soilGridSize = 0.2;  // dx (along row)      ← from CSV 'gridSize'
+global double soilGridWidth = 0.2; // dy (across row)     ← from CSV 'gridWidth' (optional)
+
+
+/**
+ * Mode for stomatal water response function.
+ * Determines how stomatal behavior is affected by environmental signals.
+ * Options:
+ * <ul>
+ *   <li>{@link #WATER_POTENTIAL_ONLY}: Stomatal response is based only on water potential.</li>
+ *   <li>{@link #WATER_POTENTIAL_AND_ABA}: Stomatal response incorporates both water potential and abscisic acid (ABA) signaling.</li>
+ * </ul>
+ */
+ /**
+ * Stomatal response mode: only water potential is considered in determining stomatal conductance.
+ * Suitable for simple hydraulic-driven models.
+ */
+global int WATER_POTENTIAL_ONLY = 1;
+
+/**
+ * Stomatal response mode: both water potential and ABA signaling are considered.
+ * Suitable for models that account for chemical signaling under drought stress.
+ */
+global int WATER_POTENTIAL_AND_ABA = 2;
+
+global int stomataWaterResFunction = WATER_POTENTIAL_ONLY;
+
+
+
+/**
+ * Mode for root Relative Growth Rate (RGR) calculation.
+ * Determines how the RGR of roots is computed over the season.
+ * Options:
+ * <ul>
+ *   <li>{@link #RGR_MODE_SEASONAL}: RGR varies based on the time of year (days since winter solstice).</li>
+ *   <li>{@link #RGR_MODE_CONSTANT}: RGR is constant throughout the growing season.</li>
+ * </ul>
+ */
+/**
+ * Root RGR mode: seasonal time-dependent RGR based on phenology.
+ * Uses a dynamic function (e.g., beta function) to model variation in growth rate.
+ */
+global int RGR_MODE_SEASONAL = 1;
+
+/**
+ * Root RGR mode: constant relative growth rate.
+ * Applies a fixed RGR value regardless of time of year or phenological stage.
+ */
+ 
+global int RGR_MODE_CONSTANT = 2;
+
+global int rootRGRMode = RGR_MODE_CONSTANT;
+
+
+
+/*******************************************************************************
+ * External input files, optional depends on requirement
+ ******************************************************************************/
+ /* to be tidy up @junqi */
+global double gcDurationGlobal	; 					//the new growth cycle (phyllochron) duration modified by water potential
+/** Observed plant transpiration rate (mg/plant/s or mmol/m2/s depending on the data). */
+global float observedPlantTranspiration;
+/** Observed net photosynthesis rate (umol CO2/m2/s). */
+global float observedAnet;
+/** Observed water use efficiency (umol CO2/m2/s per mmol H2O/m2/s). */
+global float observedWUE;
+
+/** external input for different aspects if required */
+global double[][] berryWeight = new double[12][16];
+global double[][] berryModelInput = new double[7][7];
+global double[][] rootModelInput = new double[7][7];
+
+//global double[][] climate = new double[10][1570];  //only for antony's data dayOfYear	Hour	Temperature	RH	VPD	globalRadiation	swc	E_mg/plant/s	E_g/m2/h	wholePlantLeafArea_m2	PPFD
+global double[][] organSize = new double[24][6];  //column names: leaf.rank	leaf.length	leaf.width	internode.length	petile.length	leaf.area
+global double[][] rosetteLeafProfile = null;
+global double[][] rosetteLeafLengthProfile = null;
+global double[][] rosetteLeafWidthProfile = null;
+global double[][] rosetteInternodeProfile = null;
+global double[][] rosettePetioleProfile = null;
+global double[][] bourseLeafProfile = null;
+global double[][] bourseLeafLengthProfile = null;
+global double[][] bourseLeafWidthProfile = null;
+global double[][] bourseInternodeProfile = null;
+global double[][] boursePetioleProfile = null;
+global double[][] vegShootLeafProfile = null;
+global double[][] vegShootLeafLengthProfile = null;
+global double[][] vegShootLeafWidthProfile = null;
+global double[][] vegShootInternodeProfile = null;
+global double[][] vegShootPetioleProfile = null;
+global boolean organSizeProfilesLoaded = false;
+global double[][] parSampling = new double[4][500]; 
+global double[][] structuralVariationShoot = new double[5][17];
+global double[][] structuralVariationLeaf = new double[3][3];
+
+global double[][] shootArchitecture = new double[20][10];
+global double[][] rootArchitecture = new double[20][10];
+  
+//define file names to load csv files
+global String  virtualFruitParameter_file;  //"GS_apple_sim.properties";
+global String  virtualFruitModelInput_file; // "GS_Golden.csv";
+
+global String  berryWeight_file;
+global String  berryModelInput_file;
+global String  rootModelInput_file;
+global String  climate_file;
+global String  organSize_file;
+//global String  par_sampling_file = "parameter_sampling.csv";
+global String structuralVariationShoot_file;
+global String structuralVariationLeaf_file;
+global String shootArchitecture_file;
+global String rootArchitecture_file;
+global String shadingFactor_file;
+
+global ShadingFactorTable SFT = null;
+
+public static boolean hasOrganSizeInput() {
+	return !isStringNull(organSize_file);
+}
+
+private static String resolveInputPath(String path) {
+	if (isStringNull(path)) return null;
+	File f = new File(path);
+	if (!f.isAbsolute()) {
+		f = new File(PATH_INPUT, path);
+	}
+	return f.getPath();
+}
+
+public static void ensureOrganSizeProfilesLoaded() {
+	if (organSizeProfilesLoaded) return;
+	if (!hasOrganSizeInput()) return;
+
+	String rosettePath = resolveInputPath(rosetteProfileFile);
+	String boursePath = resolveInputPath(bourseProfileFile);
+	String vegPath = resolveInputPath(vegShootProfileFile);
+
+	if (isStringNull(rosettePath)) {
+		throw new RuntimeException("organ-size input is active but rosetteProfileFile is not configured");
+	}
+	if (isStringNull(boursePath)) {
+		throw new RuntimeException("organ-size input is active but bourseProfileFile is not configured");
+	}
+
+	rosetteLeafProfile = loadProfile(rosettePath, "leaf.rank", "leaf.area");
+	rosetteLeafLengthProfile = loadProfile(rosettePath, "leaf.rank", "leaf.length");
+	rosetteLeafWidthProfile = loadProfile(rosettePath, "leaf.rank", "leaf.width");
+	rosetteInternodeProfile = loadProfile(rosettePath, "leaf.rank", "internode.length");
+	rosettePetioleProfile = loadOptionalProfile(rosettePath, "leaf.rank", "petile.length");
+	bourseLeafProfile = loadProfile(boursePath, "leaf.rank", "leaf.area");
+	bourseLeafLengthProfile = loadProfile(boursePath, "leaf.rank", "leaf.length");
+	bourseLeafWidthProfile = loadProfile(boursePath, "leaf.rank", "leaf.width");
+	bourseInternodeProfile = loadProfile(boursePath, "leaf.rank", "internode.length");
+	boursePetioleProfile = loadOptionalProfile(boursePath, "leaf.rank", "petile.length");
+	if (!isStringNull(vegPath)) {
+		vegShootLeafProfile = loadProfile(vegPath, "leaf.rank", "leaf.area");
+		vegShootLeafLengthProfile = loadProfile(vegPath, "leaf.rank", "leaf.length");
+		vegShootLeafWidthProfile = loadProfile(vegPath, "leaf.rank", "leaf.width");
+		vegShootInternodeProfile = loadProfile(vegPath, "leaf.rank", "internode.length");
+		vegShootPetioleProfile = loadOptionalProfile(vegPath, "leaf.rank", "petile.length");
+	} else {
+		vegShootLeafProfile = null;
+		vegShootLeafLengthProfile = null;
+		vegShootLeafWidthProfile = null;
+		vegShootInternodeProfile = null;
+		vegShootPetioleProfile = null;
+	}
+	organSizeProfilesLoaded = true;
+	if (printFlag) {
+		println("[organ-size] loaded profiles: rosette=" + rosettePath + ", bourse=" + boursePath + ", vegetative=" + vegPath);
+	}
+}
+
+public static boolean isNumeric(String v) {
+	if (v == null || v.length() == 0) return false;
+	try {
+		Double.parseDouble(v);
+		return true;
+	} catch (NumberFormatException e) {
+		return false;
+	}
+}
+
+public static double[][] loadProfile(String path, String xColumn, String yColumn) {
+	File f = new File(path);
+	if (!f.exists() || !f.isFile()) {
+		throw new RuntimeException("Organ-size profile file not found: " + path);
+	}
+	ArrayList xList = new ArrayList();
+	ArrayList yList = new ArrayList();
+	BufferedReader br = null;
+	int xIdx = -1;
+	int yIdx = -1;
+	boolean headerProcessed = false;
+	try {
+		br = new BufferedReader(new FileReader(f));
+		String line = null;
+		while ((line = br.readLine()) != null) {
+			line = line.trim();
+			if (line.length() == 0 || line.startsWith("#")) continue;
+			String[] parts = line.split(",");
+			if (parts.length < 2) continue;
+			if (!headerProcessed) {
+				headerProcessed = true;
+				if (!isNumeric(parts[0].trim())) {
+					int i;
+					for (i = 0; i < parts.length; i++) {
+						String h = parts[i].trim();
+						if (h.equalsIgnoreCase(xColumn)) xIdx = i;
+						if (h.equalsIgnoreCase(yColumn)) yIdx = i;
+					}
+					if (xIdx < 0 || yIdx < 0) {
+						throw new RuntimeException("Organ-size profile columns not found: " + xColumn + ", " + yColumn + " in " + path);
+					}
+					continue;
+				}
+				xIdx = 0;
+				yIdx = 1;
+			}
+			if (xIdx >= parts.length || yIdx >= parts.length) continue;
+			double x = Double.parseDouble(parts[xIdx].trim());
+			double y = Double.parseDouble(parts[yIdx].trim());
+			if (Double.isNaN(x) || Double.isInfinite(x)) continue;
+			if (Double.isNaN(y) || Double.isInfinite(y)) continue;
+			xList.add(Double.valueOf(x));
+			yList.add(Double.valueOf(y));
+		}
+	} catch (IOException e) {
+		throw new RuntimeException("Failed reading organ-size profile: " + path, e);
+	} catch (NumberFormatException e) {
+		throw new RuntimeException("Invalid numeric value in organ-size profile: " + path, e);
+	} finally {
+		if (br != null) {
+			try { br.close(); } catch (IOException ioe) { }
+		}
+	}
+	if (xList.size() <= 0) {
+		throw new RuntimeException("Organ-size profile contains no usable rows: " + path);
+	}
+	int n = xList.size();
+	double[] xs = new double[n];
+	double[] ys = new double[n];
+	int i;
+	for (i = 0; i < n; i++) {
+		xs[i] = ((Double) xList.get(i)).doubleValue();
+		ys[i] = ((Double) yList.get(i)).doubleValue();
+	}
+	return new double[][] { xs, ys };
+}
+
+public static double[][] loadOptionalProfile(String path, String xColumn, String yColumn) {
+	try {
+		return loadProfile(path, xColumn, yColumn);
+	} catch (RuntimeException e) {
+		String msg = e.getMessage();
+		if (msg != null &&
+			(msg.indexOf("columns not found") >= 0 ||
+			 msg.indexOf("Invalid numeric value") >= 0 ||
+			 msg.indexOf("contains no usable rows") >= 0)) {
+			if (printFlag) {
+				println("[organ-size] optional profile missing for " + yColumn + " in " + path + "; using in-module fallback.");
+			}
+			return null;
+		}
+		throw e;
+	}
+}
+
+
+/**
+ * Loads the model input data from configuration files.
+ * This function orchestrates the loading of the global parameter file
+ * followed by plant parameters from their respective configuration files.
+ *
+ * The sequence of events is as follows:
+ * 1. Attempts to load the main property file that contains model settings.
+ * 2. If there is an error during the loading of the property file, a message is printed.
+ * 3. Load plant parameters after the success of the property file loading
+ * 4. Load plant phenology parameters after the success of the property file loading
+ *
+ * @return A boolean indicating whether an error occurred during the loading process.
+ */
+ 
+
+/**
+ * SimulationLoader handles the structured loading of model configuration,
+ * parameters, and derived values. This class is intended to be invoked
+ * after deserialization (e.g., from a `.gsz` file) to ensure state restoration.
+ */
+public class SimulationLoader implements Serializable, RunAfterLoad {
+
+	private static final long serialVersionUID = 1L;
+	
+	/**
+	 * Invoked automatically after GroIMP deserializes this class.
+	 * Useful when restoring simulations from `.gsz` files.
+	 * Those are okay only if they are pure Java (file I/O, parsing, setting flags). 
+	 * They must not:
+	 * touch the graph,
+	 * rely on producers,
+	 * or construct scene nodes.
+	 * Be aware of that halt is filtering the climate file. 
+	 * so the maximum number of steps (including the previous steps at the resume) should smaller than 24*halt-1 
+	 */
+	@Override
+	public void load(RegistryContext ctx) {
+		//command line load from the headless mode, for keeping the state variables, we need
+		//to set reset to false. However, we can still reload the parameters and file names	
+		if("false".equalsIgnoreCase(ModelArgs.reset)) {
+			//Object f = getFileFromProject("globalParameters.rgg");
+			// Clear all data stored in Config Module
+			CONFIG.reset();
+			initSimulationInstance();  // Re-run the simulation input loaders
+			//need to update the climate data if you want to run a different time period
+			readCsvFiles();
+		  if (printFlag) {
+			println("🔁 Reloading simulation configuration after file reload...");
+		}
+		}
+	}
+	/**
+	 * Executes the simulation initialization sequence.
+	 * 
+	 * @return true if any error occurred during loading; false otherwise.
+	 */
+	public static boolean initSimulationInstance() {
+		boolean error = false;
+
+		// Step 1: Load main property file
+		error = error || loadPropertyFile();
+		if (!error) {
+			readOptimalCanopyArchitectureFile();
+		}
+
+		if (error && printFlag) {
+			println("Error during reading of parameter file(s)!");
+		}
+
+		// Step 2: Load model inputs only if properties loaded successfully
+		if (!error && !isStringNull(FILE_NAME_PLANT_PARAMETERS)) {
+			loadInitialConditions(FILE_NAME_INITIAL_CONDITIONS);
+			loadPlantParameters(FILE_NAME_PLANT_PARAMETERS);
+			loadSoilParameters(FILE_NAME_SOIL_PARAMETERS);
+
+			if (usePhenology) {
+				loadPhenologyParameters(FILE_NAME_PHENOLOGY_PARAMETERS);
+			}
+
+			// Step 3: Final calculations after input is loaded
+			calcValuesFromInput();
+		}
+
+		return error;
+	}
+
+
+}
+
+
+/**
+ * Loads the main property file which includes the model settings.
+ * It utilizes the ConfigLoader utility class to read configurations
+ * and apply them to the simulation environment.
+ *
+ * @return A boolean indicating if the loading process encountered an error.
+ */
+private static boolean loadPropertyFile() {
+	ConfigLoader loader = new ConfigLoader(new LoadModelInputCommand());
+
+	String file_path = PATH_SCENARIOS + FILE_NAME_MODEL_OPTIONS;
+	return loader.load(FILE_NAME_MODEL_OPTIONS, file_path);
+}
+
+/**
+ * Inner class implementing a command pattern for loading model input properties.
+ * This command is passed to the ConfigLoader which then invokes the execute method
+ * to perform the actual loading of properties.
+ */
+private class LoadModelInputCommand implements LoadCommand {
+	/**
+	 * Executes the loading of model input properties from a given file name.
+	 * It is called by the ConfigLoader when the load method is invoked.
+	 *
+	 * @param file_name The name of the file from which properties will be loaded.
+	 */
+	public void execute(String file_name) {
+		loadProperties(file_name);
+
+	}
+}
+
+private class LoadOptimalCanopyArchitectureCommand implements LoadCommand {
+	public void execute(String file_name) {
+		loadOptimalCanopyArchitectureProperties(file_name);
+	}
+}
+
+public static void readOptimalCanopyArchitectureFile() {
+	if (!useOptimalCanopyArchitectureFile) {
+		return;
+	}
+
+	ConfigLoader loader = new ConfigLoader(new LoadOptimalCanopyArchitectureCommand());
+	String file_path = PATH_SCENARIOS + FILE_NAME_OPTIMAL_CANOPY_ARCHITECTURE;
+	boolean error = loader.load(FILE_NAME_OPTIMAL_CANOPY_ARCHITECTURE, file_path);
+	if (error && printFlag) {
+		println("[Config] WARN: failed to load optimal canopy architecture file: " +
+				FILE_NAME_OPTIMAL_CANOPY_ARCHITECTURE);
+	}
+}
+
+private static void loadOptimalCanopyArchitectureProperties(String file_name) {
+	CategoryStore config = ((DocumentCategoryNameGroup) CONFIG.getGroup(file_name,
+			DocumentCategoryNameGroup.class)).getCategoryStore();
+
+	config.setCategoryContext("optimal_canopy_architecture");
+	try {
+		optimalCanopyLayoutMode = config.getString("layoutMode", optimalCanopyLayoutMode);
+	} catch (RuntimeException e) {
+		optimalCanopyLayoutMode = "layer_row_grid";
+	}
+	try {
+		optimalCanopyDeriveNrRowsFromLayers =
+				config.getBoolean("deriveNrRowsFromLayers", optimalCanopyDeriveNrRowsFromLayers);
+	} catch (RuntimeException e) {
+		optimalCanopyDeriveNrRowsFromLayers = true;
+	}
+	try {
+		optimalCanopyLayerCount = config.getInteger("layerCount", optimalCanopyLayerCount);
+	} catch (RuntimeException e) {
+		optimalCanopyLayerCount = 1;
+	}
+	try {
+		optimalCanopyRowsPerLayer = config.getInteger("rowsPerLayer", optimalCanopyRowsPerLayer);
+	} catch (RuntimeException e) {
+		optimalCanopyRowsPerLayer = 1;
+	}
+	try {
+		optimalCanopyRowYSpacingMode = config.getString("rowYSpacingMode", optimalCanopyRowYSpacingMode);
+	} catch (RuntimeException e) {
+		optimalCanopyRowYSpacingMode = "use_rowDistance";
+	}
+	try {
+		optimalCanopyLayerHeightMode = config.getString("layerHeightMode", optimalCanopyLayerHeightMode);
+	} catch (RuntimeException e) {
+		optimalCanopyLayerHeightMode = "wood_length_linear";
+	}
+	try {
+		optimalCanopyWoodLengthBase = config.getDouble("woodLengthBase", optimalCanopyWoodLengthBase);
+	} catch (RuntimeException e) {
+		optimalCanopyWoodLengthBase = 0.95;
+	}
+	try {
+		optimalCanopyWoodLengthStep = config.getDouble("woodLengthStep", optimalCanopyWoodLengthStep);
+	} catch (RuntimeException e) {
+		optimalCanopyWoodLengthStep = 0.95;
+	}
+	if ("wood_length_explicit".equals(optimalCanopyLayerHeightMode)) {
+		try {
+			Double[] woodLengthWrapper = safeGetDoubleArray(config, "woodLengthValues");
+			if (woodLengthWrapper != null) {
+				optimalCanopyWoodLengthValues = new double[woodLengthWrapper.length];
+				for (int i = 0; i < woodLengthWrapper.length; i++) {
+					if (woodLengthWrapper[i] != null) {
+						optimalCanopyWoodLengthValues[i] = woodLengthWrapper[i].doubleValue();
+					} else {
+						optimalCanopyWoodLengthValues[i] = optimalCanopyWoodLengthBase;
+					}
+				}
+			}
+		} catch (RuntimeException e) {
+			// Compatibility fallback: explicit heights are optional; linear mode remains authoritative.
+			optimalCanopyWoodLengthValues = new double[0];
+		}
+	}
+	try {
+		optimalCanopyStripSpacingMode = config.getString("stripSpacingMode", optimalCanopyStripSpacingMode);
+	} catch (RuntimeException e) {
+		optimalCanopyStripSpacingMode = "derived_block_width";
+	}
+	try {
+		optimalCanopyCloneSpacingMode = config.getString("cloneSpacingMode", optimalCanopyCloneSpacingMode);
+	} catch (RuntimeException e) {
+		optimalCanopyCloneSpacingMode = "derived_block_width";
+	}
+	try {
+		optimalCanopyDensityCalculationMode =
+				config.getString("densityCalculationMode", optimalCanopyDensityCalculationMode);
+	} catch (RuntimeException e) {
+		optimalCanopyDensityCalculationMode = "derived_block_width";
+	}
+	try {
+		optimalCanopyStaggerAlternateRows =
+				config.getBoolean("staggerAlternateRows", optimalCanopyStaggerAlternateRows);
+	} catch (RuntimeException e) {
+		optimalCanopyStaggerAlternateRows = false;
+	}
+	try {
+		optimalCanopyAlternateRowXOffsetFraction =
+				config.getDouble("alternateRowXOffsetFraction", optimalCanopyAlternateRowXOffsetFraction);
+	} catch (RuntimeException e) {
+		optimalCanopyAlternateRowXOffsetFraction = 0.5;
+	}
+	try {
+		optimalCanopyLegacyMode = config.getString("legacyMode", optimalCanopyLegacyMode);
+	} catch (RuntimeException e) {
+		optimalCanopyLegacyMode = "none";
+	}
+	try {
+		optimalCanopyUseLegacyScenarioPreset =
+				config.getBoolean("useLegacyScenarioPreset", optimalCanopyUseLegacyScenarioPreset);
+	} catch (RuntimeException e) {
+		optimalCanopyUseLegacyScenarioPreset = false;
+	}
+	try {
+		optimalCanopyWarnIfNrRowsMismatch =
+				config.getBoolean("warnIfNrRowsMismatch", optimalCanopyWarnIfNrRowsMismatch);
+	} catch (RuntimeException e) {
+		optimalCanopyWarnIfNrRowsMismatch = true;
+	}
+	try {
+		optimalCanopyPrintEffectiveConfig =
+				config.getBoolean("printEffectiveArchitectureConfig", optimalCanopyPrintEffectiveConfig);
+	} catch (RuntimeException e) {
+		optimalCanopyPrintEffectiveConfig = true;
+	}
+}
+
+	
+static double calcTrunkBiomass(int calcMethod) 
+{
+	//CARBON
+	if(calcMethod == 0) return(BIOMASS_WOOD); //direct input
+	//proportional increase based on the relationship between shoot and wood in cuttings
+	if(calcMethod == 1) return(BIOMASS_WOOD * CORDEN_NUM * SHOOT_NUM); 
+	//the density was in unit of mg/cm3, so need to times 1e6
+	if(calcMethod == 2) 
+		if (printFlag && !("ArchReader".equals(initiation_method) || "ArchReaderGPU".equals(initiation_method)))
+			{
+				println(" WOOD_DIAMETER " + WOOD_DIAMETER +" WOOD_LENGTH " + WOOD_LENGTH ); 
+			}
+		return(Math.PI * (WOOD_DIAMETER*WOOD_DIAMETER/4) * WOOD_LENGTH * WOOD_DENSITY*1e6);  
+}
+
+
+static double calcCordonBiomass(int calcMethod)
+{
+	return Math.max(0.0, sum((* g:Cordon, (g.plantNumber == 1) *).biomass));
+}
+
+static double calcPerennialWoodBiomass(int calcMethod)
+{
+	// Trunk/Cordon sums are intended to reflect live structure biomass. Trunk segment
+	// initialization in shoot.rgg now avoids assigning whole-trunk totals to every
+	// reconstructed segment, so summing Trunk.biomass is safe for structure-based woodRef.
+	double biomassTrunk = sum((* g:Trunk, (g.plantNumber == 1) *).biomass);
+	double biomassPerennialWood = biomassTrunk + calcCordonBiomass(calcMethod);
+	return Math.max(0.0, biomassPerennialWood);
+}
+
+static double calcAbovegroundPerennialStructureBiomass(int calcMethod)
+{
+	double biomassPerennialWood = calcPerennialWoodBiomass(calcMethod);
+	if (printFlag && biomassPerennialWood < 100) {
+		println(" WARN: low BIOMASS_WOOD(ref):" + biomassPerennialWood);
+	}
+	return Math.max(0.0, biomassPerennialWood);
+}
+
+static double calcAbovegroundPerennialStructureBiomassFromStructure()
+{
+	// Kept as a separate alias for call-site clarity (sync path vs config/startup path).
+	// Current implementation uses the same typed XL sums as calcAbovegroundPerennialStructureBiomass(...).
+	return calcAbovegroundPerennialStructureBiomass(woodBiomassCalcMethod);
+}
+
+static String normalizeTwinningGridBoundsMode(String rawMode)
+{
+	if (rawMode == null) return "PREDEFINED";
+
+	String m = rawMode.trim();
+	if (m.length() == 0) return "PREDEFINED";
+	m = m.toUpperCase();
+
+	if ("PREDEFINED".equals(m) || "AUTO_FIT".equals(m)) return m;
+
+	if ("AUTOFIT".equals(m) || "AUTO-FIT".equals(m) || "AUTO".equals(m)) {
+		return "AUTO_FIT";
+	}
+	if ("PRESET".equals(m) || "FIXED".equals(m) || "MANUAL".equals(m)) {
+		return "PREDEFINED";
+	}
+
+	if (printFlag) {
+		println(" WARN: invalid twinningGrids.boundsMode '" + rawMode + "', using PREDEFINED");
+	}
+	return "PREDEFINED";
+}
+
+public static boolean twinningStageIncludesObject(int stage, String objectName)
+{
+	String s = "";
+	if (stage == 1) {
+		s = twinningObjects_T1;
+	} else if (stage == 2) {
+		s = twinningObjects_T2;
+	}
+	if (s == null || objectName == null) return false;
+	s = "," + s.toLowerCase().replace(" ", "") + ",";
+	String key = "," + objectName.toLowerCase() + ",";
+	return s.indexOf(key) >= 0;
+}
+
+static String normalizeRootBiomassInitMode(String rawMode)
+{
+	if (rawMode == null) return "LEGACY_THRESHOLD_AUTO";
+
+	String normalizedMode = rawMode.trim();
+	if (normalizedMode.length() == 0) return "LEGACY_THRESHOLD_AUTO";
+	normalizedMode = normalizedMode.toUpperCase();
+
+	if ("LEGACY_THRESHOLD_AUTO".equals(normalizedMode) ||
+		"EXPLICIT_TOTAL".equals(normalizedMode) ||
+		"RATIO_TO_WOOD_REF".equals(normalizedMode)) {
+		return normalizedMode;
+	}
+
+	// Compatibility aliases for hand-edited scenario files.
+	if ("LEGACY".equals(normalizedMode) || "AUTO".equals(normalizedMode)) {
+		return "LEGACY_THRESHOLD_AUTO";
+	}
+	if ("EXPLICIT".equals(normalizedMode) || "EXPLICIT_ROOT".equals(normalizedMode)) {
+		return "EXPLICIT_TOTAL";
+	}
+	if ("RATIO".equals(normalizedMode) || "RATIO_TO_WOOD".equals(normalizedMode) ||
+		"AUTO_FROM_RATIO".equals(normalizedMode)) {
+		return "RATIO_TO_WOOD_REF";
+	}
+
+	if (printFlag) {
+		println(" WARN: invalid rootBiomassInitMode '" + rawMode + "', using LEGACY_THRESHOLD_AUTO");
+	}
+	return "LEGACY_THRESHOLD_AUTO";
+}
+
+static String normalizeAnnualInternodeBiomassMode(String mode)
+{
+	if (mode == null) return "density";
+
+	String m = mode.trim();
+	if (m.length() == 0) return "density";
+
+	if ("density".equalsIgnoreCase(m)) return "density";
+	if ("leafAllometry".equalsIgnoreCase(m)) return "leafAllometry";
+
+	// Compatibility aliases for hand-edited or legacy scenario files.
+	if ("leafBiomassRatio".equalsIgnoreCase(m)) return "leafAllometry";
+	if ("leafBiomass".equalsIgnoreCase(m)) return "leafAllometry";
+	if ("leafRatio".equalsIgnoreCase(m)) return "leafAllometry";
+
+	if (printFlag) {
+		println("[Config] WARN: Unknown annualInternodeBiomassMode='" + mode
+			+ "'. Falling back to 'density'.");
+	}
+	return "density";
+}
+
+static int normalizeRootRGRMode(int mode)
+{
+	if (mode == RGR_MODE_SEASONAL) return RGR_MODE_SEASONAL;
+	if (mode == RGR_MODE_CONSTANT) return RGR_MODE_CONSTANT;
+
+	if (printFlag) {
+		println("[Config] WARN: invalid rootGrowthFunction/rootRGRMode=" + mode
+			+ "; using RGR_MODE_SEASONAL.");
+	}
+	return RGR_MODE_SEASONAL;
+}
+
+static void applyRootBiomassInitializationFromWoodRef(double woodRef, String syncStage)
+{
+	if (woodRef <= 1e-9) return;
+
+	BIOMASS_WOOD = woodRef;
+
+	double rootInitThr = rootBiomassAutoInitThreshold;
+	if (rootInitThr <= 0) rootInitThr = 10.0;
+
+	double ratioFromDefault = defaultStrRootToWood;
+	if (ratioFromDefault <= 0) ratioFromDefault = 0.35;
+
+	String initMode = normalizeRootBiomassInitMode(rootBiomassInitMode);
+	boolean syncLog = (syncStage != null) && (syncStage.length() > 0);
+
+	int rootWoodRefModeNormalized = (rootWoodRefMode == 1) ? 1 : 0;
+	if ((rootWoodRefMode != 0) && (rootWoodRefMode != 1) && printFlag) {
+		println(" WARN: invalid rootWoodRefMode=" + rootWoodRefMode + ", using trunk mode (0)");
+	}
+	// The key name StrRootToTrunk is kept for backward compatibility, but in mode=1
+	// it is interpreted as root:woodRef (not strictly root:trunk).
+	boolean ratioUsesWoodRef = (rootWoodRefModeNormalized == 1);
+	String ratioRefLabel = ratioUsesWoodRef ? "woodRef" : "trunk";
+	String ratioUsedLabel = ratioUsesWoodRef ? "StrRootToWood(used)" : "StrRootToTrunk(used)";
+	String ratioUpdatedLabel = ratioUsesWoodRef ? "StrRootToWood(updated)" : "StrRootToTrunk(updated)";
+	String ratioUpdatedSyncLabel = ratioUsesWoodRef ? "StrRootToWood updated from structure" : "StrRootToTrunk updated from structure";
+
+	if ("RATIO_TO_WOOD_REF".equals(initMode)) {
+		double rootToRefRatio;
+		if (ratioUsesWoodRef) {
+			// mode=1: ratio is explicitly root:woodRef and comes from the dedicated option.
+			rootToRefRatio = ratioFromDefault;
+		} else {
+			// mode=0: legacy ratio is root:trunk and is stored in StrRootToTrunk.
+			rootToRefRatio = StrRootToTrunk;
+			if (rootToRefRatio <= 0) rootToRefRatio = ratioFromDefault;
+			StrRootToTrunk = rootToRefRatio;
+		}
+		BIOMASS_ROOT = BIOMASS_WOOD * rootToRefRatio;
+
+		if (printFlag) {
+			if (syncLog) {
+				println(" [" + syncStage + "] BIOMASS_ROOT re-init from structure, woodRef=" + BIOMASS_WOOD +
+						" ratio=" + rootToRefRatio + " ratioRef=" + ratioRefLabel +
+						" BIOMASS_ROOT=" + BIOMASS_ROOT +
+						" mode=" + rootWoodRefModeNormalized + " initMode=" + initMode);
+			} else {
+				println(" BIOMASS_WOOD(ref) " + BIOMASS_WOOD + " rootWoodRefMode=" + rootWoodRefModeNormalized +
+						" rootBiomassInitMode=" + initMode);
+				println(" " + ratioUsedLabel + " " + rootToRefRatio);
+				println(" BIOMASS_ROOT(init) " + BIOMASS_ROOT);
+			}
+		}
+		return;
+	}
+
+	if ("EXPLICIT_TOTAL".equals(initMode)) {
+		if (BIOMASS_ROOT < 0) BIOMASS_ROOT = 0;
+		if (BIOMASS_WOOD > 1e-9) {
+			StrRootToTrunk = BIOMASS_ROOT / BIOMASS_WOOD;
+		}
+
+		if (printFlag) {
+			if (syncLog) {
+				println(" [" + syncStage + "] " + ratioUpdatedSyncLabel + ", woodRef=" + BIOMASS_WOOD +
+						" BIOMASS_ROOT=" + BIOMASS_ROOT + " mode=" + rootWoodRefModeNormalized + " initMode=" + initMode);
+			} else {
+				println(" BIOMASS_WOOD(ref) " + BIOMASS_WOOD + " rootWoodRefMode=" + rootWoodRefModeNormalized +
+						" rootBiomassInitMode=" + initMode);
+				println(" BIOMASS_ROOT(given) " + BIOMASS_ROOT);
+				println(" " + ratioUpdatedLabel + " " + StrRootToTrunk);
+			}
+		}
+		return;
+	}
+
+	// Legacy compatibility path: threshold-based switch between explicit and ratio initialization.
+	if (BIOMASS_ROOT < rootInitThr) {
+		double rootToTrunkRatio = StrRootToTrunk;
+		if (rootToTrunkRatio <= 0) rootToTrunkRatio = ratioFromDefault;
+		double legacyWoodRef = BIOMASS_WOOD;
+		// Historical compatibility: legacy threshold-auto ratio init used trunk biomass as the reference,
+		// especially in grapevine scenarios where perennial-structure refs were introduced later.
+		double legacyTrunkWoodRef = calcTrunkBiomass(woodBiomassCalcMethod);
+		if (legacyTrunkWoodRef > 1e-9) {
+			legacyWoodRef = legacyTrunkWoodRef;
+		}
+			BIOMASS_WOOD = legacyWoodRef;
+			BIOMASS_ROOT = BIOMASS_WOOD * rootToTrunkRatio;
+			if (printFlag) {
+				if (syncLog) {
+					println(" [" + syncStage + "] BIOMASS_ROOT re-init from structure, woodRef=" + BIOMASS_WOOD +
+							" ratio=" + rootToTrunkRatio + " ratioRef=trunk(legacy)" +
+							" BIOMASS_ROOT=" + BIOMASS_ROOT +
+							" mode=" + rootWoodRefModeNormalized + " initMode=" + initMode);
+				} else {
+					println(" BIOMASS_WOOD(ref) " + BIOMASS_WOOD + " rootWoodRefMode=" + rootWoodRefModeNormalized +
+							" rootBiomassInitMode=" + initMode);
+					println(" StrRootToTrunk(used) " + rootToTrunkRatio);
+					println(" BIOMASS_ROOT(init) " + BIOMASS_ROOT);
+				}
+			}
+	} else {
+		if (BIOMASS_WOOD > 1e-9) {
+			StrRootToTrunk = BIOMASS_ROOT / BIOMASS_WOOD;
+		}
+		if (printFlag) {
+			if (syncLog) {
+				println(" [" + syncStage + "] " + ratioUpdatedSyncLabel + ", woodRef=" + BIOMASS_WOOD +
+						" BIOMASS_ROOT=" + BIOMASS_ROOT + " mode=" + rootWoodRefModeNormalized + " initMode=" + initMode);
+			} else {
+				println(" BIOMASS_WOOD(ref) " + BIOMASS_WOOD + " rootWoodRefMode=" + rootWoodRefModeNormalized +
+						" rootBiomassInitMode=" + initMode);
+				println(" BIOMASS_ROOT(given) " + BIOMASS_ROOT);
+				println(" " + ratioUpdatedLabel + " " + StrRootToTrunk);
+			}
+		}
+	}
+}
+
+public static void syncRootBiomassAfterArchitectureRead(String syncStage)
+{
+	boolean allowStep1AfterUpdatesResync = "step1_after_updates".equals(syncStage);
+	if (allowStep1AfterUpdatesResync) {
+		if (rootBiomassPostStep1UpdateSyncDone) return;
+	} else {
+		if (rootBiomassPostArchSyncDone) return;
+	}
+	if (!("ArchReader".equals(initiation_method) || "ArchReaderGPU".equals(initiation_method))) return;
+
+	double abovegroundPerennialStructureBiomassTotal = calcAbovegroundPerennialStructureBiomassFromStructure();
+	if (printFlag) {
+		println(" [" + syncStage + "] AbovegroundPerennialStructureBiomass(total) " + abovegroundPerennialStructureBiomassTotal);
+	}
+
+	double woodRef = rootWoodRefMode == 1 ?
+					 abovegroundPerennialStructureBiomassTotal :
+					 calcTrunkBiomass(woodBiomassCalcMethod);
+	if (woodRef <= 1e-9) return;
+
+	applyRootBiomassInitializationFromWoodRef(woodRef, syncStage);
+
+	rootBiomassPostArchSyncDone = true;
+	if (allowStep1AfterUpdatesResync) {
+		rootBiomassPostStep1UpdateSyncDone = true;
+	}
+}
+
+private static void recordLightInterceptionConfigurationError(String message) {
+	if (message == null || message.trim().length() == 0) return;
+	if (lightInterceptionConfigurationError == null || lightInterceptionConfigurationError.length() == 0) {
+		lightInterceptionConfigurationError = message;
+	} else {
+		lightInterceptionConfigurationError = lightInterceptionConfigurationError + "; " + message;
+	}
+}
+
+public static String resolveConfiguredLightInterceptionMode(
+		String rawMode, Boolean legacyMode, boolean hasMode, boolean hasLegacy) {
+	if (hasMode) return normalizeLightInterceptionMode(rawMode);
+	if (hasLegacy && legacyMode != null) return legacyMode.booleanValue() ? "gpu" : "cpu";
+	return "cpu";
+}
+
+private static void loadLightInterceptionOptions(CategoryStore config) {
+	lightInterceptionConfigurationError = null;
+	lightInterceptionModeExplicit = false;
+	lightInterceptionLegacyModeExplicit = false;
+	lightInterceptionModeRequested = "cpu";
+	lightInterceptionModeResolved = "cpu";
+	lightInterceptionFallbackMode = null;
+	lightInterceptionStrict = true;
+
+	boolean hasMode = false;
+	boolean hasLegacy = false;
+	String rawMode = null;
+	Boolean legacyMode = null;
+
+	try {
+		rawMode = config.getString("lightInterceptionMode");
+		hasMode = true;
+	} catch (KeyNotFoundException e) {
+		// Expected for legacy model-options files.
+	} catch (RuntimeException e) {
+		hasMode = true;
+		recordLightInterceptionConfigurationError("Could not read lightInterceptionMode: " + e.getMessage());
+	}
+
+	try {
+		legacyMode = config.getBoolean("useFluxLightModel");
+		hasLegacy = true;
+	} catch (KeyNotFoundException e) {
+		// Expected after migration to lightInterceptionMode.
+	} catch (RuntimeException e) {
+		hasLegacy = true;
+		recordLightInterceptionConfigurationError("Deprecated useFluxLightModel must be boolean: " + e.getMessage());
+	}
+
+	String requested = "cpu";
+	if (hasMode) {
+		lightInterceptionModeExplicit = true;
+		try {
+			requested = resolveConfiguredLightInterceptionMode(rawMode, legacyMode, true, hasLegacy);
+		} catch (RuntimeException e) {
+			recordLightInterceptionConfigurationError(e.getMessage());
+		}
+		if (hasLegacy && legacyMode != null) {
+			String legacyMapped = legacyMode.booleanValue() ? "gpu" : "cpu";
+			if (!requested.equals(legacyMapped)) {
+				println("Warning: lightInterceptionMode='" + requested
+					+ "' overrides conflicting deprecated useFluxLightModel=" + legacyMode + ".");
+			}
+		}
+	} else if (hasLegacy && legacyMode != null) {
+		lightInterceptionLegacyModeExplicit = true;
+		requested = resolveConfiguredLightInterceptionMode(null, legacyMode, false, true);
+		if (!lightInterceptionLegacyWarningPrinted) {
+			println("Warning: model option useFluxLightModel is deprecated; use lightInterceptionMode='"
+				+ requested + "'.");
+			lightInterceptionLegacyWarningPrinted = true;
+		}
+	}
+
+	if (lightInterceptionValidationModeOverride != null) {
+		try {
+			requested = normalizeLightInterceptionMode(lightInterceptionValidationModeOverride);
+			println("[Validation] lightInterceptionMode override: " + requested);
+		} catch (RuntimeException e) {
+			recordLightInterceptionConfigurationError("Invalid validation light-interception-mode: " + e.getMessage());
+		}
+	}
+
+	lightInterceptionModeRequested = requested;
+	lightInterceptionModeResolved = requested;
+
+	try {
+		lightInterceptionStrict = config.getBoolean("lightInterceptionStrict");
+	} catch (KeyNotFoundException e) {
+		lightInterceptionStrict = true;
+	} catch (RuntimeException e) {
+		recordLightInterceptionConfigurationError("lightInterceptionStrict must be boolean: " + e.getMessage());
+	}
+	try {
+		String rawFallback = config.getString("lightInterceptionFallbackMode");
+		if (rawFallback != null && rawFallback.trim().length() > 0) {
+			lightInterceptionFallbackMode = normalizeLightInterceptionMode(rawFallback);
+			if (lightInterceptionFallbackMode.equals(lightInterceptionModeRequested)) {
+				recordLightInterceptionConfigurationError(
+					"lightInterceptionFallbackMode must differ from lightInterceptionMode");
+			}
+		}
+	} catch (KeyNotFoundException e) {
+		lightInterceptionFallbackMode = null;
+	} catch (RuntimeException e) {
+		recordLightInterceptionConfigurationError("Invalid lightInterceptionFallbackMode: " + e.getMessage());
+	}
+}
+
+
+/**
+ * Normalize the public fruit-module selector at the configuration boundary.
+ */
+private static String normalizeFruitModule(String value) {
+	if (value == null) {
+		throw new IllegalArgumentException(
+			"fruitModule must be one of: simpleFruit, complexBerry, virtualFruit");
+	}
+	String normalized = value.trim();
+	if ("simpleFruit".equals(normalized)
+		|| "complexBerry".equals(normalized)
+		|| "virtualFruit".equals(normalized)) {
+		return normalized;
+	}
+	throw new IllegalArgumentException("Unknown fruitModule '" + value
+		+ "'. Accepted values: simpleFruit, complexBerry, virtualFruit");
+}
+
+/**
+ * Resolve fruit selection once, including the narrow legacy-boolean fallback.
+ *
+ * The former factory explicitly gave useVirtualFruit precedence when both
+ * legacy booleans were true. That documented behavior is retained with a
+ * warning so old apple/virtual-fruit scenarios do not change silently.
+ */
+private static String resolveFruitModule(CategoryStore config) {
+	String missing = "__FRUITCROPXL_FRUIT_MODULE_MISSING__";
+	String rawModule = missing;
+	String rawComplex = missing;
+	String rawVirtual = missing;
+	try {
+		rawModule = config.getString("fruitModule");
+	} catch (KeyNotFoundException e) {
+		// New selector is optional only for the localized legacy fallback.
+	} catch (RuntimeException e) {
+		throw new IllegalArgumentException(
+			"Could not read fruitModule: " + e.getMessage());
+	}
+	try {
+		rawComplex = config.getString("useComplexBerry");
+	} catch (KeyNotFoundException e) {
+		// Compatibility guard: optional legacy field is absent.
+	} catch (RuntimeException e) {
+		throw new IllegalArgumentException(
+			"Could not read legacy useComplexBerry: " + e.getMessage());
+	}
+	try {
+		rawVirtual = config.getString("useVirtualFruit");
+	} catch (KeyNotFoundException e) {
+		// Compatibility guard: optional legacy field is absent.
+	} catch (RuntimeException e) {
+		throw new IllegalArgumentException(
+			"Could not read legacy useVirtualFruit: " + e.getMessage());
+	}
+
+	boolean hasModule = rawModule != null && !missing.equals(rawModule);
+	boolean hasComplex = rawComplex != null && !missing.equals(rawComplex);
+	boolean hasVirtual = rawVirtual != null && !missing.equals(rawVirtual);
+
+	// These defaults preserve the previous loader defaults when legacy keys are partial or absent.
+	boolean legacyComplex = true;
+	boolean legacyVirtual = true;
+	if (hasComplex) {
+		try {
+			legacyComplex = config.getBoolean("useComplexBerry");
+		} catch (RuntimeException e) {
+			throw new IllegalArgumentException(
+				"Legacy useComplexBerry must be boolean: " + e.getMessage());
+		}
+	}
+	if (hasVirtual) {
+		try {
+			legacyVirtual = config.getBoolean("useVirtualFruit");
+		} catch (RuntimeException e) {
+			throw new IllegalArgumentException(
+				"Legacy useVirtualFruit must be boolean: " + e.getMessage());
+		}
+	}
+
+	String legacyModule;
+	if (legacyVirtual) {
+		legacyModule = "virtualFruit";
+		if (legacyComplex && hasComplex && hasVirtual) {
+			println("[Config] WARN: legacy useComplexBerry=true and useVirtualFruit=true"
+				+ " resolves to virtualFruit using the former documented virtual precedence."
+				+ " Migrate to fruitModule=\"virtualFruit\".");
+		}
+	} else if (legacyComplex) {
+		legacyModule = "complexBerry";
+	} else {
+		legacyModule = "simpleFruit";
+	}
+
+	if (hasModule) {
+		String selected = normalizeFruitModule(rawModule);
+		if ((hasComplex || hasVirtual) && !selected.equals(legacyModule)) {
+			throw new IllegalArgumentException("fruitModule=\"" + selected
+				+ "\" conflicts with supplied legacy fruit switches, which resolve to \""
+				+ legacyModule + "\". Remove the legacy keys or make them consistent.");
+		}
+		return selected;
+	}
+
+	if (!hasComplex && !hasVirtual) {
+		println("[Config] WARN: fruitModule is absent; preserving the former default virtualFruit."
+			+ " Add fruitModule explicitly.");
+	} else {
+		println("[Config] WARN: translating legacy fruit switches to fruitModule=\""
+			+ legacyModule + "\". Migrate this scenario to fruitModule.");
+	}
+	return legacyModule;
+}
+
+private static void loadProperties(String file_name) {
+
+	CategoryStore config = ((DocumentCategoryNameGroup) CONFIG.getGroup(file_name, 
+			DocumentCategoryNameGroup.class)).getCategoryStore();
+
+	// file configuration
+	config.setCategoryContext("module_configuration");
+
+	species = config.getString("species", "apple");
+	leafShapeSpecies = null;
+	try {
+		leafShapeSpecies = config.getString("leafShapeSpecies", leafShapeSpecies);
+	} catch (Exception e) {
+		// Compatibility fallback: legacy scenarios use the physiological species for leaf geometry.
+		leafShapeSpecies = null;
+	}
+	if (species.equals("apple")) {
+		FRACTION_SORBITOL = 0.75;
+	} else {FRACTION_SORBITOL = 0;}
+	
+	initiation_method = config.getString("initiation_method", "ArchReader");
+	if ("fieldRandomCanopy".equals(initiation_method)
+			&& (leafShapeSpecies == null || leafShapeSpecies.length() == 0)) {
+		leafShapeSpecies = "kiwifruit";
+	}
+	special_scenario = config.getString("special_scenario", special_scenario); // Use initial value at declaration as default.	
+	FILE_NAME_INITIAL_CONDITIONS = config.getString("FILE_NAME_INITIAL_CONDITIONS", "initial.conditions.default.json");	
+	FILE_NAME_PLANT_PARAMETERS = config.getString("FILE_NAME_PLANT_PARAMETERS",  "plant.parameters.FJ.json");
+	FILE_NAME_SOIL_PARAMETERS = config.getString("FILE_NAME_SOIL_PARAMETERS", "soil-parameters-clayloam-4.json");
+	
+	useComplexRoot = config.getBoolean("useComplexRoot", false);
+	useComplexLeaf = config.getBoolean("useComplexLeaf", false);
+	fruitModule = resolveFruitModule(config);
+	try {
+		String rootBiomassInitModeCandidate = config.getString("rootBiomassInitMode", "__CODEX_ROOT_BIOMASS_INIT_MODE_MISSING__");
+		if ((rootBiomassInitModeCandidate != null) &&
+			!rootBiomassInitModeCandidate.equals("__CODEX_ROOT_BIOMASS_INIT_MODE_MISSING__")) {
+			rootBiomassInitMode = rootBiomassInitModeCandidate;
+			rootBiomassInitModeSetByModelOptions = true;
+		} else {
+			rootBiomassInitMode = "LEGACY_THRESHOLD_AUTO";
+			rootBiomassInitModeSetByModelOptions = false;
+		}
+	} catch (Exception e) {
+		rootBiomassInitMode = "LEGACY_THRESHOLD_AUTO";
+		rootBiomassInitModeSetByModelOptions = false;
+	}
+	try {
+		rootWoodRefMode = config.getInteger("rootWoodRefMode", rootWoodRefMode);
+	} catch (Exception e) {
+		rootWoodRefMode = 1;
+	}
+	try {
+		defaultStrRootToWood = config.getDouble("defaultStrRootToWood", defaultStrRootToWood);
+	} catch (Exception e) {
+		defaultStrRootToWood = 0.35;
+	}
+	try {
+		rootBiomassAutoInitThreshold = config.getDouble("rootBiomassAutoInitThreshold", rootBiomassAutoInitThreshold);
+	} catch (Exception e) {
+		rootBiomassAutoInitThreshold = 10.0;
+	}
+	rootBiomassPostArchSyncDone = false;
+	rootBiomassPostStep1UpdateSyncDone = false;
+	
+	//boolean variables for controlling model functionalities	
+	config.setCategoryContext("model_functionality");
+	
+	thermalUnit = config.getString("thermalUnit", "thermalDay");
+	//for back compatibility with the old json files
+	try {
+			organGrowthMethod = config.getString("organGrowthMethod", "TempWaterCarbonLimited");
+		} catch (Exception e) {
+			organGrowthMethod = "TempWaterCarbonLimited";
+		} 
+	try {
+		rootRGRMode = normalizeRootRGRMode(config.getInteger("rootGrowthFunction"));
+	} catch (RuntimeException e) {
+		try {
+			// Compatibility alias for hand-edited or future scenario files.
+			rootRGRMode = normalizeRootRGRMode(config.getInteger("rootRGRMode"));
+		} catch (RuntimeException ignored) {
+			// Compatibility fallback: legacy model options files omit the root RGR mode.
+			rootRGRMode = rootRGRMode;
+		}
+	}
+	if (printFlag) {
+		println("[Config] rootRGRMode=" + rootRGRMode + " (1=seasonal, 2=constant)");
+	}
+	try {
+		annualInternodeBiomassMode = normalizeAnnualInternodeBiomassMode(
+				config.getString("annualInternodeBiomassMode"));
+		} catch (RuntimeException e) {
+			annualInternodeBiomassMode = "density";
+		}
+	try {
+			calcNUptake = config.getBoolean("calcNUptake", true);
+		} catch (Exception e) {
+			calcNUptake = true;
+		} 
+	try {
+			nitrogenMode = config.getBoolean("nitrogenMode", true);
+		} catch (Exception e) {
+			nitrogenMode = "fixed";
+		} 
+			
+	
+	
+	calcLightInterception = config.getBoolean("calcLightInterception", true);
+	calcPotential_PT = config.getBoolean("calcPotential_PT", true);
+	calcActual_PT = config.getBoolean("calcActual_PT", true);
+	calcCarbonAllocation = config.getBoolean("calcCarbonAllocation", true);
+	
+	//simple control for inputs
+	inputEnvironmentCondition = config.getBoolean("inputEnvironmentCondition");
+	inputVesselConditions = config.getBoolean("inputVesselConditions", false);
+	inputSoilWaterPotential = config.getBoolean("inputSoilWaterPotential", true);
+	
+	//Choose the stomata response function to water potential
+	stomataWaterResFunction = config.getInteger("stomataWaterResFunction", 1);
+	
+	//dynamic growth, yield estimation, Carbon transport
+	useStaticArc = config.getBoolean("useStaticArc", true);
+	usePhenology = config.getBoolean("usePhenology", false);
+	useYieldEst = config.getBoolean("useYieldEst", false);
+	useCTRAM = config.getBoolean("useCTRAM", false);
+	useStructuralVariation = config.getBoolean("useStructuralVariation", false);
+
+	//does not need to show in DHS console,
+	
+
+	
+	//controlling the light model configuration
+	useDirectRadiation = config.getBoolean("useDirectRadiation", true);
+	useDiffuseRadiation = config.getBoolean("useDiffuseRadiation", true);
+	useTurtleRadiation = config.getBoolean("useTurtleRadiation", false);
+	loadLightInterceptionOptions(config);
+	try {
+		useShadingFactor= config.getBoolean("useShadingFactor", true);
+		} catch (Exception e) {
+			useShadingFactor = true;
+		} 
+	try {
+		// Compatibility fallback: legacy model options files may not provide the PAR sensor toggle.
+		useLightSensors = config.getBoolean("useLightSensors", false);
+	} catch (RuntimeException e) {
+		useLightSensors = false;
+	}
+	try {
+		associatePlantsToTiles = config.getBoolean("associatePlantsToTiles");
+	} catch (KeyNotFoundException e) {
+		// Legacy behavior associates plants with soil tiles unless explicitly disabled.
+		associatePlantsToTiles = true;
+	} catch (RuntimeException e) {
+		recordLightInterceptionConfigurationError(
+			"associatePlantsToTiles must be boolean: " + e.getMessage());
+	}
+	
+	// demonstration/initiation toggles
+	addLeaves = config.getBoolean("addLeaves", false);
+	try {
+		// When true, Leaf.initiate_pb() applies a cached, initialization-only scale factor to
+		// template leaf length/width so mean initialized area aligns with plant-bud-property.meanLeafArea_m2
+		// (loaded into PlantBase.meanLeafAreaTarget_m2). This does not trigger per-step re-fitting.
+		scaleLeafSizeToTargetMeanLeafArea = config.getBoolean("scaleLeafSizeToTargetMeanLeafArea", false);
+	} catch (RuntimeException e) {
+		// Compatibility fallback: legacy model options files may not provide this leaf-size scaling toggle.
+		scaleLeafSizeToTargetMeanLeafArea = false;
+	}
+	addBuds = config.getBoolean("addBuds", false);
+	leafSenescence = config.getBoolean("leafSenescence", false);
+	try {
+		enableCarbonDeficitLeafRemoval = config.getBoolean("enableCarbonDeficitLeafRemoval", false);
+	} catch (RuntimeException e) {
+		// Compatibility fallback: legacy model_functionality blocks may omit this opt-in.
+		enableCarbonDeficitLeafRemoval = false;
+	}
+	try {
+		leafCarbonDeficitWindowDays = config.getDouble("leafCarbonDeficitWindowDays", 10.0);
+	} catch (RuntimeException e) {
+		leafCarbonDeficitWindowDays = 10.0;
+	}
+	try {
+		leafCarbonDeficitBalanceThresholdMgC = config.getDouble("leafCarbonDeficitBalanceThresholdMgC", 0.0);
+	} catch (RuntimeException e) {
+		leafCarbonDeficitBalanceThresholdMgC = 0.0;
+	}
+	try {
+		leafCarbonDeficitMinValidFraction = config.getDouble("leafCarbonDeficitMinValidFraction", 0.95);
+	} catch (RuntimeException e) {
+		leafCarbonDeficitMinValidFraction = 0.95;
+	}
+	try {
+		leafCarbonDeficitMatureAgeFactor = config.getDouble("leafCarbonDeficitMatureAgeFactor", 1.0);
+	} catch (RuntimeException e) {
+		leafCarbonDeficitMatureAgeFactor = 1.0;
+	}
+	try {
+		leafCarbonDeficitRemovalHour = config.getInteger("leafCarbonDeficitRemovalHour", 23);
+	} catch (RuntimeException e) {
+		leafCarbonDeficitRemovalHour = 23;
+	}
+	try {
+		leafCarbonDeficitMinPlantLeafArea = config.getDouble("leafCarbonDeficitMinPlantLeafArea", 0.05);
+	} catch (RuntimeException e) {
+		leafCarbonDeficitMinPlantLeafArea = 0.05;
+	}
+		
+	try {
+		config.setCategoryContext("early_leaf_photosynthesis");
+		enableLAILeafPhotosynthesisFallback = config.getBoolean("enableLAILeafPhotosynthesisFallback", false);
+		leafPhotosynthesisFallbackLAI = config.getDouble("leafPhotosynthesisFallbackLAI", 1.0e-4);
+		leafPhotosynthesisFallbackFpar = config.getDouble("leafPhotosynthesisFallbackFpar", 0.30);
+		continueFallbackUntilLeafLightValid = config.getBoolean("continueFallbackUntilLeafLightValid", true);
+	} catch (RuntimeException e) {
+		// Compatibility fallback: legacy model options files may omit this opt-in block.
+		enableLAILeafPhotosynthesisFallback = false;
+		leafPhotosynthesisFallbackLAI = 1.0e-4;
+		leafPhotosynthesisFallbackFpar = 0.30;
+		continueFallbackUntilLeafLightValid = true;
+	}
+	if (Double.isNaN(leafPhotosynthesisFallbackLAI) || Double.isInfinite(leafPhotosynthesisFallbackLAI) ||
+		leafPhotosynthesisFallbackLAI < 0.0) {
+		leafPhotosynthesisFallbackLAI = 1.0e-4;
+	}
+	if (Double.isNaN(leafPhotosynthesisFallbackFpar) || Double.isInfinite(leafPhotosynthesisFallbackFpar) ||
+		leafPhotosynthesisFallbackFpar < 0.0) {
+		leafPhotosynthesisFallbackFpar = 0.30;
+	}
+	if (leafPhotosynthesisFallbackFpar > 1.0) {
+		leafPhotosynthesisFallbackFpar = 1.0;
+	}
+
+	try {
+		config.setCategoryContext("carbon_balance_controls");
+		enableDailyCarbonStressControls = config.getBoolean("enableDailyCarbonStressControls", true);
+		negativeCarbonWoodySecondaryGrowthScale = config.getDouble("negativeCarbonWoodySecondaryGrowthScale", 0.20);
+	} catch (RuntimeException e) {
+		// Compatibility fallback: legacy model options files may omit this block.
+		enableDailyCarbonStressControls = true;
+		negativeCarbonWoodySecondaryGrowthScale = 0.20;
+	}
+	if (Double.isNaN(negativeCarbonWoodySecondaryGrowthScale) ||
+		Double.isInfinite(negativeCarbonWoodySecondaryGrowthScale) ||
+		negativeCarbonWoodySecondaryGrowthScale < 0.0) {
+		negativeCarbonWoodySecondaryGrowthScale = 0.20;
+	}
+	if (negativeCarbonWoodySecondaryGrowthScale > 1.0) {
+		negativeCarbonWoodySecondaryGrowthScale = 1.0;
+	}
+	config.setCategoryContext("model_functionality");
+	
+	//not well developed 
+	useShootPositioning = config.getBoolean("useShootPositioning", false);	
+	useTrophicCompetition = config.getBoolean("useTrophicCompetition", false);
+	useLeafAngleOpt = config.getBoolean("useLeafAngleOpt", false);
+	usePruning = config.getBoolean("usePruning", false);
+	
+	
+	
+	config.setCategoryContext("location");
+	//simulation_location = 0
+	latitude = config.getDouble("latitude_N");
+	
+	longitude = config.getDouble("longitude_E");
+	elevation = config.getDouble("elevation");
+
+	//simulation_control
+	config.setCategoryContext("planting_system");
+
+	trainingSystem = config.getInteger("trainingSystem");
+	nrStrips = config.getInteger("nrStrips", 1);
+	stripDistance = config.getDouble("stripDistance", 0);
+	nrRows = config.getInteger("nrRows", 1);
+	nrPlants = config.getInteger("nrPlants", 1);
+	borderRows = config.getInteger("borderRows", 0);
+	borderPlants = config.getInteger("borderPlants", 0);
+	INDI_ID_A = config.getInteger("INDI_ID_A", 1);
+	rowDistance = config.getDouble("rowDistance", 1);
+	plantDistance = config.getDouble("plantDistance", 1);
+	rowOrientation = config.getDouble("rowOrientation", 90);
+	cloneX = config.getInteger("cloneX", 1);
+	cloneY = config.getInteger("cloneY", 1);
+
+		
+	
+		//Environment_conditions = 0("//Environment_conditions");
+	config.setCategoryContext("mean_climate");
+			Tmax = config.getDouble("Tmax", 25);
+			Tmin = config.getDouble("Tmin", 10);
+			 
+			RHmax = config.getDouble("RHmax", 0.8);
+			RHmin = config.getDouble("RHmin", 0.5);
+			cca = config.getDouble("cca", 400);
+			wind = config.getDouble("wind", 1);
+			O = config.getDouble("O", 210);
+			useLightTreatment = false;
+			lightTreatmentIntensity = 1.0;
+			groundShaderMode = "AUTO";
+		try {
+				useLightTreatment = config.getBoolean("useLightTreatment", false);
+				lightTreatmentIntensity = config.getDouble("lightTreatmentIntensity", 1.0);
+				lightTreatmentStartDOY = config.getInteger("lightTreatmentStartDOY", 1);
+				lightTreatmentEndDOY = config.getInteger("lightTreatmentEndDOY", 365);
+		} catch (Exception e) {
+			if (printFlag) { println("[Config] WARN: failed to read light treatment settings; using defaults (false, 1.0). " + e.getMessage()); }
+				useLightTreatment = false;
+				lightTreatmentIntensity = 1.0;
+				lightTreatmentStartDOY = 1;
+				lightTreatmentEndDOY = 365;
+			}
+
+				try {
+					groundShaderMode = config.getString("groundShaderMode", "AUTO");
+				} catch (Exception e) {
+					groundShaderMode = "AUTO";
+				}
+				if (groundShaderMode == null) {
+					groundShaderMode = "AUTO";
+				}
+				String groundShaderModeNormalized = groundShaderMode.trim().toUpperCase();
+				if ("AUTO".equals(groundShaderModeNormalized)) {
+					SelectedGroundShader = OrchardFloorShader;
+				} else if ("ORCHARD".equals(groundShaderModeNormalized) || "ORCHARD_FLOOR".equals(groundShaderModeNormalized)
+						|| "DEFAULT".equals(groundShaderModeNormalized)) {
+					SelectedGroundShader = OrchardFloorShader;
+				} else if ("EXTENDAY".equals(groundShaderModeNormalized) || "REFLECTIVE_FILM".equals(groundShaderModeNormalized)
+						|| "FILM".equals(groundShaderModeNormalized) || "REFLECTIVE".equals(groundShaderModeNormalized)) {
+					SelectedGroundShader = ExtendayFilmShader;
+				} else if ("BLACK".equals(groundShaderModeNormalized) || "NO_REFLECTION".equals(groundShaderModeNormalized)
+						|| "DARK".equals(groundShaderModeNormalized)) {
+					SelectedGroundShader = BlackGroundShader;
+				} else {
+					SelectedGroundShader = OrchardFloorShader;
+					if (printFlag && !warnedGroundShaderMode) {
+						println("[WARN] mean_climate.groundShaderMode invalid (" + groundShaderMode + "); using AUTO mode.");
+						warnedGroundShaderMode = true;
+					}
+					groundShaderModeNormalized = "AUTO";
+				}
+				groundShaderMode = groundShaderModeNormalized;
+				lightTreatmentStartDOY = Math.max(1, Math.min(366, lightTreatmentStartDOY));
+				lightTreatmentEndDOY = Math.max(1, Math.min(366, lightTreatmentEndDOY));
+			if (lightTreatmentIntensity < 0) {
+			if (printFlag) { println("[Config] WARN: lightTreatmentIntensity < 0; clamping to 0."); }
+			lightTreatmentIntensity = 0;
+		}
+		if (lightTreatmentIntensity > 2 && printFlag) {
+			println("[Config] INFO: lightTreatmentIntensity > 2 (" + lightTreatmentIntensity + ").");
+		}
+		inputRadiation = config.getBoolean("inputRadiation", false);
+		if(inputSoilWaterPotential == true) {
+			inputWaterPotential = Math.min(-0.0, config.getDouble("inputWaterPotential", -0.05));
+		}
+
+	
+	//sowing,harverst_time,and_plant_phenology = 0("//sowing,harverst_time,and_plant_phenology");
+	config.setCategoryContext("simulation_time");
+
+	START_DAY = config.getInteger("START_DAY", 305);
+	START_YEAR = config.getInteger("START_YEAR", 2021);
+	START_HOUR = config.getInteger("hourOfDay", 0);
+	int harvestDOY = config.getInteger("harvestDOY", 30);
+	
+	harvestDAWS = calcDaysSinceWinterSolstice(START_YEAR, harvestDOY, latitude);
+	lightTreatmentStartDAWS = calcDaysSinceWinterSolstice(START_YEAR, lightTreatmentStartDOY, latitude);
+	lightTreatmentEndDAWS = calcDaysSinceWinterSolstice(START_YEAR, lightTreatmentEndDOY, latitude);
+	println("latitude: " + latitude + " harvestDOY: " + harvestDOY + " harvestDAWS: " + harvestDAWS);
+	if (printFlag) {
+		println("lightTreatmentStartDOY: " + lightTreatmentStartDOY + " lightTreatmentEndDOY: " + lightTreatmentEndDOY +
+			" lightTreatmentStartDAWS: " + lightTreatmentStartDAWS + " lightTreatmentEndDAWS: " + lightTreatmentEndDAWS);
+	}
+	
+	halt = config.getInteger("halt", 1);
+	hourOfDay = config.getInteger("hourOfDay", 0);
+
+	
+	//plant_morphology = 0("//plant_morphology");
+	config.setCategoryContext("morphology");
+
+	CORDEN_NUM = config.getInteger("CORDEN_NUM", 1);
+	SHOOT_NUM = config.getInteger("SHOOT_NUM", 1);
+	MAX_PHYTOMER_NUM = config.getInteger("MAX_PHYTOMER_NUM", 18);
+	if (printFlag) { println(MAX_PHYTOMER_NUM + " MAX_PHYTOMER_NUM "); }
+	
+	STARTING_LEAF_NUMBER = config.getInteger("STARTING_LEAF_NUMBER", 1);
+	ENDING_LEAF_NUMBER = config.getInteger("ENDING_LEAF_NUMBER", 18);
+	ENDING_PHYTOMER_NUM = config.getInteger("ENDING_PHYTOMER_NUM", 18);
+	
+	
+	config.setCategoryContext("environment_climate");
+	climate_file = config.getString("climate_file", "Metdata_NZ_HKB_WhakatuEws.csv");
+	
+	
+	config.setCategoryContext("scenario_required_files");
+	FILE_NAME_OPTIMAL_CANOPY_ARCHITECTURE = "";
+	useOptimalCanopyArchitectureFile = false;
+	optimalCanopyLayoutMode = "layer_row_grid";
+	optimalCanopyDeriveNrRowsFromLayers = true;
+	optimalCanopyLayerCount = 1;
+	optimalCanopyRowsPerLayer = 1;
+	optimalCanopyRowYSpacingMode = "use_rowDistance";
+	optimalCanopyLayerHeightMode = "wood_length_linear";
+	optimalCanopyWoodLengthBase = 0.95;
+	optimalCanopyWoodLengthStep = 0.95;
+	optimalCanopyWoodLengthValues = new double[0];
+	optimalCanopyStripSpacingMode = "derived_block_width";
+	optimalCanopyCloneSpacingMode = "derived_block_width";
+	optimalCanopyDensityCalculationMode = "derived_block_width";
+	optimalCanopyStaggerAlternateRows = false;
+	optimalCanopyAlternateRowXOffsetFraction = 0.5;
+	optimalCanopyLegacyMode = "none";
+	optimalCanopyUseLegacyScenarioPreset = false;
+	optimalCanopyWarnIfNrRowsMismatch = true;
+	optimalCanopyPrintEffectiveConfig = true;
+                                
+	virtualFruitParameter_file = config.getString("virtualFruitParameter_file", "Apple_GrSu_JZ.properties");
+	virtualFruitModelInput_file = config.getString("virtualFruitModelInput_file", "Exp2022_Niemann_Havelock_North_Royal_Gala_fruit.csv");
+	
+	organSize_file = config.getString("organSize_file", "Exp2022_Blenheim_PN_organSize.csv");
+	berryWeight_file = config.getString("berryWeight_file", null);
+	structuralVariationShoot_file = config.getString("structuralVariationShoot_file", null);
+	structuralVariationLeaf_file = config.getString("structuralVariationLeaf_file", null);
+	
+	berryModelInput_file = config.getString("berryModelInput_file", null);
+	shootArchitecture_file = config.getString("shootArchitecture_file", "Exp2022_Zhu_Blenheim_PN_MA07.singleShoot.csv");
+	rootArchitecture_file = config.getString("rootArchitecture_file", null);	
+	rootModelInput_file = config.getString("rootModelInput_file", null);
+	shadingFactor_file  = config.getString("shadingFactor_file", null);
+	try {
+		lightInterceptionModelFile = config.getString("lightInterceptionModelFile", null);
+	} catch (KeyNotFoundException e) {
+		lightInterceptionModelFile = null;
+	} catch (RuntimeException e) {
+		recordLightInterceptionConfigurationError(
+			"lightInterceptionModelFile must be a string or null: " + e.getMessage());
+	}
+	try {
+		lightInterceptionFeatureManifestFile = config.getString("lightInterceptionFeatureManifestFile", null);
+	} catch (RuntimeException e) {
+		lightInterceptionFeatureManifestFile = null;
+	}
+	try {
+		lightInterceptionInputFile = config.getString("lightInterceptionInputFile", null);
+	} catch (RuntimeException e) {
+		lightInterceptionInputFile = null;
+	}
+	
+	
+	FILE_NAME_PHENOLOGY_PARAMETERS = config.getString("phenology_file", null);
+	try {
+		FILE_NAME_OPTIMAL_CANOPY_ARCHITECTURE =
+				config.getString("optimalCanopyArchitectureFile", "");
+		useOptimalCanopyArchitectureFile =
+				FILE_NAME_OPTIMAL_CANOPY_ARCHITECTURE != null &&
+				FILE_NAME_OPTIMAL_CANOPY_ARCHITECTURE.length() > 0;
+	} catch (RuntimeException e) {
+		// Compatibility fallback: legacy scenarios do not provide a stacked-layout file.
+		FILE_NAME_OPTIMAL_CANOPY_ARCHITECTURE = "";
+		useOptimalCanopyArchitectureFile = false;
+	}
+
+	if (!"field".equals(fieldCanopy_sourceMode) && !"plot".equals(fieldCanopy_sourceMode)) {
+		println("[fieldRandomCanopy] Invalid sourceMode=" + fieldCanopy_sourceMode + "; using field.");
+		fieldCanopy_sourceMode = "field";
+	}
+	if (fieldCanopy_patchStep <= 0) fieldCanopy_patchStep = 1;
+	if (fieldCanopy_gridLength <= 0) fieldCanopy_gridLength = 3.0;
+	if (fieldCanopy_gridWidth <= 0) fieldCanopy_gridWidth = 3.0;
+	if (fieldCanopy_layerDepth <= 0) fieldCanopy_layerDepth = 0.1;
+	if (fieldCanopy_meanLeafLength <= 0) fieldCanopy_meanLeafLength = 0.10;
+	if (fieldCanopy_maxLeavesPerLayer <= 0) fieldCanopy_maxLeavesPerLayer = 20000;
+	
+	
+	config.setCategoryContext("output_controls");
+	try {
+		Double[] outputHeightWrapper = config.getDoubleArray("output_height");
+		output_height = new double[outputHeightWrapper.length];
+		for (int i = 0; i < outputHeightWrapper.length; i++) {
+			output_height[i] = outputHeightWrapper[i].doubleValue();
+			println("outputHeight[" + i + "]: " + output_height[i]);
+		}
+	} catch (Exception e) {
+		output_height = new double[]{0.9, 1.4, 2.0, 3.0}; // Length: 4
+	}
+	refreshSensorHeights();
+	
+	try {
+		Integer[] tablesWrapper = config.getIntegerArray("tables"); // Corrected type
+		if (tablesWrapper != null) { // Prevents NullPointerException
+			TABLES = new int[tablesWrapper.length];
+			for (int i = 0; i < tablesWrapper.length; i++) {
+				TABLES[i] = tablesWrapper[i].intValue();
+				println("TABLES[" + i + "]: " + TABLES[i]); // Fixed println to System.out.println
+			}
+		} else {
+			throw new Exception("Config key 'tables' is missing or null.");
+		}
+	} catch (Exception e) {
+		println("Error loading 'tables' config: " + e.getMessage());
+		TABLES = new int[]{1, 2, 3}; // Corrected default type and length
+	}
+
+	
+	
+	
+	//controlling the model output
+	useChart = config.getBoolean("useChart", false);
+	useOutputTable = config.getBoolean("useOutputTable", true);
+	useOrganArrays = config.getBoolean("useOrganArrays", false);
+	
+	outputIndividualFruit = config.getBoolean("outputIndividualFruit", false);
+	outputIndividualLeaf = config.getBoolean("outputIndividualLeaf", false);
+	outputIndividualInternode = config.getBoolean("outputIndividualInternode", false);
+	// compatibility guard: legacy option files may not provide organ-array scheduling controls
+	try {
+		outputOrganArrayEveryNDays = config.getInteger("outputOrganArrayEveryNDays", 1);
+	} catch (io.github.fruitcropxl.config.util.exceptions.KeyNotFoundException e) {
+		outputOrganArrayEveryNDays = 1;
+	} catch (RuntimeException e) {
+		outputOrganArrayEveryNDays = 1;
+	}
+	if (outputOrganArrayEveryNDays <= 0) {
+		outputOrganArrayEveryNDays = 1;
+	}
+	try {
+		outputOrganArrayHour = config.getInteger("outputOrganArrayHour", 12);
+	} catch (io.github.fruitcropxl.config.util.exceptions.KeyNotFoundException e) {
+		outputOrganArrayHour = 12;
+	} catch (RuntimeException e) {
+		outputOrganArrayHour = 12;
+	}
+	if (outputOrganArrayHour < 0) {
+		outputOrganArrayHour = 0;
+	}
+	if (outputOrganArrayHour > 23) {
+		outputOrganArrayHour = 23;
+	}
+	try {
+		outputOrganArrayAtHarvest = config.getBoolean("outputOrganArrayAtHarvest", true);
+	} catch (io.github.fruitcropxl.config.util.exceptions.KeyNotFoundException e) {
+		outputOrganArrayAtHarvest = true;
+	} catch (RuntimeException e) {
+		outputOrganArrayAtHarvest = true;
+	}
+	// The family switch is authoritative; fall back to the legacy alias only when absent.
+	try {
+		outputLeafGrowthDiagnostics = config.getBoolean("outputLeafGrowthDiagnostics");
+		debugLeafExpansion = outputLeafGrowthDiagnostics;
+	} catch (io.github.fruitcropxl.config.util.exceptions.KeyNotFoundException e) {
+		try {
+			debugLeafExpansion = config.getBoolean("debugLeafExpansion");
+			outputLeafGrowthDiagnostics = debugLeafExpansion;
+		} catch (io.github.fruitcropxl.config.util.exceptions.KeyNotFoundException legacyMissing) {
+			debugLeafExpansion = false;
+			outputLeafGrowthDiagnostics = false;
+		} catch (RuntimeException legacyMalformed) {
+			debugLeafExpansion = false;
+			outputLeafGrowthDiagnostics = false;
+		}
+	} catch (RuntimeException e) {
+		debugLeafExpansion = false;
+		outputLeafGrowthDiagnostics = false;
+	}
+	try {
+		debugLeafExpansionSampleEvery = config.getInteger("debugLeafExpansionSampleEvery", 24);
+	} catch (io.github.fruitcropxl.config.util.exceptions.KeyNotFoundException e) {
+		debugLeafExpansionSampleEvery = 24;
+	} catch (RuntimeException e) {
+		debugLeafExpansionSampleEvery = 24;
+	}
+	if (debugLeafExpansionSampleEvery <= 0) {
+		debugLeafExpansionSampleEvery = 1;
+	}
+	try {
+		outputAppleDevelopmentDiagnostics = config.getBoolean("outputAppleDevelopmentDiagnostics");
+	} catch (io.github.fruitcropxl.config.util.exceptions.KeyNotFoundException e) {
+		outputAppleDevelopmentDiagnostics = false;
+	} catch (RuntimeException e) {
+		outputAppleDevelopmentDiagnostics = false;
+	}
+	try {
+		outputCarbonTransportDiagnostics = config.getBoolean("outputCarbonTransportDiagnostics");
+	} catch (io.github.fruitcropxl.config.util.exceptions.KeyNotFoundException e) {
+		outputCarbonTransportDiagnostics = false;
+	} catch (RuntimeException e) {
+		outputCarbonTransportDiagnostics = false;
+	}
+	// Compatibility guard: legacy option files do not provide solver-debug output controls.
+	try {
+		outputWaterFluxSolverDebug = config.getBoolean("outputWaterFluxSolverDebug", false);
+	} catch (io.github.fruitcropxl.config.util.exceptions.KeyNotFoundException e) {
+		outputWaterFluxSolverDebug = false;
+	} catch (RuntimeException e) {
+		outputWaterFluxSolverDebug = false;
+	}
+	
+	output3DSceneFormat = config.getString("output3DSceneFormat", "obj");
+	outputFreq3DScene = config.getInteger("outputFreq3DScene", 0);
+	stepwiseOutput = config.getBoolean("stepwiseOutput", true);
+	
+	fruitVisibility = config.getBoolean("fruitVisibility", true);
+	snapShot = config.getBoolean("snapShot", false);
+	saveGsz = config.getBoolean("saveGsz", false);
+	
+	// ------------------------ twinningPlanner_options ------------------------
+	config.setCategoryContext("twinningPlanner_options");
+	
+	// master switch
+	useTwinningPlanner = config.getBoolean("useTwinningPlanner", useTwinningPlanner);
+	
+	// stage label: "AUTO", "T0", "T1", "T2"
+	if (twinningStage == null) {
+	  twinningStage = "T0";
+	}
+	twinningStage = config.getString("twinningStage", twinningStage);
+	
+	// DOYs per stage
+	twinningDOY_T0 = (int) config.getDouble("twinningDOY_T0",
+						Double.valueOf(twinningDOY_T0).doubleValue());
+	twinningDOY_T1 = (int) config.getDouble("twinningDOY_T1",
+						Double.valueOf(twinningDOY_T1).doubleValue());
+	twinningDOY_T2 = (int) config.getDouble("twinningDOY_T2",
+						Double.valueOf(twinningDOY_T2).doubleValue());
+	
+	// global dry-run
+	dry_run = config.getBoolean("dry_run", dry_run);
+
+	// ------------------------ twinning_controls -----------------------------
+	boolean hasTwinningControls = true;
+	try {
+		config.setCategoryContext("twinning_controls");
+	} catch (RuntimeException e) {
+		// Compatibility fallback: legacy model options may omit this category.
+		hasTwinningControls = false;
+	}
+	if (hasTwinningControls) {
+		try {
+			enablePotentialGrowthBeforeT1 =
+				config.getBoolean("enablePotentialGrowthBeforeT1", enablePotentialGrowthBeforeT1);
+		} catch (RuntimeException e) {
+			// Compatibility fallback: keep the module default.
+		}
+		try {
+			twinningObjects_T1 = config.getString("twinningObjects_T1", twinningObjects_T1);
+		} catch (RuntimeException e) {
+			// Compatibility fallback: keep the module default.
+		}
+		try {
+			twinningObjects_T2 = config.getString("twinningObjects_T2", twinningObjects_T2);
+		} catch (RuntimeException e) {
+			// Compatibility fallback: keep the module default.
+		}
+	}
+	preT1PotentialGrowthActive = enablePotentialGrowthBeforeT1;
+	if (preT1PotentialGrowthActive) {
+		println("[preT1PotentialGrowth] active=true until T1");
+	}
+
+	
+	// ------------------------ twinningGrids ----------------------------------
+	config.setCategoryContext("twinningGrids");
+	try {
+		String boundsModeCandidate = config.getString("boundsMode", twinningGridBoundsMode);
+		twinningGridBoundsMode = normalizeTwinningGridBoundsMode(boundsModeCandidate);
+	} catch (Throwable t) {
+		twinningGridBoundsMode = normalizeTwinningGridBoundsMode(twinningGridBoundsMode);
+	}
+	
+	// Grid resolution (number of cells in x and z)
+	twinningNx = (int) config.getDouble("nx",
+				   Double.valueOf(twinningNx).doubleValue());
+	twinningNz = (int) config.getDouble("nz",
+				   Double.valueOf(twinningNz).doubleValue());
+	println("twinningNx: " + twinningNx);
+	// Grid extents in world coordinates
+	twinningXMin = config.getDouble("xMin",
+					 Double.valueOf(twinningXMin).doubleValue());
+	twinningXMax = config.getDouble("xMax",
+					 Double.valueOf(twinningXMax).doubleValue());
+	twinningZMin = config.getDouble("zMin",
+					 Double.valueOf(twinningZMin).doubleValue());
+	twinningZMax = config.getDouble("zMax",
+					 Double.valueOf(twinningZMax).doubleValue());
+	if (printFlag) {
+		println("twinningGridBoundsMode: " + twinningGridBoundsMode);
+	}
+	
+	// ================================================================
+	// budPlanner
+	// ================================================================
+	config.setCategoryContext("budPlanner");
+	
+	// mode 0..6 or 8 (JSON key is "targetMode")
+	budTargetMode = (int) config.getDouble("targetMode",
+						 Double.valueOf(budTargetMode).doubleValue());
+	println("budTargetMode: " + budTargetMode);
+	
+	// density
+	budNumberPerMeter = (int) config.getDouble("budNumberPerMeter",
+					   Double.valueOf(budNumberPerMeter).doubleValue());
+	
+	// whole-tree bud target (mode 4)
+	budNumberTargetPerTree = (int) config.getDouble("budNumberTargetPerTree",
+							 Double.valueOf(budNumberTargetPerTree).doubleValue());
+	
+	// Only read grid when those modes are active (4/5)
+	if (budTargetMode == 4 || budTargetMode == 5) {
+	
+	  Double[] gridBudTargetsWrapper = null;
+	  try {
+		gridBudTargetsWrapper = safeGetDoubleArray(config, "budNumberTargetsGrid");
+	  } catch (RuntimeException e) {
+		println("[Config] INFO: budNumberTargetsGrid is not an array (" + e
+		  + "), using default grid.");
+	  }
+	
+	  if (gridBudTargetsWrapper != null && gridBudTargetsWrapper.length > 0) {
+		budNumberTargetsGrid = toPrimitiveOrDefault(gridBudTargetsWrapper, budNumberTargetsGrid);
+		if (budNumberTargetsGrid != null) {
+		  println("budNumberTargetsGrid: " + budNumberTargetsGrid.length);
+		} else {
+		  println("[Config] INFO: budNumberTargetsGrid array empty after conversion,"
+			+ " keeping existing default.");
+		}
+	  } else {
+		if (budNumberTargetsGrid != null) {
+		  println("[Config] INFO: budNumberTargetsGrid not supplied; using default grid"
+			+ " (length = " + budNumberTargetsGrid.length + ").");
+		} else {
+		  println("[Config] INFO: budNumberTargetsGrid not supplied; no grid override.");
+		}
+	  }
+	} else {
+	  println("budTargetMode=" + budTargetMode + ", skipping budNumberTargetsGrid.");
+	}
+
+	try {
+	  Double[] uprightBudTargetsWrapper = safeGetDoubleArray(config, "budNumberTargetsUprightRegion");
+	  budNumberTargetsUprightRegion = toPrimitiveOrDefault(uprightBudTargetsWrapper, budNumberTargetsUprightRegion);
+	} catch (RuntimeException e) {
+	  budNumberTargetsUprightRegion = null;
+	  println("[Config] INFO: budNumberTargetsUprightRegion unavailable (" + e + "); using legacy bud upright-region behavior.");
+	}
+	
+		// placement / uprights
+		MgmtMainAxisOnly = (int) config.getDouble("mainAxisOnly",
+						Double.valueOf(MgmtMainAxisOnly).doubleValue());
+		MgmtPlacementOrder = (int) config.getDouble("placementOrder",
+						  Double.valueOf(MgmtPlacementOrder).doubleValue());
+		MgmtUprightOrder = (int) config.getDouble("uprightOrder",
+						Double.valueOf(MgmtUprightOrder).doubleValue());
+		MgmtMaxNewBudsAllow = (int) config.getDouble("maxNewBudsAllow",
+							 Double.valueOf(MgmtMaxNewBudsAllow).doubleValue());
+		boolean spurSpacingProvided = true;
+
+		try {
+			minBudSpacingM = config.getDouble("minBudSpacingM",
+					   Double.valueOf(minBudSpacingM).doubleValue());
+		} catch (Throwable t) {
+			// compatibility: older scenarios may not define budPlanner.minBudSpacingM
+		}
+		try {
+			allowAddOnSecondaryAxes = (int) config.getDouble("allowAddOnSecondaryAxes",
+						 Double.valueOf(allowAddOnSecondaryAxes).doubleValue());
+		} catch (Throwable t) {
+			// compatibility: older scenarios may not define budPlanner.allowAddOnSecondaryAxes
+		}
+		try {
+			enableSpurBalancer = config.getBoolean("enableSpurBalancer", enableSpurBalancer);
+		} catch (Throwable t) {
+			// compatibility: older scenarios may not define budPlanner.enableSpurBalancer
+		}
+		try {
+			spurOrder = (int) config.getDouble("spurOrder",
+					 Double.valueOf(spurOrder).doubleValue());
+		} catch (Throwable t) {
+			// compatibility: older scenarios may not define budPlanner.spurOrder
+		}
+		try {
+			spurChildOrder = (int) config.getDouble("spurChildOrder",
+					 Double.valueOf(spurChildOrder).doubleValue());
+		} catch (Throwable t) {
+			// compatibility: older scenarios may not define budPlanner.spurChildOrder
+		}
+		try {
+			maxBudsPerSpur = (int) config.getDouble("maxBudsPerSpur",
+					 Double.valueOf(maxBudsPerSpur).doubleValue());
+		} catch (Throwable t) {
+			// compatibility: older scenarios may not define budPlanner.maxBudsPerSpur
+		}
+		try {
+			removeFromChildFirst = config.getBoolean("removeFromChildFirst", removeFromChildFirst);
+		} catch (Throwable t) {
+			// compatibility: older scenarios may not define budPlanner.removeFromChildFirst
+		}
+		try {
+			addSpurUnitWhenAdding = config.getBoolean("addSpurUnitWhenAdding", addSpurUnitWhenAdding);
+		} catch (Throwable t) {
+			// compatibility: older scenarios may not define budPlanner.addSpurUnitWhenAdding
+		}
+		try {
+			spurSpacingM = config.getDouble("spurSpacingM",
+					 Double.valueOf(spurSpacingM).doubleValue());
+		} catch (Throwable t) {
+			// compatibility: older scenarios may not define budPlanner.spurSpacingM
+			spurSpacingProvided = false;
+		}
+		if (minBudSpacingM < 0.0) {
+			minBudSpacingM = 0.10;
+		}
+		if (!spurSpacingProvided) {
+			// compatibility: for single-spacing setups, mirror bud spacing.
+			spurSpacingM = minBudSpacingM;
+		}
+		if (spurSpacingM < 0.0) {
+			spurSpacingM = minBudSpacingM;
+		}
+		
+		// T1 apex potential knobs
+		apexPotentialEnable_T1 =
+		   config.getBoolean("apexPotentialEnable_T1", apexPotentialEnable_T1);
+	
+	apexPotentialScale_T1 =
+	   config.getDouble("apexPotentialScale_T1",
+			 Double.valueOf(apexPotentialScale_T1).doubleValue());
+	
+
+	apexPotentialMaxDeviation_T1 =
+	   config.getDouble("apexPotentialMaxDeviation_T1",
+			 Double.valueOf(apexPotentialMaxDeviation_T1).doubleValue());
+
+
+	
+	// ================================================================
+	// leafPlanner
+	// ================================================================
+	config.setCategoryContext("leafPlanner");
+	
+	leafTargetMode = config.getString("targetMode", leafTargetMode);
+	
+	// pre-prune LA remains for BudPlanner etc.
+	expectedLeafArea_prePrune =
+		config.getDouble("expectedLeafArea_prePrune",
+			Double.valueOf(expectedLeafArea_prePrune).doubleValue());
+	
+	// NEW: stage-specific whole-tree twinning targets
+	leafAreaTargetPerTree_T1 =
+		config.getDouble("leafAreaTargetPerTree_T1",
+			Double.valueOf(leafAreaTargetPerTree_T1).doubleValue());
+	leafAreaTargetPerTree_T2 =
+		config.getDouble("leafAreaTargetPerTree_T2",
+			Double.valueOf(leafAreaTargetPerTree_T2).doubleValue());
+	
+	// NEW: use getDoubleArray for leafAreaTargetsGrid (shared by T1/T2 grid mode)
+	
+    Double[] leafAreaWrapper1 = safeGetDoubleArray(config, "leafAreaTargetsGrid_T1");
+	leafAreaTargetsGrid_T1 = toPrimitiveOrDefault(leafAreaWrapper1, leafAreaTargetsGrid_T1);
+	Double[] leafAreaWrapper2 = safeGetDoubleArray(config, "leafAreaTargetsGrid_T2");
+	leafAreaTargetsGrid_T2 = toPrimitiveOrDefault(leafAreaWrapper2, leafAreaTargetsGrid_T1);
+	try {
+	  Double[] leafAreaUprightWrapper1 = safeGetDoubleArray(config, "leafAreaTargetsUprightRegion_T1");
+	  leafAreaTargetsUprightRegion_T1 = toPrimitiveOrDefault(leafAreaUprightWrapper1, leafAreaTargetsUprightRegion_T1);
+	} catch (RuntimeException e) {
+	  leafAreaTargetsUprightRegion_T1 = null;
+	  println("[Config] INFO: leafAreaTargetsUprightRegion_T1 unavailable (" + e + "); using legacy leaf upright-region behavior.");
+	}
+	try {
+	  Double[] leafAreaUprightWrapper2 = safeGetDoubleArray(config, "leafAreaTargetsUprightRegion_T2");
+	  leafAreaTargetsUprightRegion_T2 = toPrimitiveOrDefault(leafAreaUprightWrapper2, leafAreaTargetsUprightRegion_T2);
+	} catch (RuntimeException e) {
+	  leafAreaTargetsUprightRegion_T2 = null;
+	  println("[Config] INFO: leafAreaTargetsUprightRegion_T2 unavailable (" + e + "); using legacy leaf upright-region behavior.");
+	}
+
+	
+	// NEW: pruning fields (independent management)
+	leafPruningMode =
+		(int) config.getDouble("leafPruningMode",
+			Double.valueOf(leafPruningMode).doubleValue());
+	leafPruningDOY =
+		(int) config.getDouble("leafPruningDOY",
+			Double.valueOf(leafPruningDOY).doubleValue());
+	leafPruningFraction =
+		config.getDouble("leafPruningFraction",
+			Double.valueOf(leafPruningFraction).doubleValue());
+	desiredLeafArea_postPrune =
+		config.getDouble("desiredLeafArea_postPrune",
+			Double.valueOf(desiredLeafArea_postPrune).doubleValue());
+
+	
+	// ================================================================
+	// fruitPlanner
+	// ================================================================
+	config.setCategoryContext("fruitPlanner");
+	
+	// mode: "none", "wholeTree", "gridBased", or "uprightRegions"
+	fruitTargetMode = config.getString("targetMode", fruitTargetMode);
+	
+	// T0 bud planner raw target
+	expectedFruitNumber_prePrune =
+		(int) config.getDouble("expectedFruitNumber_prePrune",
+			Double.valueOf(expectedFruitNumber_prePrune).doubleValue());
+	
+	// T1/T2 whole-tree twinning targets
+	fruitTargetPerTree_T1 =
+		(int) config.getDouble("fruitTargetPerTree_T1",
+			Double.valueOf(fruitTargetPerTree_T1).doubleValue());
+	fruitTargetPerTree_T2 =
+		(int) config.getDouble("fruitTargetPerTree_T2",
+			Double.valueOf(fruitTargetPerTree_T2).doubleValue());
+	
+	// T1/T2 grid twinning targets
+	
+	  Double[] fruitGridT1 = safeGetDoubleArray(config, "fruitTargetsGrid_T1");
+	  fruitTargetsGrid_T1 = toPrimitiveOrDefault(fruitGridT1, fruitTargetsGrid_T1);
+
+	  Double[] fruitGridT2 = safeGetDoubleArray(config, "fruitTargetsGrid_T2");
+	  fruitTargetsGrid_T2 = toPrimitiveOrDefault(fruitGridT2, fruitTargetsGrid_T2);
+	try {
+	  Double[] fruitUprightT1 = safeGetDoubleArray(config, "fruitTargetsUprightRegion_T1");
+	  fruitTargetsUprightRegion_T1 = toPrimitiveOrDefault(fruitUprightT1, fruitTargetsUprightRegion_T1);
+	} catch (RuntimeException e) {
+	  fruitTargetsUprightRegion_T1 = null;
+	  println("[Config] INFO: fruitTargetsUprightRegion_T1 unavailable (" + e + "); using legacy fruit upright-region behavior.");
+	}
+	try {
+	  Double[] fruitUprightT2 = safeGetDoubleArray(config, "fruitTargetsUprightRegion_T2");
+	  fruitTargetsUprightRegion_T2 = toPrimitiveOrDefault(fruitUprightT2, fruitTargetsUprightRegion_T2);
+	} catch (RuntimeException e) {
+	  fruitTargetsUprightRegion_T2 = null;
+	  println("[Config] INFO: fruitTargetsUprightRegion_T2 unavailable (" + e + "); using legacy fruit upright-region behavior.");
+	}
+	
+	
+	// Fruit pruning (separate from twinning)
+	fruitPruningDOY =
+		(int) config.getDouble("fruitPruningDOY",
+			Double.valueOf(fruitPruningDOY).doubleValue());
+	fruitPruningMode =
+		(int) config.getDouble("fruitPruningMode",
+			Double.valueOf(fruitPruningMode).doubleValue());
+	fruitSeparationHeight =
+		config.getDouble("fruitSeparationHeight",
+			Double.valueOf(fruitSeparationHeight).doubleValue());
+	desiredFruitNumber_postPrune =
+		(int) config.getDouble("desiredFruitNumber_postPrune",
+			Double.valueOf(desiredFruitNumber_postPrune).doubleValue());
+
+	// Optional fruit adding controls (compatibility-safe for legacy scenarios)
+	try {
+		allowFruitAdding =
+			config.getBoolean("allowFruitAdding", allowFruitAdding);
+	} catch (Exception e) {
+		allowFruitAdding = false;
+	}
+	try {
+		maxFruitAddsPerTree =
+			(int) config.getDouble("maxFruitAddsPerTree",
+				Double.valueOf(maxFruitAddsPerTree).doubleValue());
+	} catch (Exception e) {
+		maxFruitAddsPerTree = 999999;
+	}
+	try {
+		maxFruitPerInternode =
+			(int) config.getDouble("maxFruitPerInternode",
+				Double.valueOf(maxFruitPerInternode).doubleValue());
+	} catch (Exception e) {
+		maxFruitPerInternode = 1;
+	}
+	try {
+		fruitAddMode = config.getString("fruitAddMode", fruitAddMode);
+	} catch (Exception e) {
+		fruitAddMode = "toTarget";
+	}
+	try {
+		fruitAddDebug = config.getBoolean("fruitAddDebug", fruitAddDebug);
+	} catch (Exception e) {
+		fruitAddDebug = false;
+	}
+	try {
+		allowAddOnOccupiedCordon =
+			config.getBoolean("allowAddOnOccupiedCordon", allowAddOnOccupiedCordon);
+	} catch (Exception e) {
+		allowAddOnOccupiedCordon = true;
+	}
+	try {
+		maxFruitPerCordonPosition =
+			(int) config.getDouble("maxFruitPerCordonPosition",
+				Double.valueOf(maxFruitPerCordonPosition).doubleValue());
+	} catch (Exception e) {
+		maxFruitPerCordonPosition = 1;
+	}
+	try {
+		maxFruitPerCordonPositionFallback =
+			(int) config.getDouble("maxFruitPerCordonPositionFallback",
+				Double.valueOf(maxFruitPerCordonPositionFallback).doubleValue());
+	} catch (Exception e) {
+		maxFruitPerCordonPositionFallback = 2;
+	}
+	try {
+		fruitInitFromNearbyTemplate =
+			config.getBoolean("fruitInitFromNearbyTemplate", fruitInitFromNearbyTemplate);
+	} catch (Exception e) {
+		fruitInitFromNearbyTemplate = true;
+	}
+	if (maxFruitAddsPerTree < 0) maxFruitAddsPerTree = 0;
+	if (maxFruitPerInternode < 1) maxFruitPerInternode = 1;
+	if (maxFruitPerCordonPosition < 1) maxFruitPerCordonPosition = 1;
+	if (maxFruitPerCordonPositionFallback < maxFruitPerCordonPosition) {
+		maxFruitPerCordonPositionFallback = maxFruitPerCordonPosition;
+	}
+	// ================================================================
+	// leafRemovalCarbonDeficit
+	// ================================================================
+	boolean hasLeafRemovalCarbonDeficit = true;
+	try {
+		config.setCategoryContext("leafRemovalCarbonDeficit");
+	} catch (RuntimeException e) {
+		// Compatibility fallback: legacy model options may omit this category.
+		hasLeafRemovalCarbonDeficit = false;
+	}
+	if (hasLeafRemovalCarbonDeficit) {
+		try {
+			enableCarbonDeficitLeafRemoval = config.getBoolean("enableCarbonDeficitLeafRemoval", enableCarbonDeficitLeafRemoval);
+		} catch (RuntimeException e) {
+			// Keep the value loaded from model_functionality or the global default.
+		}
+		try {
+			leafCarbonDeficitWindowDays = config.getDouble("leafCarbonDeficitWindowDays", leafCarbonDeficitWindowDays);
+		} catch (RuntimeException e) {
+			// Keep the value loaded from model_functionality or the global default.
+		}
+		try {
+			leafCarbonDeficitBalanceThresholdMgC = config.getDouble("leafCarbonDeficitBalanceThresholdMgC", leafCarbonDeficitBalanceThresholdMgC);
+		} catch (RuntimeException e) {
+			// Keep the value loaded from model_functionality or the global default.
+		}
+		try {
+			leafCarbonDeficitMinValidFraction = config.getDouble("leafCarbonDeficitMinValidFraction", leafCarbonDeficitMinValidFraction);
+		} catch (RuntimeException e) {
+			// Keep the value loaded from model_functionality or the global default.
+		}
+		try {
+			leafCarbonDeficitMatureAgeFactor = config.getDouble("leafCarbonDeficitMatureAgeFactor", leafCarbonDeficitMatureAgeFactor);
+		} catch (RuntimeException e) {
+			// Keep the value loaded from model_functionality or the global default.
+		}
+		try {
+			leafCarbonDeficitRemovalHour = config.getInteger("leafCarbonDeficitRemovalHour", leafCarbonDeficitRemovalHour);
+		} catch (RuntimeException e) {
+			// Keep the value loaded from model_functionality or the global default.
+		}
+		try {
+			leafCarbonDeficitMinPlantLeafArea = config.getDouble("leafCarbonDeficitMinPlantLeafArea", leafCarbonDeficitMinPlantLeafArea);
+		} catch (RuntimeException e) {
+			// Keep the value loaded from model_functionality or the global default.
+		}
+	}
+
+
+	/* desiredLeafArea_postPrune = config.getDouble("desiredLeafArea_postPrune", 0);
+	desiredFruitNumber_postPrune = config.getInteger("desiredFruitNumber_postPrune", 0);
+	 */
+	
+	/** Validation keeps shading-factor simplification but preserves an explicit backend selection. */
+	if (ModelArgs.validationMode != null) {
+		useShadingFactor = true;
+		if (lightInterceptionValidationModeOverride == null
+			&& !lightInterceptionModeExplicit && !lightInterceptionLegacyModeExplicit) {
+			lightInterceptionModeRequested = "cpu";
+			lightInterceptionModeResolved = "cpu";
+		}
+	}
+
+	// Low-core headless execution is a GPU limitation only. Reduced modes must not be rewritten.
+	if (Boolean.parseBoolean(ModelArgs.headless) == true && ModelArgs.nCores <= 2
+		&& "gpu".equals(lightInterceptionModeResolved)) {
+		if (lightInterceptionFallbackMode != null) {
+			println("Warning: GPU light interception is unavailable with nCores <= 2; using explicit fallback '"
+				+ lightInterceptionFallbackMode + "'.");
+			lightInterceptionModeResolved = lightInterceptionFallbackMode;
+		} else {
+			recordLightInterceptionConfigurationError(
+				"GPU light interception requires more than two cores in headless mode; configure lightInterceptionFallbackMode or select another mode");
+		}
+	}
+	
+	// Only override if provided
+	if (ModelArgs.shadingFactor != null) {
+		if (ModelArgs.shadingFactor.equalsIgnoreCase("true")) {
+			globalParameters.useShadingFactor = true;
+		} else if (ModelArgs.shadingFactor.equalsIgnoreCase("false")) {
+			globalParameters.useShadingFactor = false;
+		}
+	}
+
+	// Instance-clone shading is currently reliable only with the GPU light backend.
+	// Warn when model options select the cloneFieldBase() path but keep the CPU light model.
+	if (useShadingFactor == false
+		&& (cloneX > 0 || cloneY > 0)
+		&& ("standard".equals(initiation_method) || "ArchReaderGPU".equals(initiation_method))
+		&& !"gpu".equals(lightInterceptionModeResolved)) {
+		println("Warning: cloneFieldBase shading with initiation_method=" + initiation_method
+			+ " is reliable only with lightInterceptionMode='gpu'."
+			+ " Please use GridClonerNode with backend '" + lightInterceptionModeResolved + "'.");
+	}
+
+	try {
+		String rayCountEnv = System.getenv("FRUITCROPXL_RAYCOUNT");
+		if (rayCountEnv != null && rayCountEnv.trim().length() > 0) {
+			int parsedRayCount = Integer.parseInt(rayCountEnv.trim());
+			if (parsedRayCount > 0) {
+				globalParameters.rayCount = parsedRayCount;
+			}
+		}
+	} catch (RuntimeException e) {
+		// Compatibility-safe fallback: keep the scenario/default rayCount.
+	}
+	println("lightInterceptionModeRequested: " + lightInterceptionModeRequested);
+	println("lightInterceptionModeResolved: " + lightInterceptionModeResolved);
+
+}
+
+private static void calcValuesFromInput() {
+	// some calculations for updating some values
+	totalPlants = nrRows * nrPlants * nrStrips;
+	if("grapevine".equals(species)) {
+	if(bunchNumPerVine > bunchNumPerShoot * SHOOT_NUM ) 
+	{
+		totalFruitNum = bunchNumPerVine * berryNumPerBunch;
+	} else { 
+		totalFruitNum = berryNumPerBunch * bunchNumPerShoot * CORDEN_NUM * SHOOT_NUM;
+	}
+		BIOMASS_FRUIT	 = FRUIT_DRY_WEIGHT * totalFruitNum;//config.getDouble("BIOMASS_FRUIT");
+	//berryNumPerBunch = (int) Math.round(BIOMASS_FRUIT/MEAN_BERRY_WEIGHT/(1+seedFraction));
+	}
+
+	dayOfYear = START_DAY;
+	
+	
+	if (thermalUnit.equals("thermalDay")) {
+		thermaltimeUnit = OPT_TEMP == 0 ? 0.5 : (Tmax + Tmin) / 2 / OPT_TEMP;
+	} else if (thermalUnit.equals("growingDegreeDay")) {
+		thermaltimeUnit = Math.min(1, ((Tmax + Tmin) / 2 - baseT));
+	} else if (thermalUnit.equals("day")) {
+		thermaltimeUnit = 1;
+	}
+	
+	
+	
+	if(special_scenario != null && (special_scenario.equals("berry_population") ||
+	   special_scenario.equals("singleRoot"))) {
+		inputVesselConditions = true;
+		if (printFlag) { println("inputVesselConditions " + inputVesselConditions); }
+	}
+	
+	
+		
+	double woodRef = rootWoodRefMode == 1 ?
+					 calcAbovegroundPerennialStructureBiomass(woodBiomassCalcMethod) :
+					 calcTrunkBiomass(woodBiomassCalcMethod);
+	applyRootBiomassInitializationFromWoodRef(woodRef, null);
+		
+		
+}
+
+/** Compatibility entry point retained for callers while backend construction is centralized. */
+public static void ensureLightModelInitialized() {
+	if (lightInterceptionConfigurationError != null
+		&& lightInterceptionConfigurationError.trim().length() > 0) {
+		throw new IllegalArgumentException("Invalid light-interception configuration: "
+			+ lightInterceptionConfigurationError);
+	}
+	initializeLightInterceptionBackend();
+	println("lightInterceptionModeRequested: " + lightInterceptionModeRequested);
+	println("lightInterceptionModeResolved: " + lightInterceptionModeResolved);
+	println("lightInterceptionModelFile: " + lightInterceptionModelFile);
+	println("lightInterceptionFeatureManifestFile: " + lightInterceptionFeatureManifestFile);
+	println("lightInterceptionInputFile: " + lightInterceptionInputFile);
+	if (isMeteoDirectLeafLightMode()) {
+		println("directLightInputSource: climate_file.totalRadiation*fPAR");
+		println("directLightInputFile: " + climate_file);
+		println("directLightInputUnit: umol/m2/s");
+		println("directLightInputInterpretation: incident leaf PAR");
+	}
+	println("lightInterceptionFallbackMode: " + lightInterceptionFallbackMode);
+	println("lightInterceptionBackendVersion: " + lightInterceptionBackendVersion);
+	println("lightInterceptionAssetChecksum: " + lightInterceptionAssetChecksum);
+	if (hasActiveBeerLambertLightModel()) {
+		println("empiricalLightModel: beerLambertLaiAbove");
+		println("empiricalLightTopRelativePAR: " + getActiveBeerLambertTopRelativePAR());
+		println("empiricalLightExtinctionCoefficient: " + getActiveBeerLambertExtinctionCoefficient());
+		println("empiricalLightUseHeightCoefficient: " + getActiveBeerLambertUseHeightCoefficient());
+		println("empiricalLightHeightCoefficient: " + getActiveBeerLambertHeightCoefficient());
+		println("empiricalLightStrict: " + getActiveBeerLambertStrict());
+	}
+}
+
+
+/* static double[][] berryWeight_sim = new double[13][31];
+static String  berryWeight_simfile;
+ */
+
+/**
+ * Class to hold climate data.
+ * <p>
+ * Sequence of Execution:
+ * </p>
+ * <ol>
+ *   <li>
+ *     <strong>Initialization</strong>: First, the program starts by calling {@code initClimateData()}.
+ *     Within this method, a {@code CsvMapper} object and a {@code CsvSchema} object are created.
+ *   </li>
+ *   <li>
+ *     <strong>Reading CSV</strong>: The {@code CsvMapper} reads the values from the CSV file specified by "PATH_INPUT + climate_file.csv".
+ *     It attempts to map these values to a {@code JsonNode} object according to the provided {@code CsvSchema}.
+ *   </li>
+ *   <li>
+ *     <strong>Deserialization</strong>: When the {@code CsvMapper} encounters the {@code soilWater} field, it knows that this field
+ *     requires special treatment for deserialization. This is specified by the {@code @JsonDeserialize(using = ClimateListDeserializer.class)} annotation.
+ *   </li>
+ *   <li>
+ *     <strong>Custom Deserialization</strong>: The {@code ClimateListDeserializer} class, which extends {@code JsonDeserializer}, is invoked.
+ *     The {@code deserialize} method within this class is responsible for converting the {@code soilWater} field from a string to an {@code ArrayList} of doubles.
+ *   </li>
+ * </ol>
+ *
+ * @see ClimateListDeserializer
+ */
+   class ClimateData implements Serializable {
+   	   /**
+     * The weather station where the data was recorded.
+     */
+    public String station;
+    
+    /**
+     * The year the data was recorded.
+     * Unit: YYYY (e.g., 2022)
+     */
+    public int year;
+    
+    /**
+     * The day of the year the data was recorded.
+     * Unit: Day of year (1-365 or 1-366 for leap years)
+     */
+    public int day;
+    
+    /**
+     * The hour of the day the data was recorded.
+     * Unit: Hour of day (0-23)
+     */
+    public int hour;
+    
+    /**
+     * The temperature at the time of recording.
+     * Unit: Degrees Celsius
+     */
+    public double temp;
+    
+    /**
+     * The relative humidity at the time of recording.
+     * Unit: Percentage (%)
+     */
+    public double rh;
+    
+    /**
+     * The total radiation at the time of recording.
+     * Unit: µmol/m²/s (micro moles per square meter per second)
+     */
+	    public double totalRadiation = Double.NaN;
+    
+    /**
+     * The CO2 concentration at the time of recording.
+     * Unit: ppm (parts per million)
+     */
+    public double CO2;
+    
+    /**
+     * The wind speed at the time of recording.
+     * Unit: m/s (meters per second)
+     */
+    public double wind;
+        
+    /**
+     * The soil water content values.
+     * Deserialization of this field is customized using the ClimateListDeserializer class.
+     * @see ClimateListDeserializer
+     */
+    @JsonDeserialize(using = ClimateListDeserializer.class)
+    public Object soilWater_potential;  //MPa, Object since no generics
+        
+    @JsonDeserialize(using = ClimateListDeserializer.class)
+    public Object soilWater_content;  //Vol_Content Object since no generics
+    
+     /**
+     * The hourly rainfall
+     * Unit: mm
+     * optional
+     */
+    public double rainfall;
+
+    }
+
+/**
+ * Custom deserializer for soil water fields in the ClimateData class.
+ */
+ class ClimateListDeserializer extends JsonDeserializer {
+
+    /**
+     * Converts a string of comma-separated values into an ArrayList of doubles.
+     * @param p The JSON parser.
+     * @param ctxt The deserialization context.
+     * @return An ArrayList of doubles.
+     * @throws IOException If an input or output exception occurred.
+     */
+    @Override
+    public Object deserialize(JsonParser p, DeserializationContext ctxt) throws IOException {
+        String fieldValue = p.getValueAsString();
+        StringTokenizer tokenizer = new StringTokenizer(fieldValue, ",");
+        ArrayList list = new ArrayList();
+        while (tokenizer.hasMoreTokens()) {
+            list.add(Double.valueOf(tokenizer.nextToken().trim()));
+        }
+        return list;  // return as Object
+    }
+    }
+
+global ArrayList climateList;  // Changed to ArrayList due to no generics
+   
+static void initClimateData() {
+	climateList = null;
+	    try {
+    	
+        CsvMapper csvMapper = new CsvMapper();
+        //HANDLE extra columns
+        csvMapper.enable(CsvParser.Feature.IGNORE_TRAILING_UNMAPPABLE);
+        //slight changes in the column name in excel is fine, but sequence needs to be right
+      CsvSchema csvSchema = CsvSchema.builder()
+		.addColumn("station")
+		.addColumn("year")
+      	.addColumn("day")
+		.addColumn("hour")
+		.addColumn("temp")
+		.addColumn("rh")
+		.addColumn("totalRadiation")
+		.addColumn("CO2")
+		.addColumn("wind")
+		.addColumn("soilWater_potential")
+		.addColumn("soilWater_content")
+		.addColumn("rainfall")
+		.setUseHeader(true)
+		.build();
+        
+        File inputFile = new File(PATH_INPUT + climate_file);
+        if (!inputFile.exists()) {
+            if (printFlag) { println("File does not exist: " + inputFile.getAbsolutePath()); }
+            return;
+        }
+
+        climateList = new ArrayList(csvMapper.readerFor(ClimateData.class)
+                .with(csvSchema)
+                .readValues(inputFile)
+                .readAll());
+
+
+        if (climateList == null) {
+            if (printFlag) { println("climateList is still null after reading"); }
+        } else {
+            if (printFlag) { println("Successfully read " + climateList.size() + " records."); }
+        }
+
+	} catch (Exception e) {
+		if (calcLightInterception && isMeteoDirectLeafLightMode()) {
+			throw new IllegalArgumentException("Unable to load climate_file for meteo direct leaf light: "
+				+ climate_file + ". " + e.getMessage(), e);
+		}
+		e.printStackTrace();
+		if (printFlag) { println("Exception while initializing climate data: " + e.getMessage()); }
+	}
+}
+
+    
+public static void readCsvFiles() {
+	PATH = PATH_INPUT;
+	if (printFlag) { println(FILE_NAME_MODEL_OPTIONS); }
+	if (calcLightInterception && isMeteoDirectLeafLightMode()) {
+		resolveMeteoDirectClimateFile();
+	}
+
+	if (!isStringNull(organSize_file)) {
+		organSize = readData(organSize_file);
+	}
+	if (hasOrganSizeInput()) {
+		ensureOrganSizeProfilesLoaded();
+	}
+	
+	if (!isStringNull(climate_file)) {
+		initClimateData();
+	}
+	if (calcLightInterception && isMeteoDirectLeafLightMode()
+		&& (climateList == null || climateList.size() == 0)) {
+		throw new IllegalArgumentException("lightInterceptionMode=directInput in leaf gas-exchange test mode requires "
+			+ "inputEnvironmentCondition=true and a readable climate_file containing totalRadiation in umol m-2 s-1.");
+	}
+	
+	
+	if (useShadingFactor == true) {
+		if (!isStringNull(shadingFactor_file)) {
+			if (printFlag) { println("Shading factor enabled; loading file: " + PATH_INPUT + shadingFactor_file); }
+			SFT = new ShadingFactorTable();
+			SFT.load(PATH_INPUT + shadingFactor_file); // your uploaded file
+		} else {
+			if (printFlag) { println("Shading factor enabled; no shading-factor file configured; using neutral ratios (all 1.0)"); }
+			SFT = null;
+		}
+	} else {
+		if (printFlag) { println("Shading factor disabled; using neutral ratios (all 1.0)"); }
+		SFT = null;
+	}
+	
+		
+	if (useStructuralVariation == true) {
+		if (!isStringNull(structuralVariationShoot_file)) {
+			structuralVariationShoot = readData(structuralVariationShoot_file);
+		}
+		if (!isStringNull(structuralVariationLeaf_file)) {
+			structuralVariationLeaf = readData(structuralVariationLeaf_file);
+		}
+	}
+	                                                     
+	if (!isStringNull(berryModelInput_file)
+		|| (organGrowthMethod.equals("TempLimited")
+			&& main.FRUIT_CREATOR.usesComplexBerryService())) {
+		if (printFlag) { println(" berryModelInput " + berryModelInput_file); }
+		berryModelInput = readData(berryModelInput_file);
+	}
+	if (!isStringNull(rootModelInput_file)) {
+		if(printFlag) { println(" rootModelInput " + rootModelInput_file); }
+		rootModelInput = readData(rootModelInput_file);
+	}
+	
+	
+	if (!isStringNull(berryWeight_file)) {
+		berryWeight = readData(berryWeight_file);
+	}
+	
+	if (!isStringNull(climate_file)) {			
+		//check the start step
+	 	setStartStep();
+		if (printFlag) { println("climate data length " + climateList.size()); }
+		if (printFlag) { println(" startStep " + startStep); }
+		
+		climateList = reduceListSize(climateList, startStep, halt*24 + 1);
+
+		if (printFlag) { println("climate data length " + climateList.size()); }
+		
+	}
+	
+	//if(par_sampling_file.length() > 3) {
+		// parSampling = readData(par_sampling_file);	
+	//}
+	
+	
+	//test the log likelihood
+	//berryWeight_simfile = "Exp2013_Bobeica_Italy_12_leaves_berry_simulation_results.test.likelood.csv";
+	//berryWeight_sim = readData(berryWeight_simfile);
+	//if (printFlag) { println(berryWeight_sim[1][1]); }
+	
+	
+}
+// end property loader ********************************************************/
+
+
+
+// ---- helpers (Java 1.5 compatible) -----------------------------------------
+
+/**
+ * Copy the contents of one file to another using a byte buffer.
+ * Creates parent directories for the destination file if they do not exist.
+ *
+ * @param src   source file
+ * @param dest  destination file
+ * @throws java.io.IOException if file IO fails
+ */
+static void copyFile(File src, File dest) throws java.io.IOException {
+    java.io.FileInputStream input = null;
+    java.io.FileOutputStream out = null;
+    try {
+        if (dest.getParentFile() != null) dest.getParentFile().mkdirs();
+        input = new java.io.FileInputStream(src);
+        out = new java.io.FileOutputStream(dest);
+        byte[] buf = new byte[8192];
+        int len;
+        while ((len = input.read(buf)) > 0) out.write(buf, 0, len);
+    } finally {
+        try { if (input != null) input.close(); } catch (Exception e) {}
+        try { if (out != null) out.close(); } catch (Exception e) {}
+    }
+}
+
+/**
+ * Convert a possibly null path string to a File.
+ *
+ * @param path  path string (may be null)
+ * @return      File for the path, or null if path was null
+ */
+private static File nullSafeFile(String path) {
+    return path == null ? null : new File(path);
+}
+
+/**
+ * Extract the base name (last component) of a file path string.
+ *
+ * @param path  input path (may be null)
+ * @return      name of the file, or null if path was null
+ */
+private static String baseName(String path) {
+    if (path == null) return null;
+    return new File(path).getName();
+}
+
+/**
+ * Copy a file into a target directory if the source exists and is a regular file.
+ * The copied file keeps its original name.
+ *
+ * @param src   source File
+ * @param dir   destination directory
+ */
+private static void copyIfExistsToDir(File src, File dir) {
+    if (src == null) return;
+    try {
+        if (src.exists() && src.isFile()) {
+            copyFile(src, new File(dir, src.getName())); // keep original name
+        }
+    } catch (Exception e) {
+        e.printStackTrace(); // non-fatal
+    }
+}
+
+// ----------------------------------------------------------------------------
+
+/**
+ * Save a reproducible record of the current run configuration:
+ * <ul>
+ *   <li>Copies the main config file into run-config/</li>
+ *   <li>Copies required and optional input files (from PATH_SCENARIOS or PATH_INPUT)</li>
+ *   <li>Writes a minimal snapshot of selected parameters to run-settings.snapshot.properties</li>
+ * </ul>
+ *
+ * @param outputPath      path to the main output directory
+ * @param configFileUsed  path to the configuration file used for this run
+ */
+static void saveRunInputsAndSnapshot(String outputPath, String configFileUsed) {
+    File runCfgDir = new File(outputPath, "run-config");
+    // remove old folder if exists
+    deleteRecursively(runCfgDir);
+    runCfgDir.mkdirs();
+
+    // 1) Copy the main config
+    if (configFileUsed != null) {
+        copyIfExistsToDir(new File(configFileUsed), runCfgDir);
+    }
+
+    // 2) Copy referenced inputs
+    // Required: resolve relative to PATH_SCENARIOS
+    copyResolved(FILE_NAME_INITIAL_CONDITIONS, PATH_SCENARIOS, runCfgDir);
+    copyResolved(FILE_NAME_PLANT_PARAMETERS,   PATH_SCENARIOS, runCfgDir);
+    copyResolved(FILE_NAME_SOIL_PARAMETERS,    PATH_SCENARIOS, runCfgDir);
+    copyResolved(FILE_NAME_OPTIMAL_CANOPY_ARCHITECTURE, PATH_SCENARIOS, runCfgDir);
+    copyResolved(FILE_NAME_PHENOLOGY_PARAMETERS, PATH_INPUT, runCfgDir);
+    
+    // Optional: resolve relative to PATH_INPUT
+    copyResolved(climate_file,                   PATH_INPUT, runCfgDir);
+    copyResolved(virtualFruitParameter_file,     PATH_INPUT, runCfgDir);
+    copyResolved(virtualFruitModelInput_file,    PATH_INPUT, runCfgDir);
+    copyResolved(organSize_file,                 PATH_INPUT, runCfgDir);
+    copyResolved(rosetteProfileFile,             PATH_INPUT, runCfgDir);
+    copyResolved(bourseProfileFile,              PATH_INPUT, runCfgDir);
+    copyResolved(vegShootProfileFile,            PATH_INPUT, runCfgDir);
+    copyResolved(berryWeight_file,               PATH_INPUT, runCfgDir);
+    copyResolved(structuralVariationShoot_file,  PATH_INPUT, runCfgDir);
+    copyResolved(structuralVariationLeaf_file,   PATH_INPUT, runCfgDir);
+    copyResolved(berryModelInput_file,           PATH_INPUT, runCfgDir);
+    copyResolved(shootArchitecture_file,         PATH_INPUT, runCfgDir);
+	    copyResolved(rootArchitecture_file,          PATH_INPUT, runCfgDir);
+	    copyResolved(rootModelInput_file,            PATH_INPUT, runCfgDir);
+	    copyIfExistsToDir(getResolvedLightInterceptionModelAsset(), runCfgDir);
+	    copyResolved(lightInterceptionFeatureManifestFile, PATH_INPUT, runCfgDir);
+	    copyResolved(lightInterceptionInputFile,     PATH_INPUT, runCfgDir);
+    
+
+    // 3) Minimal snapshot (only a few key fields; add more if you want)
+    java.io.PrintWriter pw = null;
+    try {
+        pw = new java.io.PrintWriter(new java.io.File(runCfgDir, "run-settings.snapshot.properties"));
+        pw.println("timestamp=" + new java.text.SimpleDateFormat("yyyy-MM-dd_HH-mm-ss").format(new java.util.Date()));
+        pw.println("config_file_used=" + baseName(configFileUsed));
+        pw.println("species=" + species);
+        pw.println("initiation_method=" + initiation_method);
+        pw.println("special_scenario=" + special_scenario);
+
+        // core toggles that affect physics/outputs
+	        pw.println("fruitModule=" + fruitModule);
+		        pw.println("calcLightInterception=" + calcLightInterception);
+		        pw.println("lightInterceptionModeRequested=" + lightInterceptionModeRequested);
+		        pw.println("lightInterceptionModeResolved=" + lightInterceptionModeResolved);
+			        pw.println("lightInterceptionModelFile=" + (lightInterceptionModelFile == null ? "" : lightInterceptionModelFile));
+			        pw.println("lightInterceptionFeatureManifestFile=" + lightInterceptionFeatureManifestFile);
+			        pw.println("lightInterceptionInputFile=" + (lightInterceptionInputFile == null ? "" : lightInterceptionInputFile));
+			        pw.println("directLightInputSource=" + (isMeteoDirectLeafLightMode() ? "climate_file.totalRadiation*fPAR" : ""));
+			        pw.println("directLightInputFile=" + (isMeteoDirectLeafLightMode() ? climate_file : ""));
+			        pw.println("directLightInputUnit=" + (isMeteoDirectLeafLightMode() ? "umol/m2/s" : ""));
+			        pw.println("directLightInputInterpretation=" + (isMeteoDirectLeafLightMode() ? "incident leaf PAR" : ""));
+		        pw.println("lightInterceptionFallbackMode=" + lightInterceptionFallbackMode);
+			        pw.println("lightInterceptionBackendVersion=" + lightInterceptionBackendVersion);
+			        pw.println("lightInterceptionAssetChecksum=" + lightInterceptionAssetChecksum);
+			        pw.println("empiricalLightModel=" + (hasActiveBeerLambertLightModel() ? "beerLambertLaiAbove" : ""));
+			        pw.println("empiricalLightTopRelativePAR=" + (hasActiveBeerLambertLightModel() ? String.valueOf(getActiveBeerLambertTopRelativePAR()) : ""));
+			        pw.println("empiricalLightExtinctionCoefficient=" + (hasActiveBeerLambertLightModel() ? String.valueOf(getActiveBeerLambertExtinctionCoefficient()) : ""));
+			        pw.println("empiricalLightUseHeightCoefficient=" + (hasActiveBeerLambertLightModel() ? String.valueOf(getActiveBeerLambertUseHeightCoefficient()) : ""));
+			        pw.println("empiricalLightHeightCoefficient=" + (hasActiveBeerLambertLightModel() ? String.valueOf(getActiveBeerLambertHeightCoefficient()) : ""));
+			        pw.println("empiricalLightStrict=" + (hasActiveBeerLambertLightModel() ? String.valueOf(getActiveBeerLambertStrict()) : ""));
+		        pw.println("calcCarbonAllocation=" + calcCarbonAllocation);
+	        pw.println("groundShaderMode=" + groundShaderMode);
+	        pw.println("scaleLeafSizeToTargetMeanLeafArea=" + scaleLeafSizeToTargetMeanLeafArea);
+	        pw.println("outputLeafGrowthDiagnostics=" + outputLeafGrowthDiagnostics);
+	        pw.println("debugLeafExpansion=" + debugLeafExpansion);
+	        pw.println("debugLeafExpansionSampleEvery=" + debugLeafExpansionSampleEvery);
+	        pw.println("outputAppleDevelopmentDiagnostics=" + outputAppleDevelopmentDiagnostics);
+	        pw.println("outputCarbonTransportDiagnostics=" + outputCarbonTransportDiagnostics);
+	        pw.println("outputWaterFluxSolverDebug=" + outputWaterFluxSolverDebug);
+
+        // timing (useful for reproducing a specific run window)
+        pw.println("START_YEAR=" + START_YEAR);
+        pw.println("START_DAY=" + START_DAY);
+        pw.println("harvestDAWS=" + harvestDAWS);
+
+        // file refs (resolved)
+        pw.println("FILE_NAME_INITIAL_CONDITIONS=" + FILE_NAME_INITIAL_CONDITIONS);
+        pw.println("FILE_NAME_PLANT_PARAMETERS=" + FILE_NAME_PLANT_PARAMETERS);
+        pw.println("FILE_NAME_SOIL_PARAMETERS=" + FILE_NAME_SOIL_PARAMETERS);
+        pw.println("climate_file=" + climate_file);
+        // (add any extras you care about below)
+        // pw.println("virtualFruitParameter_file=" + virtualFruitParameter_file);
+        // ...
+    } catch (Exception e) {
+        e.printStackTrace();
+    } finally {
+	    if (pw != null) pw.close();
+	    }
+	}
+
+
+/** Refresh retained configuration provenance after a successful runtime backend fallback. */
+public static void refreshLightInterceptionSnapshotProvenanceIfNeeded() {
+	if (consumeLightInterceptionProvenanceRefreshRequest()) {
+		updateLightInterceptionSnapshotProvenance();
+	}
+}
+
+
+private static void updateLightInterceptionSnapshotProvenance() {
+	File snapshot = new File(new File(PATH_OUTPUT, "run-config"), "run-settings.snapshot.properties");
+	if (!snapshot.isFile()) return;
+	java.io.FileInputStream input = null;
+	java.io.FileOutputStream output = null;
+	try {
+		java.util.Properties properties = new java.util.Properties();
+		input = new java.io.FileInputStream(snapshot);
+		properties.load(input);
+		input.close();
+		input = null;
+		properties.setProperty("lightInterceptionModeRequested", String.valueOf(lightInterceptionModeRequested));
+		properties.setProperty("lightInterceptionModeResolved", String.valueOf(lightInterceptionModeResolved));
+		properties.setProperty("lightInterceptionModelFile", String.valueOf(lightInterceptionModelFile));
+		properties.setProperty("lightInterceptionFeatureManifestFile", String.valueOf(lightInterceptionFeatureManifestFile));
+		properties.setProperty("lightInterceptionInputFile", String.valueOf(lightInterceptionInputFile));
+		properties.setProperty("directLightInputSource", isMeteoDirectLeafLightMode()
+			? "climate_file.totalRadiation*fPAR" : "");
+		properties.setProperty("directLightInputFile", isMeteoDirectLeafLightMode() ? String.valueOf(climate_file) : "");
+		properties.setProperty("directLightInputUnit", isMeteoDirectLeafLightMode() ? "umol/m2/s" : "");
+		properties.setProperty("directLightInputInterpretation", isMeteoDirectLeafLightMode()
+			? "incident leaf PAR" : "");
+		properties.setProperty("lightInterceptionFallbackMode", String.valueOf(lightInterceptionFallbackMode));
+		properties.setProperty("lightInterceptionBackendVersion", String.valueOf(lightInterceptionBackendVersion));
+		properties.setProperty("lightInterceptionAssetChecksum", String.valueOf(lightInterceptionAssetChecksum));
+		properties.setProperty("empiricalLightModel", hasActiveBeerLambertLightModel()
+			? "beerLambertLaiAbove" : "");
+		properties.setProperty("empiricalLightTopRelativePAR", hasActiveBeerLambertLightModel()
+			? String.valueOf(getActiveBeerLambertTopRelativePAR()) : "");
+		properties.setProperty("empiricalLightExtinctionCoefficient", hasActiveBeerLambertLightModel()
+			? String.valueOf(getActiveBeerLambertExtinctionCoefficient()) : "");
+		properties.setProperty("empiricalLightUseHeightCoefficient", hasActiveBeerLambertLightModel()
+			? String.valueOf(getActiveBeerLambertUseHeightCoefficient()) : "");
+		properties.setProperty("empiricalLightHeightCoefficient", hasActiveBeerLambertLightModel()
+			? String.valueOf(getActiveBeerLambertHeightCoefficient()) : "");
+		properties.setProperty("empiricalLightStrict", hasActiveBeerLambertLightModel()
+			? String.valueOf(getActiveBeerLambertStrict()) : "");
+		output = new java.io.FileOutputStream(snapshot);
+		properties.store(output, "FruitCropXL run settings; light-interception provenance refreshed after fallback");
+	} catch (Exception e) {
+		println("[LightInterception] Warning: unable to refresh run-settings snapshot after fallback: " + e.getMessage());
+	} finally {
+		if (input != null) {
+			try { input.close(); } catch (Exception ignored) {}
+		}
+		if (output != null) {
+			try { output.close(); } catch (Exception ignored) {}
+		}
+	}
+}
+
+	/**
+	 * Resolve a file path relative to a given base directory if not absolute,
+ * and copy it into the target directory.
+ *
+ * @param path      path string to resolve
+ * @param baseDir   base directory (used only if path is not absolute)
+ * @param destDir   destination directory
+ */
+private static void copyResolved(String path, String baseDir, File destDir) {
+    if (path == null) return;
+
+    File f = new File(path);
+    if (!f.isAbsolute() && baseDir != null) {
+        f = new File(baseDir, path);
+    }
+
+    copyIfExistsToDir(f, destDir);
+}
+private static double[] toPrimitiveOrDefault(Double[] wrapper, double[] current) {
+    // If nothing came from config, keep the in-memory defaults
+    if (wrapper == null) {
+        return current;
+    }
+
+    int n = wrapper.length;
+    double[] result = new double[n];
+
+    for (int i = 0; i < n; i++) {
+        // if an element is null, fall back to 0.0 (or keep old value if lengths match)
+        if (wrapper[i] != null) {
+            result[i] = wrapper[i].doubleValue();
+        } else if (current != null && i < current.length) {
+            result[i] = current[i];
+        } else {
+            result[i] = 0.0;
+        }
+    }
+    return result;
+}
+
+private static Double[] safeGetDoubleArray(CategoryStore config, String key) {
+
+    // 1) Try reading raw string value first (debug aid)
+    String raw = null;
+    try {
+        raw = config.getString(key, null);
+    } catch (RuntimeException e) {
+        // Compatibility: some scenario files store this key as a real JSON array.
+        raw = null;
+    }
+
+    if (raw != null) {
+        String trimmed = raw.trim();
+
+        // Case: empty / blank / "null" → treat as no array
+        if (trimmed.length() == 0 || trimmed.equalsIgnoreCase("null")) {
+            println("[Config] INFO: Key '" + key + "' is empty or null-string; skipping.");
+            return null;
+        }
+
+        // Case: Looks like CSV (contains commas / semicolons / spaces)
+        if (trimmed.indexOf(',') >= 0 || trimmed.indexOf(';') >= 0 || trimmed.matches(".*\\s+.*")) {
+            println("[Config] DEBUG: Key '" + key + "' looks like CSV → parsing manually: " + trimmed);
+
+            String[] tokens = trimmed.split("[,;\\s]+");
+            Double[] out = new Double[tokens.length];
+
+            for (int i = 0; i < tokens.length; i++) {
+                try {
+                    out[i] = Double.valueOf(tokens[i]);
+                } catch (Throwable t) {
+                    println("[Config] WARN: Failed to parse token '" + tokens[i] + "' for key '" + key + "'");
+                    out[i] = null;
+                }
+            }
+            return out;
+        }
+    }
+
+    // 2) If not CSV → try using the normal array parser
+    try {
+        Double[] fromConfig = config.getDoubleArray(key);
+        return fromConfig;
+    }
+    catch (Throwable ex) {
+        println("[Config] WARN: getDoubleArray('" + key + "') failed: " + ex);
+        println("[Config] Value for '" + key + "' (raw) = " + raw);
+        return null;
+    }
+}

@@ -1,0 +1,3 @@
+file-name-model-options: model.options.DAI.2012.12L.stormTest.json
+light-interception-mode: cpu
+use-shading-factor: true

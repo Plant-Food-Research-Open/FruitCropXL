@@ -1,0 +1,35 @@
+import static extraTools.*;
+
+import static simRunStandard.*;
+import static simRunBerryPopulation.*;
+import static simRunOptimalCanopyArchitecture.*;
+import static simRunIdealVine.*;
+import java.io.Serializable;
+
+public class SimRunServiceFactory implements Serializable {
+	public static SimRunService getService(String special_scenario) {
+		if ("berry_population".equals(special_scenario)) 
+		{
+			return new SimRunBerryPopulation();
+		}
+		else if ("optimal_canopy_architecture".equals(special_scenario)) 
+		{
+			return new SimRunOptimalCanopyArchitecture();
+		} 
+		else if ("ideal_vine".equals(special_scenario)) 
+		{
+			return new SimRunIdealVine();
+		} 
+		else 
+		{
+			return new SimRunStandard();
+		}
+	}
+}
+
+public abstract class SimRunService implements Serializable {
+
+    protected static CommandLineArgs commandLineArgs;
+
+	public abstract void simRun();
+}

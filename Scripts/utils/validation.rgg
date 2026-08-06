@@ -1,0 +1,1232 @@
+// ##############################################//
+// 	Imports
+// ##############################################//
+
+// Utils
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Iterator;
+import java.util.ArrayList;
+import java.util.Set;
+import java.util.HashSet;
+
+
+// File
+import java.io.File;
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
+
+// Language
+import java.lang.Exception;
+import java.lang.RuntimeException;
+import java.lang.NullPointerException;
+import java.lang.IndexOutOfBoundsException;
+
+// JUnit
+import org.junit.internal.TextListener;
+import org.junit.runner.JUnitCore;
+import org.junit.runner.Result;
+import org.junit.runner.Description;
+import org.junit.runner.notification.Failure;
+import org.junit.runner.notification.RunListener;
+
+// Ant 
+import barrypitman.junitXmlFormatter.AntXmlRunListener;
+
+// Jackson
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
+import com.fasterxml.jackson.dataformat.csv.CsvMapper;
+import com.fasterxml.jackson.databind.MappingIterator;
+import com.fasterxml.jackson.dataformat.csv.CsvSchema;
+
+//Math
+import org.apache.commons.math3.stat.descriptive.DescriptiveStatistics;
+import org.apache.commons.math3.stat.regression.RegressionResults;
+import java.lang.Math;
+
+// ##############################################//
+// 	Internal Imports
+// ##############################################//
+
+// Modules
+import static globalParameters.*;
+import static modelOptions.*;
+import static lightInterception.*;
+import static validationTests.*;
+import static main.*;
+import plantBase.PlantBase;
+
+// File
+import static extraTools.*;
+
+
+/**
+ * =====================================================================
+ * FruitCropXL – Validation Framework (JUnit + CSV/YAML)
+ * =====================================================================
+ *
+ * <h2>Overview</h2>
+ * This mini-framework runs validation tests for FruitCropXL scenarios by:
+ * <ol>
+ *   <li>Loading <b>scenario.yaml</b> and <b>params.yaml</b> from a scenario folder.</li>
+ *   <li>Running the model (via {@code ValidationTestBase.init()}) to produce
+ *       <i>synthetic</i> CSV output.</li>
+ *   <li>Reading <i>validation</i> CSV(s) specified in params.yaml.</li>
+ *   <li>Comparing synthetic vs. validation series using:
+ *       <ul>
+ *         <li>Discrepancy tests (percentile mean difference)</li>
+ *         <li>RMSE tests (root mean squared error)</li>
+ *       </ul>
+ *   </li>
+ * </ol>
+ *
+ * <h2>Call Sequence (typical test)</h2>
+ * <pre>
+ *  JUnit @BeforeClass in a test class extending ValidationTestBase:
+ *      validationDir = "dai-2012-12L";
+ *      init();                           // 1) Build ValidationReader + run model
+ *      readSyntheticOutput(...)          //    OR readSyntheticOutputsSameRows(...) for multi-CSV
+ *
+ *  inside init():
+ *      validationReader = new ValidationReader(validationDir)
+ *      scenario = validationReader.getScenario()
+ *      applyScenarioSettings(scenario)
+ *      mainInstance.resetGraph(); mainInstance.init(); derive(); runEnd(...)
+ *      applyScenarioSettings(scenario)   // re-apply if init() overwrote flags
+ *
+ *  inside readSyntheticOutput(s):
+ *      read synthetic CSV(s) -> syntheticDataList
+ *      applyValidationSettings(params)   // wires discrepancyTestMethods / rmseTestMethods
+ *
+ *  JUnit @Test methods:
+ *      discrepancyTestMethods.columnsWithinDiscrepancyThreshold(...)
+ *      rmseTestMethods.hasLessOrEqualRMSE(...), optionally .at(steps)
+ * </pre>
+ *
+ * <h2>Class Hierarchy & Roles</h2>
+ * <pre>
+ *  IValidationReader (interface)
+ *      └─ ValidationReader
+ *           - Reads YAML (params/scenario) and CSV(s)
+ *           - Can merge multiple CSVs column-wise (same row count)
+ *
+ *  ValidationTestBase (abstract)
+ *      - Owns ValidationReader, syntheticDataList, and test helpers (discrepancy/rmse)
+ *      - Provides init(), readSyntheticOutput(s), and YAML -> runtime wiring
+ *
+ *  ValidationTestMethods (abstract)
+ *      ├─ DiscrepancyTestMethods
+ *      │    - Percentile mean-difference tests, with safe column matching
+ *      └─ RMSETestMethods
+ *           - RMSE tests, optional step filtering via .at(int...)
+ *
+ *  ValidationRunner
+ *      - JUnit bootstrap (CLI), scenario selection, XML listener
+ *
+ *  Concrete JUnit classes (extend ValidationTestBase)
+ *      - DefaultValidationUnitTest, StormValidationUnitTest, FOPSSatDryValidationUnitTest,
+ *        Antony2010ValidationUnitTest, DAI2012With12LUnitTest, DAI2012With3LUnitTest
+ * </pre>
+ *
+ * <h2>Data Flow</h2>
+ * <pre>
+ *  params.yaml
+ *    discrepancy:
+ *      dataset: [file1.csv, file2.csv]  # or single string
+ *      threshold: 0.05
+ *    rmse:
+ *      dataset: file.csv                # or [file.csv, ...]
+ *      synthetic-columns:
+ *        - { name: ColumnA, rmse: 10.0 }
+ *
+ *  scenario.yaml
+ *    file-name-model-options: ...
+ *    max-steps: 1000
+ *    use-shading-factor: true
+ *    light-interception-mode: cpu
+ * </pre>
+ *
+ * <h2>Java 1.5 Compatibility</h2>
+ * <ul>
+ *   <li>Raw types are used (e.g., {@code List} instead of {@code List&lt;T&gt;}).</li>
+ *   <li>No diamond/generics syntax; no streams/lambdas.</li>
+ *   <li>Use of {@code Double.valueOf(...)} when needed; avoid boxing constructors.</li>
+ * </ul>
+ *
+ * <h2>Extending</h2>
+ * <ol>
+ *   <li>Add a new JUnit class extending {@code ValidationTestBase}.</li>
+ *   <li>Set {@code validationDir} in {@code @BeforeClass}, call {@code init()},
+ *       then {@code readSyntheticOutput(...)} or {@code readSyntheticOutputsSameRows(...)}.</li>
+ *   <li>Add your assertions using {@code discrepancyTestMethods} and/or {@code rmseTestMethods}.</li>
+ *   <li>Register the new class in {@link ValidationRunner#getTestScenarios()} if using the runner.</li>
+ * </ol>
+ */
+
+
+// ##############################################//
+// 	Properties
+// ##############################################//
+
+
+// File
+protected static final String sep = File.separator;
+
+// ##############################################//
+// 	Main
+// ##############################################//
+
+// ##############################################//
+// 	Validation reader
+// ##############################################//
+
+/**
+ * Interface for the validation file reader.
+ */
+public interface IValidationReader {
+    /**
+     * Return a YAML file.
+     * 
+     * @param yamlFile The YAML file.
+     * 
+     * @return The YAML file contents.
+     */
+    JsonNode readYaml(String yamlFile);
+
+	/**
+	 * Read a CSV file.
+	 * 
+	 * @param csvFile The CSV file.
+	 * 
+	 * @return The CSV file contents.
+	 */
+	List readCsv(String csvFile);
+
+	/**
+	 * Get the validation testing parameters.
+	 * 
+	 * @return Validation testing parameters.
+	 */
+	JsonNode getParams();
+	
+	/**
+	 * Get the validation testing scenario.
+	 * 
+	 * @return Validation testing scenario.
+	 */
+	JsonNode getScenario();
+
+	/**
+	 * Get the validation data.
+	 * 
+	 * @return The validation data.
+	 */
+	List getValidationDataList(JsonNode testParamNode);
+}
+
+/**
+ * Validation file reader class.
+ */
+public class ValidationReader implements IValidationReader {
+	//Paths
+	public static final String VALIDATION_DIR = "tests" + sep + "validation";
+	protected static final String PARAMS_FILE = "params.yaml";
+	protected static final String SCENARIO_FILE = "scenario.yaml";
+	protected String validationDirPath;
+
+	// Jackson Nodes
+	protected ObjectMapper yamlMapper;
+	protected JsonNode params;
+	protected JsonNode scenario;
+
+	// CSV
+	protected CsvMapper csvMapper;
+	protected CsvSchema csvSchema;
+
+	public JsonNode getParams() {
+		return params;
+	}
+
+	public JsonNode getScenario() {
+		return scenario;
+	}
+
+    public JsonNode readYaml(String yamlFile) {
+		String fullPath = validationDirPath + sep + yamlFile;
+        JsonNode yamlNode = yamlMapper.readTree(new File(fullPath));
+        return yamlNode;
+    }
+
+	public List readCsv(String csvFile) {
+		String fullPath = validationDirPath + sep + csvFile;
+
+		List csvList = csvMapper.readerFor(JsonNode.class)
+		.with(csvSchema)
+		.readValues(new File(fullPath))
+		.readAll();
+
+		return csvList;
+	}
+
+	/**
+	 * ValidationReader class initiator.
+	 */
+	protected void init() {
+		validationDirPath = MAINPATH + sep + VALIDATION_DIR;
+		
+		yamlMapper = new ObjectMapper(new YAMLFactory());
+
+		csvMapper = new CsvMapper();
+		csvSchema = CsvSchema
+		.emptySchema()
+		.withHeader();
+	}
+
+	/**
+	 * Class constructor.
+	 */
+	public ValidationReader() {
+		init();
+	}
+
+	/**
+	 * Class constructor with validation directory.
+	 * 
+	 * @param validationDir The validation directory path.
+	 */
+	public ValidationReader(String validationDir) {
+		init();
+
+		validationDirPath = MAINPATH + sep + VALIDATION_DIR + sep + validationDir;
+		
+		params = readYaml(PARAMS_FILE);
+		scenario = readYaml(SCENARIO_FILE);
+	}
+
+public List getValidationDataList(JsonNode testParamNode) {
+    JsonNode dsNode = testParamNode.get("dataset");
+    if (dsNode == null) {
+        throw new RuntimeException("Missing 'dataset' in validation params.");
+    }
+
+    if (dsNode.isArray()) {
+        ArrayNode arr = (ArrayNode) dsNode;
+        int n = arr.size();
+        if (n == 0) {
+            throw new RuntimeException("'dataset' array is empty.");
+        }
+        String[] files = new String[n];
+        for (int i = 0; i < n; i++) {
+            files[i] = arr.get(i).asText();
+        }
+        return readCsvsSameRows(files);
+    } else {
+        // Backwards compatible (single CSV)
+        String validationDataFile = dsNode.asText();
+        return readCsv(validationDataFile);
+    }
+}
+
+	
+	// Merge multiple CSV tables (same row count) into one table.
+// Raw types; no generics (Java 1.5).
+private List readCsvsSameRows(String[] csvFiles) {
+    // Read each CSV through existing readCsv (uses this.validationDirPath)
+    List fileRowsList = new ArrayList(); // List<List>
+    int i, j;
+
+    for (i = 0; i < csvFiles.length; i++) {
+        List rows = readCsv(csvFiles[i]);
+        fileRowsList.add(rows);
+    }
+
+    // Enforce equal row counts
+    int rowCount = -1;
+    for (i = 0; i < fileRowsList.size(); i++) {
+        List rows = (List) fileRowsList.get(i);
+        if (rowCount < 0) rowCount = rows.size();
+        else if (rows.size() != rowCount) {
+            throw new RuntimeException("Validation CSVs have different row counts: expected "
+                + rowCount + " but file index " + i + " has " + rows.size());
+        }
+    }
+
+    // Merge column-wise
+    ObjectMapper _mapper = new ObjectMapper();
+    List mergedRows = new ArrayList();
+    for (i = 0; i < rowCount; i++) {
+        com.fasterxml.jackson.databind.node.ObjectNode merged = _mapper.createObjectNode();
+        java.util.HashSet used = new java.util.HashSet(); // track output keys
+
+        for (j = 0; j < fileRowsList.size(); j++) {
+            List rows = (List) fileRowsList.get(j);
+            JsonNode row = (JsonNode) rows.get(i);
+
+            for (java.util.Iterator it = row.fieldNames(); it.hasNext(); ) {
+                String key = (String) it.next();
+
+                // Avoid duplicating common index columns from later files
+                if (j > 0 && ("step".equals(key) || "timestamp".equals(key))) {
+                    continue;
+                }
+
+                String outKey = key;
+                if (used.contains(outKey)) {
+                    outKey = key + "_" + (j + 1);
+                    while (used.contains(outKey)) outKey = outKey + "_x";
+                }
+                used.add(outKey);
+                merged.set(outKey, row.get(key));
+            }
+        }
+        mergedRows.add(merged);
+    }
+    return mergedRows;
+}
+
+}
+
+/**
+ * Validation testing runner.
+ */
+public class ValidationRunner {		
+
+	/**
+	 * Adding validation testing listener.
+	 * 
+	 * @param xmlOut The test result output file.
+	 */
+    protected static JUnitCore addListeners(String xmlOut) {
+        JUnitCore junit = new JUnitCore();
+        
+        AntXmlRunListener runListener = new AntXmlRunListener();
+        try {
+            runListener.setOutputStream(new FileOutputStream(
+                new File(xmlOut)));
+        } catch (FileNotFoundException e) {
+            e.printStackTrace();
+        }
+        junit.addListener(runListener);
+
+        return junit;
+    }
+
+	/**
+	 * Get testing scenario classes as a hash map.
+	 * 
+	 * @return The testing scenario hash map.
+	 */
+	protected static Map getTestScenarios() {
+		Map scenarioMap = new HashMap();
+
+		// Add validation test classes here
+		scenarioMap.put("default", DefaultValidationUnitTest.class);
+		scenarioMap.put("antony-2010", Antony2010ValidationUnitTest.class);
+		scenarioMap.put("dai-2012-12L", DAI2012With12LUnitTest.class);
+		scenarioMap.put("dai-2012-3L", DAI2012With3LUnitTest.class);
+		scenarioMap.put("stormTest", StormValidationUnitTest.class);
+		scenarioMap.put("FOPS-satDryTest", FOPS_SatDryValidationUnitTest.class);
+
+		return scenarioMap;
+	}
+
+	protected static String getRequestedScenarioName() {
+		CommandLineArgs commandLineArgs = new CommandLineArgs();
+		String testScenario = commandLineArgs.getRawProperty("validationTestScenario");
+		if (testScenario == null || testScenario.length() == 0) {
+			testScenario = "default";
+		}
+		return testScenario;
+	}
+
+	/**
+	 * Resolve the model options file for the requested validation scenario before the
+	 * first headless reset/init cycle. This avoids clearing another scenario's output
+	 * directory when GroIMP performs its initial validation startup pass.
+	 */
+	public static String resolveStartupModelOptions() {
+		String testScenario = getRequestedScenarioName();
+		try {
+			ValidationReader validationReader = new ValidationReader(testScenario);
+			JsonNode scenarioNode = validationReader.getScenario();
+			if (scenarioNode != null) {
+				JsonNode modelOptionsNode = scenarioNode.get("file-name-model-options");
+				if (modelOptionsNode != null) {
+					String resolvedFileName = modelOptionsNode.asText();
+					if (resolvedFileName != null && resolvedFileName.length() > 0) {
+						return resolvedFileName;
+					}
+				}
+			}
+		} catch (RuntimeException e) {
+			// Compatibility fallback: keep the existing global default if validation startup
+			// cannot read scenario.yaml for any reason.
+			println("Note: failed to resolve validation startup model options for scenario '" + testScenario
+				+ "'; using existing FILE_NAME_MODEL_OPTIONS. " + e.getMessage());
+		}
+		return FILE_NAME_MODEL_OPTIONS;
+	}
+		
+	/**
+	 * Run validation tests.
+	 * 
+	 * @param xmlOut The test result output file.
+	 */
+	public static void runTests (String xmlOut) {
+		JUnitCore junit = addListeners(xmlOut);
+		String testScenario = getRequestedScenarioName();
+
+		Map scenarioMap = getTestScenarios();
+		Class testScenarioClass = (Class) scenarioMap.get(testScenario);
+	
+		Result result = junit.run(testScenarioClass);
+		resultReport(result);
+	}
+	
+	/**
+	 * Report test results to stdout.
+	 * 
+	 * @param result The test results.
+	 */
+	protected static void resultReport(Result result) {
+        if (result.getFailureCount() > 0) {
+            println("\nFailures: ");
+            for (Failure failure : result.getFailures()) {
+                println(" - " + failure);
+                println("");
+                println("   " + failure.getTrace());
+                
+                // Add additional output for failure here if needed
+                
+                println("");
+            }
+        }
+
+		println(
+            "Finished. Result: Failures: " + result.getFailureCount() + 
+            ". Ignored: " + result.getIgnoreCount() + 
+            ". Tests run: " + result.getRunCount() +
+            ". Time: " + result.getRunTime() + "ms."
+        );
+	}
+}
+
+// ##############################################//
+//	Test Classes
+// ##############################################//
+
+/**
+ * Abstract base class for validation testing.
+ */
+public abstract class ValidationTestBase {
+	// Files
+	protected static IValidationReader validationReader;
+	protected static String validationDir;
+
+	protected static List syntheticDataList;
+
+	protected static DiscrepancyTestMethods discrepancyTestMethods;
+	protected static RMSETestMethods rmseTestMethods;
+
+	// CSV
+	protected static CsvMapper csvMapper;
+	protected static CsvSchema csvSchema;
+
+	// Scenario Node
+	/**
+	 * Number of simulation run steps (specified as "max_steps" in yaml). Only valid for steps > 0
+	 */
+	protected static Integer maxSteps;
+
+	/**
+	 * ValidationTestBase class initiator.
+	 */
+	protected static void init() {
+		validationReader = new ValidationReader(validationDir);
+		syntheticDataList = new ArrayList();
+	
+		applyScenarioSettings(validationReader.getScenario());
+
+		// Init model from main
+
+		mainInstance.resetGraph();	
+		mainInstance.init();
+		println("lightInterceptionModeResolved 1: " + lightInterceptionModeResolved);
+		//init may overwritten some of the scenario parameters, thus need to reread the scenario settings again
+		applyScenarioSettings(validationReader.getScenario());
+		println("lightInterceptionModeResolved 2: " + lightInterceptionModeResolved);
+		
+		derive();
+
+		if (maxSteps != null && maxSteps > 0) {
+			println("RUN END " + maxSteps);
+			mainInstance.runEnd(maxSteps);
+		} else {
+			// runEnd to halt by default
+			mainInstance.runEnd();
+		}
+	java.util.Locale.setDefault(java.util.Locale.US);
+
+	}
+	
+
+    /**
+     * Read synthetic data from the model output.
+	 * Call this after init() if the given file path depends on initialised variables.
+     * 
+     * @param syntheticDataFilePath
+     */
+    protected static void readSyntheticOutput(String syntheticDataFilePath) {
+        // Create default schema with header to map headers in the synthetic data CSV file to JSON fields
+		CsvSchema csvSchema = CsvSchema
+			.emptySchema()
+			.withHeader();
+
+		// Get model output as synthetic data
+		syntheticDataList = (new CsvMapper()).readerFor(JsonNode.class)
+			.with(csvSchema)
+			.readValues(new File(syntheticDataFilePath))
+			.readAll();
+
+		applyValidationSettings(validationReader.getParams());
+    }
+    
+    
+    
+    // Merge multiple synthetic CSVs which have the same row count (index-aligned).
+// Raw types only (Java 1.5 compatible).
+protected static void readSyntheticOutputsSameRows(String[] syntheticDataFilePaths) {
+    CsvSchema _csvSchema = CsvSchema.emptySchema().withHeader();
+    CsvMapper _csvMapper = new CsvMapper();
+    ObjectMapper _mapper = new ObjectMapper();
+
+    // Read all files to memory
+    List fileRowsList = new ArrayList(); // List<List>
+    int i, j;
+    for (i = 0; i < syntheticDataFilePaths.length; i++) {
+        String p = syntheticDataFilePaths[i];
+        try {
+            List rows = _csvMapper.readerFor(JsonNode.class)
+                    .with(_csvSchema)
+                    .readValues(new File(p))
+                    .readAll();
+            fileRowsList.add(rows);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to read synthetic CSV: " + p + " -> " + e.getMessage());
+        }
+    }
+
+    // Enforce equal row counts
+    int rowCount = -1;
+    for (i = 0; i < fileRowsList.size(); i++) {
+        List rows = (List) fileRowsList.get(i);
+        if (rowCount < 0) rowCount = rows.size();
+        else if (rows.size() != rowCount) {
+            throw new RuntimeException("Synthetic tables have different row counts: expected "
+                + rowCount + " but file index " + i + " has " + rows.size());
+        }
+    }
+
+    // Merge rows column-wise; suffix duplicate column names per file index (_2, _3, …)
+    syntheticDataList = new ArrayList();
+    for (i = 0; i < rowCount; i++) {
+        com.fasterxml.jackson.databind.node.ObjectNode merged = _mapper.createObjectNode();
+        java.util.HashSet used = new java.util.HashSet(); // seen output keys
+
+        for (j = 0; j < fileRowsList.size(); j++) {
+            List rows = (List) fileRowsList.get(j);
+            JsonNode row = (JsonNode) rows.get(i);
+
+            for (java.util.Iterator it = row.fieldNames(); it.hasNext(); ) {
+                String key = (String) it.next();
+
+                String outKey = key;
+                if (used.contains(outKey)) {
+                    outKey = key + "_" + (j + 1);
+                    while (used.contains(outKey)) outKey = outKey + "_x";
+                }
+                used.add(outKey);
+                merged.set(outKey, row.get(key));
+            }
+        }
+        syntheticDataList.add(merged);
+    }
+
+    // Wire up test helpers again for the new syntheticDataList
+    applyValidationSettings(validationReader.getParams());
+}
+
+    
+    
+    
+
+	/**
+	 * Read and apply scenario settings in scenario.yaml
+	 */
+	private static void applyScenarioSettings(JsonNode scenarioNode) {
+		FILE_NAME_MODEL_OPTIONS = scenarioNode
+		.get("file-name-model-options").asText();
+
+		try {
+			if (ModelArgs.runEndSteps == null) {
+				JsonNode maxStepsNode = scenarioNode.get("max-steps");
+				if (maxStepsNode != null) {
+					maxSteps = maxStepsNode.asInt();
+				} else {
+					// Compatibility fallback: older validation scenarios may omit max-steps.
+					maxSteps = null;
+					println("Note: max-steps not set, using default runEnd behavior.");
+				}
+			} else {
+				maxSteps = Integer.parseInt(ModelArgs.runEndSteps);
+			}
+		} catch (NullPointerException e) {
+			// maxSteps incorrectly defined in yaml; keep maxSteps as null and do not run with max steps.
+			println("Note: max-steps missing/invalid, using default runEnd behavior.");
+		}
+
+		try {
+			useShadingFactor = scenarioNode.get("use-shading-factor").asBoolean();
+		} catch (NullPointerException e) {
+			// Use default value if not
+			println("Note: reduced-clone-nodes not set, using default value: " + useShadingFactor);
+		}
+
+		JsonNode canonicalLightMode = scenarioNode.get("light-interception-mode");
+		JsonNode legacyLightMode = scenarioNode.get("use-flux-light-model");
+		if (canonicalLightMode != null) {
+			lightInterceptionValidationModeOverride = normalizeLightInterceptionMode(canonicalLightMode.asText());
+			lightInterceptionModeRequested = lightInterceptionValidationModeOverride;
+			lightInterceptionModeResolved = lightInterceptionValidationModeOverride;
+			if (legacyLightMode != null) {
+				String legacyMapped = legacyLightMode.asBoolean() ? "gpu" : "cpu";
+				if (!legacyMapped.equals(lightInterceptionValidationModeOverride)) {
+					println("Warning: validation light-interception-mode overrides conflicting deprecated use-flux-light-model.");
+				}
+			}
+		} else if (legacyLightMode != null) {
+			lightInterceptionValidationModeOverride = legacyLightMode.asBoolean() ? "gpu" : "cpu";
+			lightInterceptionModeRequested = lightInterceptionValidationModeOverride;
+			lightInterceptionModeResolved = lightInterceptionValidationModeOverride;
+			println("Warning: validation key use-flux-light-model is deprecated; use light-interception-mode: "
+				+ lightInterceptionValidationModeOverride + ".");
+		} else {
+			lightInterceptionValidationModeOverride = null;
+			println("Note: light-interception-mode not set; model options select the backend.");
+		}
+	}
+
+	private static void applyValidationSettings(JsonNode paramsNode) {
+		try {
+			JsonNode discrepancyNode = paramsNode.get("discrepancy");
+			discrepancyTestMethods = new DiscrepancyTestMethods(
+				validationReader.getValidationDataList(discrepancyNode),
+				syntheticDataList,
+				discrepancyNode.get("threshold").asDouble()
+			); 
+		} catch (NullPointerException e) {
+			// No discrepancy params provided
+			println("Note: No discrepancy parameters were provided");
+		}
+
+		try {
+			JsonNode rmseNode = paramsNode.get("rmse");
+			rmseTestMethods = new RMSETestMethods(
+				validationReader.getValidationDataList(rmseNode),
+				syntheticDataList,
+				readSyntheticRMSE(rmseNode.get("synthetic-columns"))
+			);
+		} catch (NullPointerException e) {
+			// No RMSE params provided
+			println("Note: No RMSE parameters were provided");
+		}
+	}
+
+	private static Map readSyntheticRMSE(JsonNode columnsNode) {
+		Map rmseValues = new HashMap();
+
+		if (!columnsNode.isArray()) {
+			throw new Exception("synthetic-columns JsonNode is not an ArrayNode");
+		}
+
+		for (JsonNode columnNode : columnsNode) {
+			rmseValues.put(columnNode.get("name").asText(), columnNode.get("rmse").asDouble());
+		}
+		return rmseValues;
+	}
+}
+
+
+public abstract class ValidationTestMethods {
+	protected List validationDataList;
+	protected List syntheticDataList;
+
+	public ValidationTestMethods(List validationDataList, List syntheticDataList) {
+		this.validationDataList = validationDataList;
+		this.syntheticDataList = syntheticDataList;
+	}
+
+	/**
+	 * Extract a list of values from a table column.
+	 * 
+	 * @param column The name of the trable column.
+	 * @param rowList The list of table rows.
+	 * 
+	 * @return The list of values from a table column.
+	 */
+	protected List getColumnValues(String column, List rowList) {
+		List columnValues = new ArrayList();
+
+		for(JsonNode row : rowList) {
+			double value = row.get(column).asDouble();
+			columnValues.add(value);
+		}
+
+		return columnValues;
+	}
+
+
+	/**
+	 * Get all column names in the given list of table rows.
+	 */
+	protected List getColumnNames(List rowList) {
+        JsonNode firstRow = (JsonNode) rowList.get(0);
+
+        List columnNames = new ArrayList();
+
+        Iterator fieldIterator = firstRow.fieldNames();
+        while (fieldIterator.hasNext()) {
+            columnNames.add(fieldIterator.next());
+        }
+        return columnNames;
+	}
+
+	protected List getRowsByIndex(List rowList, int[] indexes) {
+        List result = new ArrayList();
+
+		for (int index : indexes) {
+			try {
+				result.add(rowList.get(index));
+			} catch (IndexOutOfBoundsException e) {
+				println("IndexOutOfBoundsException when getting index: " + index + " from row list, skipping...");
+				// continue to next index
+			}
+		}
+
+        return result;
+    }
+
+	protected List getRowsAtSteps(List rowList, String stepColumnName, int[] steps) {
+		Set stepsSet = new HashSet();
+        for (int step : steps) {
+            stepsSet.add(step);
+        }
+
+        List result = new ArrayList();
+
+		List validationSteps = getColumnValues(stepColumnName, validationDataList);
+
+		for (int i = 0; i < validationSteps.size(); i++) {
+			Double validationStep = (Double) validationSteps.get(i);
+			int step = (int) validationStep; // Note: steps are expected to be integers despite getColumnValues returning as double
+
+			if (stepsSet.contains(step)) {
+				// Add the value of the row with the same list index as the given step
+				result.add(rowList.get(i));
+			}
+		}
+		return result;
+	}
+
+	public void printColumnValues(String testType, String syntheticColumn, List syntheticValues, String validationColumn, List validationValues) {
+		if (isCIEnvironment()) return;
+		println("\n============== " + testType + " ==============");
+		println("Synthetic values: " + syntheticColumn);
+		int previewLimit = 10;
+		println("  " + syntheticValues.subList(0, Math.min(previewLimit, syntheticValues.size())));
+
+		println();
+		println("Validation values: " + validationColumn);
+		println("  " + validationValues.subList(0, Math.min(10, validationValues.size())));
+	}
+}
+
+public class DiscrepancyTestMethods extends ValidationTestMethods {
+	public double threshold; // TODO: check if threshold should be constant when testing different columns
+
+
+	public DiscrepancyTestMethods(List validationDataList, List syntheticDataList, double threshold) {
+		super(validationDataList, syntheticDataList);
+
+		// TODO: Add data validation (nullish) checks before assignments
+		this.threshold = threshold;
+	}
+
+	public static class MethodParams {
+		public String syntheticColumn; 
+		public String validationColumn; 
+		public Integer columns;
+	}
+
+
+	
+	public List columnsWithinDiscrepancyThreshold(int[] indexes) {
+		return columnsWithinDiscrepancyThreshold(indexes, false);
+	}
+
+	/**
+	 * Test if the columns of the given indexes are within the discrepancy threshold.
+	 */
+	public List columnsWithinDiscrepancyThreshold(int[] indexes, boolean isExcluded) {
+		List columnNames = getColumnNames(syntheticDataList);
+		
+		// Select column names using indexes
+		List selectedColumnNames = new ArrayList();
+
+		if (isExcluded) {
+			selectedColumnNames = columnNames;
+
+			for (int index : indexes) {
+				selectedColumnNames.remove(index);
+			}
+		} else {
+			for (int index : indexes) {
+				selectedColumnNames.add(columnNames.get(index));
+			}
+		}
+
+		return columnsWithinDiscrepancyThreshold(
+			(String[]) selectedColumnNames.toArray(new String[0])
+		);
+	}
+
+    
+	public List columnsWithinDiscrepancyThreshold(String[] columnNames) {
+		return columnsWithinDiscrepancyThreshold(columnNames, false);
+    }
+    
+    	// Local helpers so this class compiles even if base class wasn't updated
+	private boolean hasColumn(List rowList, String column) {
+		if (rowList == null || rowList.isEmpty()) return false;
+		JsonNode firstRow = (JsonNode) rowList.get(0);
+		return firstRow != null && firstRow.get(column) != null && !firstRow.get(column).isNull();
+	}
+	
+	// Remove merge suffix like "_2", "_3", or repeated "_x"
+	private String tryUnsuffix(String name) {
+		int idx = name.lastIndexOf('_');
+		if (idx <= 0) return name;
+	
+		String tail = name.substring(idx + 1);
+	
+		// digits?
+		boolean allDigits = true;
+		for (int i = 0; i < tail.length(); i++) {
+			char c = tail.charAt(i);
+			if (c < '0' || c > '9') { allDigits = false; break; }
+		}
+	
+		// x/x/x ?
+		boolean allXs = true;
+		for (int i = 0; i < tail.length(); i++) {
+			char c = tail.charAt(i);
+			if (c != 'x' && c != 'X') { allXs = false; break; }
+		}
+	
+		if (allDigits || allXs) return name.substring(0, idx);
+		return name;
+	}
+
+	/** Canopy-zone metrics have semantic numeric suffixes, not merge suffixes. */
+	private boolean isCanopyZonePhysiologyColumn(String name) {
+		return name != null && (
+			name.startsWith("meanAnet_") ||
+			name.startsWith("meanLeafWaterPotential_") ||
+			name.startsWith("meanGs_")
+		);
+	}
+
+
+	/**
+	 * Test if the given columns are within the discrepancy threshold
+	 */
+	public List columnsWithinDiscrepancyThreshold(String[] columnNames, boolean isExcluded) {
+		
+		// Select column names using indexes
+		List selectedColumnNames = new ArrayList();
+
+		if (isExcluded) {
+			selectedColumnNames = getColumnNames(syntheticDataList);
+
+			for (String columnName : columnNames) {
+				selectedColumnNames.remove(columnName);
+			}
+		} else {
+            selectedColumnNames = Arrays.asList(columnNames);
+        }
+		
+		/**
+		 * Map<String, boolean> containing discrepancy test results for each column
+		 */
+List failedColumns = new ArrayList();
+
+// Build validation column set once
+List vColsList = getColumnNames(validationDataList);
+java.util.HashSet vCols = new java.util.HashSet();
+for (int i = 0; i < vColsList.size(); i++) vCols.add(vColsList.get(i));
+
+// Build candidate list from synthetic columns (apply exclusion if requested)
+List candidates;
+if (isExcluded) {
+    candidates = new ArrayList(getColumnNames(syntheticDataList)); // copy
+    for (int i = 0; i < columnNames.length; i++) {
+        candidates.remove(columnNames[i]);
+    }
+} else {
+    candidates = Arrays.asList(columnNames);
+}
+
+int compared = 0, skipped = 0;
+
+for (int i = 0; i < candidates.size(); i++) {
+    String sCol = (String) candidates.get(i);
+
+    // Must exist synthetically
+    if (!hasColumn(syntheticDataList, sCol)) {
+        skipped++;
+        if (!isCIEnvironment()) println("Discrepancy: skip '" + sCol + "' (missing in synthetic).");
+        continue;
+    }
+
+	    // Find matching validation column: exact -> base name fallback
+	    String vCol = sCol;
+	    if (!vCols.contains(vCol) || !hasColumn(validationDataList, vCol)) {
+	        if (isCanopyZonePhysiologyColumn(sCol)) {
+	            skipped++;
+	            if (!isCIEnvironment()) println("Discrepancy: skip '" + sCol
+	                + "' (no exact validation match for canopy-zone metric).");
+	            continue;
+	        }
+	        String base = tryUnsuffix(sCol);
+        if (!base.equals(sCol) && vCols.contains(base) && hasColumn(validationDataList, base)) {
+            vCol = base;
+        } else {
+            skipped++;
+            if (!isCIEnvironment()) println("Discrepancy: skip '" + sCol + "' (no validation match).");
+            continue;
+        }
+    }
+
+    boolean ok = withinDiscrepancyThreshold(sCol, vCol);
+    compared++;
+    if (!ok) failedColumns.add(sCol + " (vs " + vCol + ")");
+}
+
+if (compared == 0) {
+    throw new RuntimeException("Discrepancy: no overlapping columns to compare (skipped=" + skipped + ").");
+}
+
+return failedColumns;
+
+	}
+
+	public boolean withinDiscrepancyThreshold(String columnName) {
+		return withinDiscrepancyThreshold(columnName, columnName);
+	}
+
+	/**
+	 * Whether the given column has a percentile mean difference discrepancy less than the given threshold.
+	 * 
+	 * @param columns Number of columns to compare discrepancies
+	 */
+	public boolean withinDiscrepancyThreshold(String syntheticColumn, String validationColumn) {
+		// Test only within the number of rows available to avoid IndexOutOfBounds exceptions
+		int minListSize = Math.min(syntheticDataList.size(), validationDataList.size());
+
+		List syntheticValues = getColumnValues(
+			syntheticColumn,
+			syntheticDataList
+		).subList(0, minListSize);
+	
+		List validationValues = getColumnValues(
+			validationColumn,
+			validationDataList
+		).subList(0, minListSize);
+	
+		IStatistic statistic = new PercentileMeanDifferenceStatistic();
+		double discrepancy = statistic.calculateStatistic(
+			validationValues, syntheticValues
+		);
+
+		printColumnValues("Discrepancy", syntheticColumn, syntheticValues, validationColumn, validationValues);
+		println("- Discrepancy: " + discrepancy + " (<= " + this.threshold + ")?");
+	
+		return discrepancy <= this.threshold;
+	}
+}
+
+public class RMSETestMethods extends ValidationTestMethods {
+	private Map rmseValues;
+
+	private int[] stepsToCompare;
+
+	public RMSETestMethods(List validationDataList, List syntheticDataList, Map rmseValues) {
+		super(validationDataList, syntheticDataList);
+
+		this.rmseValues = rmseValues;
+	}
+
+	public static class MethodParams {
+		public String syntheticColumn; 
+		public String validationColumn;
+		public Integer columns;
+	}
+
+	public RMSETestMethods at(int... stepsToCompare) {
+		this.stepsToCompare = stepsToCompare;
+		return this;
+	}
+
+	private void resetComparisonSteps() {
+		this.stepsToCompare = null;
+	}
+
+	public boolean hasLessOrEqualRMSE(String columnName) {
+		return hasLessOrEqualRMSE(columnName, columnName);
+	}
+
+	public boolean hasLessOrEqualRMSE(String syntheticColumn, String validationColumn) {
+		List syntheticValues =  getColumnValues(
+			syntheticColumn,
+			syntheticDataList
+		);
+		List validationValues = getColumnValues(
+			validationColumn,
+			validationDataList
+		);
+
+		if (this.stepsToCompare != null && this.stepsToCompare.length > 0) {
+			// Get only the values that are in the rows at the given steps
+			syntheticValues = getRowsByIndex(syntheticValues, this.stepsToCompare);
+			validationValues = getRowsAtSteps(validationValues, "step", this.stepsToCompare);
+		}
+
+		// Truncate to ensure both lists are of equal size, as some given steps may be out of range.
+		int minListSize = Math.min(syntheticValues.size(), validationValues.size());
+
+		syntheticValues = syntheticValues.subList(0, minListSize);
+		validationValues = validationValues.subList(0, minListSize);
+		
+		// Calculate RMSE
+		IStatistic statistic = new RootMeanSquaredErrorStatistic();
+		double RMSE = statistic.calculateStatistic(
+			validationValues, syntheticValues
+		);
+
+		double currentRMSE;
+
+		try {
+			currentRMSE = (Double) this.rmseValues.get(syntheticColumn);
+		} catch (NullPointerException e) {
+			throw new RuntimeException("Could not find configured RMSE value for synthetic column: " + syntheticColumn);
+		}
+
+		printColumnValues("RMSE", syntheticColumn, syntheticValues, validationColumn, validationValues);
+		println("- RMSE: " + RMSE + " (" + currentRMSE + ")");
+
+		resetComparisonSteps();
+
+		return RMSE <= currentRMSE;
+	}
+}
+
+
+
+
+
+
+// ##############################################//
+//	Statistics Classes
+// ##############################################//
+
+/**
+ * Interface for validation testing statistics.
+ */
+public interface IStatistic {
+
+	/**
+	 * Calculate a statistic for validation and synthetic data.
+	 * 
+	 * @param validationData The validation data.
+	 * @param syntheticData The synthetic data.
+	 * 
+	 * @return The statistic for validation and synthetic data.
+	 */
+	double calculateStatistic(List validationData, List syntheticData);
+}
+
+/**
+ * Calculate the percentile difference between 
+ * the means of the validation and synthetic data. 
+ */
+public class PercentileMeanDifferenceStatistic implements IStatistic {
+	public double calculateStatistic(List validationData, List syntheticData) {
+		DescriptiveStatistics validationStats = new DescriptiveStatistics();
+		DescriptiveStatistics syntheticStats = new DescriptiveStatistics();
+
+		for(Double datum : validationData) {
+			validationStats.addValue(datum);
+		}
+		double validationMean = validationStats.getMean();
+
+		for(Double datum : syntheticData) {
+			syntheticStats.addValue(datum);
+		}
+		double syntheticMean = syntheticStats.getMean();
+
+		double denominator = (syntheticMean + validationMean) / 2;
+
+		// Check if denominator is effectively zero (using a small epsilon)
+		if (Math.abs(denominator) < 1e-10) {  // Small tolerance to avoid floating-point precision issues
+			return 0;
+		}
+		
+		double discrepancy = Math.abs((syntheticMean - validationMean) / denominator);
+		return discrepancy;
+	}
+}
+
+public class RootMeanSquaredErrorStatistic implements IStatistic {
+	public double calculateStatistic(List validationData, List syntheticData) {
+		DescriptiveStatistics validationStats = new DescriptiveStatistics();
+		DescriptiveStatistics syntheticStats = new DescriptiveStatistics();
+
+		for(Double datum : validationData) {
+			validationStats.addValue(datum);
+		}
+
+		for(Double datum : syntheticData) {
+			syntheticStats.addValue(datum);
+		}
+
+		long N = validationStats.getN();
+		double sum = 0;
+
+		for (int i = 0; i < N; i++) {
+			sum += Math.pow(syntheticStats.getElement(i) - validationStats.getElement(i), 2);
+		}
+
+		double RMSE = Math.sqrt(sum / N);
+
+		return RMSE;
+	}
+}
+
+public static boolean isCIEnvironment() {
+	return System.getenv("CI") != null;
+}

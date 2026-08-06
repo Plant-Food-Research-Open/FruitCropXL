@@ -1,0 +1,727 @@
+import org.apache.commons.math3.analysis.UnivariateFunction;
+import org.apache.commons.math3.analysis.solvers.*;
+import org.apache.commons.math3.exception.NoBracketingException;
+import org.apache.commons.math3.exception.TooManyEvaluationsException;
+import org.apache.commons.math3.exception.NumberIsTooLargeException;
+
+import static plantBase.*;
+import static absOrgan.*;
+import static globalParameters.*;
+import static modelOptions.*;
+import static photosynthesisAndTranspiration.*;
+import static environment.*;
+import static extraTools.*;
+import static rootSystem.*;
+import static leaf.*;
+import static shoot.*;
+
+/**
+ * Whole-plant hydraulic process service.
+ *
+ * Persistent hydraulic state and solver history remain on the owning
+ * {@link PlantBase}; this service performs graph-wide calculations only.
+ */
+
+public static double updateWaterFlux(PlantBase pb)
+	{	
+		
+		if(pb.getRootBase().isWaterLogging()) {
+			pb.waterLogging = true;
+		} else {
+			pb.waterLogging = false;
+		}
+		if(globalRadiation > LIGHT_THRESHOLD) {
+			//waterFlux = sum((* v:PhotosynthateOrgan, (v.plantNumber == pb.plantNumber) *)[waterFlux]);
+			pb.waterFluxPotential = sum((* v:PhotosynthateOrgan, (v.plantNumber == pb.plantNumber) *)[waterFluxPotential]);
+			if(isLeafHydraulicBypassTestScenario()) {
+				pb.waterFlux_optimized = sum((* v:PhotosynthateOrgan, (v.plantNumber == pb.plantNumber) *)[waterFlux]);
+			}
+			//sometimes mysterious get nan value
+			if(Double.isNaN(pb.waterFluxPotential)) {
+					if (printFlag) { println("NAN produced"); }
+						pb.waterFluxPotential = pb.leafArea * NIGHT_TRANSPIRATION * 1e6;
+						pb.waterFlux_optimized = pb.leafArea * NIGHT_TRANSPIRATION * 1e6;
+				}	
+		} else {
+			[
+				v:PhotosynthateOrgan, (v.plantNumber == pb.plantNumber) ::> 
+					{ v.updateLeafStatusAtNight();}
+			]
+			
+				//pb.waterFlux_optimized = sum((* v:PhotosynthateOrgan, (v.plantNumber == pb.plantNumber) *)[waterFlux]);
+				pb.waterFluxPotential = sum((* v:PhotosynthateOrgan, (v.plantNumber == pb.plantNumber) *)[waterFluxPotential]);
+				pb.waterFlux_optimized = sum((* v:PhotosynthateOrgan, (v.plantNumber == pb.plantNumber) *)[waterFlux]);
+				
+				if(pb.getRootBase().isWaterLogging() && !isLeafHydraulicBypassTestScenario()) {
+					pb.waterLogging = true;
+					pb.f_waterFlux = pb.getRootBase().calcmeanAlpha();
+					pb.waterFlux_optimized = pb.f_waterFlux * pb.waterFluxPotential;
+					pb.waterFluxMMol = pb.waterFlux_optimized/pb.leafArea/18;  //mmol/m2/s
+				} 
+				
+				if(!isLeafHydraulicBypassTestScenario()) {
+					pb.getRootBase().calcXylemWaterPotential(pb.waterFlux_optimized, pb.getRootBase().f_flux);
+
+					pb.getRootBase().updateWaterUptake(pb.waterFlux_optimized,  pb.getRootBase().f_flux);
+					//if(hourOfDay <= sunsetTime + 1 && hourOfDay > sunriseTime ) {
+					updatePlantWaterPotential(pb);
+					//}
+				}
+	/* 	if (printFlag) { 
+			println("waterFlux_optimized  " + String.format("%.4f", pb.waterFlux_optimized)); 
+			println("waterFluxPotential  " + String.format("%.4f", pb.waterFluxPotential));	
+			if(step > 1) println("xylem water potential (MPa) " + String.format("%.4f", pb.xylemWaterPotential)); 
+		} */
+				
+				
+		}
+		if(isLeafHydraulicBypassTestScenario()) {
+			if(Double.isNaN(pb.waterFluxPotential) || Double.isInfinite(pb.waterFluxPotential)) {
+				pb.waterFluxPotential = pb.leafArea * NIGHT_TRANSPIRATION * 1e6;
+			}
+			if(Double.isNaN(pb.waterFlux_optimized) || Double.isInfinite(pb.waterFlux_optimized)) {
+				pb.waterFlux_optimized = pb.waterFluxPotential;
+			}
+			pb.waterFlux_optimized = Math.max(0, Math.min(pb.waterFluxPotential, pb.waterFlux_optimized));
+			pb.f_waterFlux = pb.waterFluxPotential > 0 ? pb.waterFlux_optimized / pb.waterFluxPotential : 1.0;
+			pb.waterFluxMMol = pb.leafArea > 0 ? pb.waterFlux_optimized / pb.leafArea / 18 : 0;
+			pb.xylemWaterPotential = inputWaterPotential;
+			pb.ABA = 0;
+			pb.waterFlux_optimized_pre = pb.waterFlux_optimized;
+		}
+		
+			// Update the rolling buffer with the current pb.waterFluxPotential
+			pb.waterFluxPotentialBuffer[pb.bufferIndex2] = pb.waterFluxPotential;
+			pb.bufferIndex2 = (pb.bufferIndex2 + 1) % pb.bufferSize2; // Circular indexing
+			pb.waterFluxPotentialBufferCount = Math.min(pb.waterFluxPotentialBufferCount + 1, pb.bufferSize2);
+	
+			double rollingMax = 0.0;
+			for (int i = 0; i < pb.waterFluxPotentialBufferCount; i++) {
+				rollingMax = Math.max(rollingMax, pb.waterFluxPotentialBuffer[i]);
+			}
+			pb.weekly_maxWaterFluxPotential = rollingMax;
+			RootBase rbForMb = pb.getRootBase();
+			if(step > 24 && !isLeafHydraulicBypassTestScenario() && pb.weekly_maxWaterFluxPotential > 1e-9 && rbForMb != null) {
+				pb.Mb = rbForMb.TGrmax / (rbForMb.Tautranspigr * pb.weekly_maxWaterFluxPotential);
+			} else pb.Mb = 1.0;
+		
+		return pb.waterFlux_optimized;
+	}
+
+
+public static void updatePlantWaterPotential(PlantBase pb) {
+
+  // one‑time init, keep your safety update + ordering pass
+  if (pb.wpInitDone == false && step <= 2) {
+    
+      [
+        g:Internode, (g.plantNumber == pb.plantNumber) ::> { g.update(); }
+      ]
+    
+    pb.updateOrder();
+    println("update water ----------------------------");
+    pb.wpInitDone = true;
+  }
+  
+  //WATER FLUX CAN BE UPDATED IN PARALLEL 
+  [ 
+  	  it:Internode, (it.plantNumber == pb.plantNumber) ::> { 
+  	 //actual function 
+  	it.updateWaterFlux();
+	//taskManager.add(it.wftask); 
+  } 
+	//{solveTasksSafely();} 
+  ]
+
+  // --- Unfold along the shoot network, order by order, rank by rank ---
+  {
+    // Derive min/max order present in the graph
+    int minOrder = min((* it:Internode, (it.plantNumber == pb.plantNumber) *)[order]);
+    int maxOrder = max((* it:Internode, (it.plantNumber == pb.plantNumber) *)[order]);
+
+    for (int o = minOrder; o <= maxOrder; o++) {
+      // skip empty orders
+      if (count((* it:Internode, (it.plantNumber == pb.plantNumber && it.order == o) *)) == 0) continue;
+
+      // ranks within this order
+      int minRank = min((* it:Internode, (it.plantNumber == pb.plantNumber && it.order == o) *)[rank]);
+      int maxRank = max((* it:Internode, (it.plantNumber == pb.plantNumber && it.order == o) *)[rank]);
+
+      for (int r = minRank; r <= maxRank; r++) {
+
+        // visit every parent internode at (order=o, rank=r) for this plant
+        [ parent:Internode, (parent.plantNumber == pb.plantNumber && 
+        	parent.order == o && parent.rank == r) ::> {
+
+            // 1) Update the parent segment’s own water state first
+            parent.updateWaterPotential();
+
+            int k, n;
+            // 2) Propagate to child internodes (next order)
+            n = parent.getChildInternodeCount();
+            for (k = 0; k < n; k++) {
+              long id = parent.getChildInternodeIdAt(k);
+              Internode ch = parent.getInternode(id);
+              if (ch != null && ch.parentID == parent.getId()) {
+                // optional double-write guard if you reuse lastUnfoldStep
+                // if (ch.lastUnfoldStep == currentUnfoldTick) println("WARN: double write Internode id=" + ch.getId());
+                // ch.lastUnfoldStep = currentUnfoldTick;
+
+                ch.updateWaterPotential();
+                // debug:  println("WP unfold: O" + o + " R" + r + " parent " + parent.getId() + " -> child internode " + ch.getId());
+              }
+            }
+
+
+        } ] // end pattern block
+      } // ranks
+    } // orders
+  } // scope
+}
+
+
+
+/**
+ * Plant-scale actual water-flux solver.
+ *
+ * This solver links potential plant transpiration demand, root hydraulic supply,
+ * xylem water potential, pb.ABA signalling, and leaf-level actual transpiration.
+ * It follows a candidate-evaluate-commit design:
+ *
+ * 1. Evaluate a candidate whole-plant water flux.
+ * 2. Ask `RootBase` for candidate xylem water potential and pb.ABA.
+ * 3. Ask active leaves to evaluate actual transpiration under that candidate state.
+ * 4. Compute the residual:
+ *    `requestedPlantWaterFlux - summedLeafWaterFlux`
+ * 5. Accept a candidate from the numerical solver or fallback path.
+ * 6. Commit the accepted candidate to plant, root, and leaf state.
+ *
+ * A residual near zero means the requested whole-plant flux is internally
+ * consistent with the summed actual transpiration of the active leaves.
+ * Candidate evaluation should remain side-effect free as far as practical;
+ * permanent hydraulic state updates belong in `commitPlantWaterCandidate(pb)`.
+ * The final committed flux is always clamped to `[0, pb.waterFluxPotential]`.
+ */
+
+/**
+ * Narrow local exception used to reject invalid water-flux solver candidates.
+ *
+ * This exception only carries the scalar candidate value that triggered the
+ * local failure. It is not intended to represent a general model-level error.
+ */
+
+	private class PlantWaterFluxCandidateException extends RuntimeException {
+	   /** Candidate scalar value that caused the local failure. */
+	   private final double x;
+	   public PlantWaterFluxCandidateException(double x) {
+		 this.x = x;
+	   }	
+	   public double getX() {
+		 return x;
+	   }
+	 }
+	 
+	 
+/**
+ * Historical residual-function wrapper used by the whole-plant water-flux solver.
+ *
+ * `value(double waterFlux_optimize)` evaluates a temporary
+ * `PlantWaterCandidate`, increments `pb.waterFluxSolverEvalCount`, optionally
+ * checks debug diagnostics, rejects negative candidate fluxes with
+ * `PlantWaterFluxCandidateException`, and returns `c.residual`.
+ */
+	private class PlantWaterFluxResidualFunction implements UnivariateFunction {
+		   private PlantBase pb;
+		   PlantWaterFluxResidualFunction(PlantBase pb) {
+			  this.pb = pb;
+		   }
+		   public double value(double waterFlux_optimize) {
+			  PlantWaterCandidate c = evalPlantWaterFluxCandidate(pb, waterFlux_optimize);
+			  pb.waterFluxSolverEvalCount++;
+			  double y = c.residual;
+			  if(debug) {
+			  	  checkForNaN(printFlag,
+			  	  "waterFlux_optimize", waterFlux_optimize,
+			  	  "plantWaterFlux", c.summedLeafWaterFlux);
+			  }
+			  if (waterFlux_optimize < 0) {
+			   throw new PlantWaterFluxCandidateException(waterFlux_optimize);
+			 }
+			 return y;
+		   }
+		 }
+
+	/**
+	 * Temporary DTO carrying one trial whole-plant water-flux state.
+	 *
+	 * Instances of this class are used during candidate evaluation, fallback
+	 * comparison, and final commit selection.
+	 */
+	private class PlantWaterCandidate {
+		/** Candidate whole-plant water flux currently being tested. */
+		double requestedPlantWaterFlux;
+		/** Candidate flux fraction relative to `pb.waterFluxPotential`. */
+		double fWaterFlux;
+		/** Candidate xylem water potential from root-side evaluation. */
+		double xylemWaterPotential;
+		/** Candidate pb.ABA signalling state from root-side evaluation. */
+		double ABA;
+		/** Sum of valid active-leaf water fluxes under this candidate. */
+		double summedLeafWaterFlux;
+		/** Candidate residual: requested plant flux minus summed leaf flux. */
+		double residual;
+		/** Mean candidate leaf water potential across valid active leaves. */
+		double meanLeafWaterPotential;
+		/** Minimum candidate leaf water potential across valid active leaves. */
+		double minLeafWaterPotential;
+		/** Maximum candidate leaf water potential across valid active leaves. */
+		double maxLeafWaterPotential;
+		/** Mean leaf PLC diagnostic across valid active leaves. */
+		double meanPLC_leaf;
+		/** Mean leaf stomatal conductance diagnostic across valid active leaves. */
+		double meanGs;
+		/** Number of valid active leaves contributing to this candidate. */
+		int leafCount;
+		/** True when the candidate contains finite, usable plant/leaf results. */
+		boolean valid;
+	}
+
+	/**
+	 * Resolves the `RootBase` used by the plant water-flux solver.
+	 *
+	 * The method first tries the cached `pb.rbID` through `pb.getRootBase()`. If that
+	 * fails, it searches the graph for the first `RootBase` with the same
+	 * `pb.plantNumber`. When a root base is found, `pb.rbID` is refreshed. Returns
+	 * `null` when no matching root base is available.
+	 */
+	private static RootBase resolveRootBaseForWaterFlux(PlantBase pb) {
+		RootBase rb = pb.getRootBase();
+		if (rb == null) {
+			rb = first((*rt:RootBase, (rt.plantNumber == pb.plantNumber)*));
+			if (rb != null) pb.rbID = rb.getId();
+		}
+		return rb;
+	}
+
+	/**
+	 * Evaluates one trial whole-plant water-flux candidate.
+	 *
+	 * The workflow is:
+	 *
+	 * 1. Initialize a `PlantWaterCandidate`.
+	 * 2. Compute `fWaterFlux = waterFluxCandidate / pb.waterFluxPotential` when
+	 *    potential flux is positive.
+	 * 3. Resolve the corresponding `RootBase`.
+	 * 4. Return an invalid/default candidate when root information or `rb.f_flux`
+	 *    is unavailable.
+	 * 5. Evaluate root-side candidate hydraulics with
+	 *    `rb.evalXylemWaterPotentialCandidate(waterFluxCandidate, rb.f_flux)`.
+	 * 6. Use the returned candidate xylem water potential and pb.ABA when valid.
+	 * 7. Loop over active leaves:
+	 *    `(* lf:Leaf, (lf.shouldContributeToActualWaterFlux() && lf.plantNumber == pb.plantNumber) *)`
+	 * 8. For each active leaf, evaluate a leaf candidate with
+	 *    `l.evalActualTranspirationCandidate(c.fWaterFlux, c.xylemWaterPotential, c.ABA)`.
+	 * 9. Aggregate summed leaf water flux, leaf water potential, PLC, and gs.
+	 * 10. Average the diagnostics when at least one valid leaf contributed.
+	 * 11. Set `c.residual = waterFluxCandidate - c.summedLeafWaterFlux`.
+	 * 12. Mark the candidate valid only when at least one leaf is valid and the
+	 *     residual and summed leaf flux are finite.
+	 *
+	 * This method should remain a trial-evaluation path. It should not permanently
+	 * update plant, root, or leaf state. Permanent updates belong in
+	 * `commitPlantWaterCandidate(pb, ...)`.
+	 *
+	 * @param waterFluxCandidate Candidate whole-plant water flux to evaluate.
+	 * @return Temporary candidate state and residual information for that flux.
+	 */
+	private static PlantWaterCandidate evalPlantWaterFluxCandidate(PlantBase pb, double waterFluxCandidate) {
+		PlantWaterCandidate c = new PlantWaterCandidate();
+		c.requestedPlantWaterFlux = waterFluxCandidate;
+		c.fWaterFlux = (pb.waterFluxPotential > 0.0) ? waterFluxCandidate / pb.waterFluxPotential : 0.0;
+		c.xylemWaterPotential = inputWaterPotential;
+		c.ABA = 0.0;
+		c.summedLeafWaterFlux = 0.0;
+		c.residual = waterFluxCandidate;
+		c.meanLeafWaterPotential = 0.0;
+		c.minLeafWaterPotential = Double.POSITIVE_INFINITY;
+		c.maxLeafWaterPotential = Double.NEGATIVE_INFINITY;
+		c.meanPLC_leaf = 0.0;
+		c.meanGs = 0.0;
+		c.leafCount = 0;
+		c.valid = false;
+
+		RootBase rb = resolveRootBaseForWaterFlux(pb);
+		if (rb == null || rb.f_flux == null) {
+			c.residual = waterFluxCandidate;
+			return c;
+		}
+
+		RootWaterCandidate rootCandidate = rb.evalXylemWaterPotentialCandidate(waterFluxCandidate, rb.f_flux);
+		if (rootCandidate != null && rootCandidate.valid) {
+			c.xylemWaterPotential = rootCandidate.xylemWaterPotential;
+			c.ABA = rootCandidate.ABA;
+		} else {
+			c.residual = waterFluxCandidate;
+			return c;
+		}
+
+		for (Leaf l : (* lf:Leaf, (lf.shouldContributeToActualWaterFlux() && lf.plantNumber == pb.plantNumber) *)) {
+			LeafWaterCandidate lc = l.evalActualTranspirationCandidate(c.fWaterFlux, c.xylemWaterPotential, c.ABA);
+			if (lc == null || !lc.valid) continue;
+			c.summedLeafWaterFlux += lc.waterFlux;
+			c.meanLeafWaterPotential += lc.waterPotential;
+			c.minLeafWaterPotential = Math.min(c.minLeafWaterPotential, lc.waterPotential);
+			c.maxLeafWaterPotential = Math.max(c.maxLeafWaterPotential, lc.waterPotential);
+			c.meanPLC_leaf += lc.PLC_leaf;
+			c.meanGs += lc.gs;
+			c.leafCount++;
+		}
+
+		if (c.leafCount > 0) {
+			c.meanLeafWaterPotential /= c.leafCount;
+			c.meanPLC_leaf /= c.leafCount;
+			c.meanGs /= c.leafCount;
+		} else {
+			c.minLeafWaterPotential = 0.0;
+			c.maxLeafWaterPotential = 0.0;
+		}
+
+		c.residual = waterFluxCandidate - c.summedLeafWaterFlux;
+		c.valid = c.leafCount > 0
+			&& !Double.isNaN(c.residual) && !Double.isInfinite(c.residual)
+			&& !Double.isNaN(c.summedLeafWaterFlux) && !Double.isInfinite(c.summedLeafWaterFlux);
+		return c;
+	}
+
+	/**
+	 * Copies candidate diagnostics into plant-level solver diagnostic fields.
+	 *
+	 * This method is for outputs, debugging, and validation. It does not commit
+	 * hydraulic state to the plant, root, or leaves.
+	 *
+	 * @param c Candidate whose diagnostics should be exposed on the plant.
+	 */
+	private static void applyWaterSolverDiagnostics(PlantBase pb, PlantWaterCandidate c) {
+		if (c == null) return;
+		pb.waterFluxSolverResidual = c.residual;
+		pb.waterFluxSolverLeafSum = c.summedLeafWaterFlux;
+		pb.meanLeafWaterPotential_solver = c.meanLeafWaterPotential;
+		pb.minLeafWaterPotential_solver = c.minLeafWaterPotential;
+		pb.maxLeafWaterPotential_solver = c.maxLeafWaterPotential;
+		pb.meanPLC_leaf_solver = c.meanPLC_leaf;
+		pb.meanGs_solver = c.meanGs;
+	}
+
+	/**
+	 * Chooses the better of two fallback candidates by absolute residual.
+	 *
+	 * Invalid or null candidates are ignored. When both candidates are valid, the
+	 * candidate with the smaller absolute residual is returned. This is mainly
+	 * used by the fallback selector after solver failure.
+	 */
+	private static PlantWaterCandidate bestWaterFluxCandidate(PlantWaterCandidate a, PlantWaterCandidate b) {
+		if (b == null || !b.valid) return (a != null && a.valid) ? a : null;
+		if (a == null || !a.valid) return b;
+		return (Math.abs(b.residual) < Math.abs(a.residual)) ? b : a;
+	}
+
+	/**
+	 * Bounds one fallback trial flux to a finite, safe search interval.
+	 *
+	 * Bounds are first clamped to `[0, pb.waterFluxPotential]`. Non-finite candidate
+	 * values are replaced with zero before the value is clamped into that interval.
+	 *
+	 * @return Finite fallback flux value inside the bounded interval.
+	 */
+	private static double boundedFallbackFluxValue(PlantBase pb, double value, double lowerBound, double upperBound) {
+		double lower = Math.max(0.0, Math.min(lowerBound, pb.waterFluxPotential));
+		double upper = Math.max(lower, Math.min(upperBound, pb.waterFluxPotential));
+		double v = value;
+		if (Double.isNaN(v) || Double.isInfinite(v)) v = 0.0;
+		return Math.max(lower, Math.min(upper, v));
+	}
+
+	/**
+	 * Selects a best-residual fallback water-flux candidate.
+	 *
+	 * This path is used when numerical root finding cannot bracket or solve a
+	 * valid whole-plant residual. It marks `pb.waterFluxSolverFallbackUsed = 1` and
+	 * `pb.waterFluxSolverAccepted = 0`, then evaluates a fixed sequence of fallback
+	 * candidates: previous flux, lower bound, upper bound, midpoint, bounded
+	 * previous value, and finally zero flux. The valid candidate with the
+	 * smallest absolute residual is returned so the model can continue even when
+	 * a strict numerical root is unavailable.
+	 */
+	private static PlantWaterCandidate fallbackWaterFluxCandidate(PlantBase pb, double lowerBound, double upperBound) {
+		pb.waterFluxSolverFallbackUsed = 1;
+		pb.waterFluxSolverAccepted = 0;
+
+		double lower = Math.max(0.0, Math.min(lowerBound, pb.waterFluxPotential));
+		double upper = Math.max(lower, Math.min(upperBound, pb.waterFluxPotential));
+		double prev = boundedFallbackFluxValue(pb, pb.waterFlux_optimized_pre, lower, upper);
+		double mid = 0.5 * (lower + upper);
+
+		PlantWaterCandidate best = null;
+		best = bestWaterFluxCandidate(best, evalPlantWaterFluxCandidate(pb, prev));
+		best = bestWaterFluxCandidate(best, evalPlantWaterFluxCandidate(pb, lower));
+		best = bestWaterFluxCandidate(best, evalPlantWaterFluxCandidate(pb, upper));
+		best = bestWaterFluxCandidate(best, evalPlantWaterFluxCandidate(pb, mid));
+		if (best == null) {
+			double boundedPrevious = pb.waterFlux_optimized_pre;
+			if (Double.isNaN(boundedPrevious) || Double.isInfinite(boundedPrevious)) boundedPrevious = 0.0;
+			boundedPrevious = Math.max(0.0, Math.min(pb.waterFluxPotential, boundedPrevious));
+			best = evalPlantWaterFluxCandidate(pb, boundedPrevious);
+		}
+		if (best == null || !best.valid
+			|| Double.isNaN(best.requestedPlantWaterFlux) || Double.isInfinite(best.requestedPlantWaterFlux)) {
+			best = evalPlantWaterFluxCandidate(pb, 0.0);
+		}
+		return best;
+	}
+
+	/**
+	 * Commits an accepted whole-plant water-flux candidate to model state.
+	 *
+	 * This is the side-effecting commit phase. If `accepted` is `null`, the method
+	 * evaluates a zero-flux candidate and uses that instead. The committed
+	 * `pb.waterFlux_optimized` value is clamped to `[0, pb.waterFluxPotential]`.
+	 *
+	 * During commit the method updates:
+	 * - `pb.f_waterFlux`
+	 * - `pb.xylemWaterPotential`
+	 * - `pb.ABA`
+	 * - `pb.waterFluxMMol`
+	 *
+	 * It then commits the root candidate with
+	 * `rb.commitXylemWaterPotentialCandidate(pb.waterFlux_optimized, rb.f_flux)`,
+	 * refreshes root-derived `weightedMeanWaterPotential` and `meanABA`,
+	 * re-evaluates and commits each active leaf candidate, calls
+	 * `updatePlantWaterPotential(pb)`, updates root water uptake through
+	 * `rb.updateWaterUptake(...)`, stores `pb.waterFlux_optimized_pre`, and refreshes
+	 * the rolling `pb.waterFluxReductionBuffer` / `pb.daily_waterFluxReduction`.
+	 *
+	 * This method is allowed to mutate plant, root, and leaf state.
+	 */
+	private static void commitPlantWaterCandidate(PlantBase pb, PlantWaterCandidate accepted) {
+		if (accepted == null) accepted = evalPlantWaterFluxCandidate(pb, 0.0);
+		pb.waterFlux_optimized = Math.max(0.0, Math.min(pb.waterFluxPotential, accepted.requestedPlantWaterFlux));
+		pb.f_waterFlux = (pb.waterFluxPotential > 0.0) ? pb.waterFlux_optimized / pb.waterFluxPotential : 0.0;
+		pb.xylemWaterPotential = accepted.xylemWaterPotential;
+		pb.ABA = (float) accepted.ABA;
+		pb.waterFluxMMol = pb.leafArea > 0 ? pb.waterFlux_optimized / pb.leafArea / 18 : 0;
+
+		RootBase rb = resolveRootBaseForWaterFlux(pb);
+		if (rb != null) {
+			rb.commitXylemWaterPotentialCandidate(pb.waterFlux_optimized, rb.f_flux);
+			pb.xylemWaterPotential = rb.weightedMeanWaterPotential;
+			pb.ABA = (float) rb.meanABA;
+		}
+
+		for (Leaf l : (* lf:Leaf, (lf.shouldContributeToActualWaterFlux() && lf.plantNumber == pb.plantNumber) *)) {
+			LeafWaterCandidate lc = l.evalActualTranspirationCandidate(pb.f_waterFlux, pb.xylemWaterPotential, pb.ABA);
+			l.commitActualTranspirationCandidate(lc);
+		}
+
+		updatePlantWaterPotential(pb);
+		if (rb != null) rb.updateWaterUptake(pb.waterFlux_optimized, rb.f_flux);
+		pb.waterFlux_optimized_pre = pb.waterFlux_optimized;
+
+		pb.waterFluxReductionBuffer[pb.bufferIndex] = pb.f_waterFlux;
+		pb.bufferIndex = (pb.bufferIndex + 1) % pb.bufferSize;
+		pb.timeStepCount++;
+
+		int timeStep = Math.min(pb.timeStepCount, pb.bufferSize);
+		double daily_accReduction = 0.0;
+		for (int i = 0; i < timeStep; i++) {
+			daily_accReduction += pb.waterFluxReductionBuffer[i];
+		}
+		pb.daily_waterFluxReduction = daily_accReduction / timeStep;
+	}
+	
+/**
+ * Calculates the actual whole-plant water flux for the current time step.
+ *
+ * The method solves the hydraulic closure condition between a requested
+ * whole-plant water flux and the summed actual transpiration of the active
+ * leaves. The solved residual is:
+ *
+ * `requestedPlantWaterFlux - summedLeafWaterFlux`
+ *
+ * Solver workflow:
+ * - Reset plant-level solver diagnostics.
+ * - Create the residual function and solve it with a `BisectionSolver`.
+ * - Guard invalid or non-finite `pb.waterFluxPotential`.
+ * - Guard missing root information or missing `rb.f_flux`.
+ * - Guard the no-active-leaf case.
+ * - Evaluate the same test candidate twice and record
+ *   `pb.waterFluxSolverRepeatedResidualDelta` to detect hidden side effects in
+ *   candidate evaluation.
+ * - If the root system reports waterlogging, use the root waterlogging
+ *   reduction factor instead of numerical solving.
+ * - Otherwise solve the whole-plant water-flux residual inside
+ *   soil-water-dependent lower and upper bounds.
+ * - If bracketing fails, retry with the wider current interval and then fall
+ *   back to `fallbackWaterFluxCandidate(pb, ...)` when needed.
+ * - Clamp the accepted flux to `[0, pb.waterFluxPotential]`.
+ * - Re-evaluate, commit, and diagnose the accepted candidate.
+ *
+ * The numerical search may use trial upper bounds above `pb.waterFluxPotential`
+ * for bracketing robustness. That does not change the committed plant state:
+ * the accepted value is clamped before commit in this implementation.
+ *
+ * The method catches `TooManyEvaluationsException`,
+ * `NumberIsTooLargeException`, and a final generic exception path.
+ *
+ * @return Accepted actual whole-plant water flux for the current step.
+ */	 
+public static float calcActualWaterFlux(PlantBase pb) {
+	    try {
+	        // Reset diagnostics.
+	        pb.waterFluxSolverResidual = 0.0;
+	        pb.waterFluxSolverLowerBound = 0.0;
+	        pb.waterFluxSolverUpperBound = 0.0;
+	        pb.waterFluxSolverLeafSum = 0.0;
+	        pb.waterFluxSolverRepeatedResidualDelta = 0.0;
+	        pb.waterFluxSolverEvalCount = 0;
+	        pb.waterFluxSolverFallbackUsed = 0;
+	        pb.waterFluxSolverAccepted = 0;
+	        pb.meanLeafWaterPotential_solver = 0.0;
+	        pb.minLeafWaterPotential_solver = 0.0;
+	        pb.maxLeafWaterPotential_solver = 0.0;
+	        pb.meanPLC_leaf_solver = 0.0;
+	        pb.meanGs_solver = 0.0;
+
+	        // Create residual function and solver.
+	        UnivariateFunction function = new PlantWaterFluxResidualFunction(pb);
+
+        // Solver parameters
+        int maxEval = 100;
+        double relativeAccuracy = 1.0e-8;
+        double absoluteAccuracy = 1.0e-6;
+        UnivariateSolver solver = new BisectionSolver(relativeAccuracy);
+
+	        // Resolve root and guard invalid setup.
+	        RootBase rb = resolveRootBaseForWaterFlux(pb);
+	        if (pb.waterFluxPotential <= 0.0 || Double.isNaN(pb.waterFluxPotential) || Double.isInfinite(pb.waterFluxPotential)) {
+	        	pb.waterFlux_optimized = 0.0;
+	        	pb.f_waterFlux = 0.0;
+	        	pb.WUE = 0.0;
+	        	PlantWaterCandidate zeroCandidate = evalPlantWaterFluxCandidate(pb, 0.0);
+	        	commitPlantWaterCandidate(pb, zeroCandidate);
+	        	applyWaterSolverDiagnostics(pb, zeroCandidate);
+	        	return pb.waterFlux_optimized;
+	        }
+	        if (rb == null || rb.f_flux == null) {
+	        	pb.waterFlux_optimized = 0.0;
+	        	pb.f_waterFlux = 0.0;
+	        	pb.WUE = 0.0;
+	        	PlantWaterCandidate zeroCandidate = evalPlantWaterFluxCandidate(pb, 0.0);
+	        	commitPlantWaterCandidate(pb, zeroCandidate);
+	        	applyWaterSolverDiagnostics(pb, zeroCandidate);
+	        	return pb.waterFlux_optimized;
+	        }
+
+	        // Check active leaf availability.
+	        PlantWaterCandidate leafCheck = evalPlantWaterFluxCandidate(pb, Math.min(pb.waterFluxPotential, Math.max(1e-6, pb.waterFlux_optimized_pre)));
+	        if (leafCheck.leafCount <= 0) {
+	        	pb.waterFlux_optimized = 0.0;
+	        	pb.f_waterFlux = 0.0;
+	        	pb.WUE = 0.0;
+	        	PlantWaterCandidate zeroCandidate = evalPlantWaterFluxCandidate(pb, 0.0);
+	        	commitPlantWaterCandidate(pb, zeroCandidate);
+	        	applyWaterSolverDiagnostics(pb, zeroCandidate);
+	        	pb.waterFluxSolverAccepted = 0;
+	        	return pb.waterFlux_optimized;
+	        }
+
+	        // Check candidate-evaluation repeatability.
+	        double testJ = Math.max(0.0, Math.min(pb.waterFluxPotential, Math.max(1e-6, 0.5 * pb.waterFluxPotential)));
+	        double r1 = evalPlantWaterFluxCandidate(pb, testJ).residual;
+	        double r2 = evalPlantWaterFluxCandidate(pb, testJ).residual;
+	        pb.waterFluxSolverRepeatedResidualDelta = Math.abs(r2 - r1);
+
+	        // Handle waterlogging.
+	        if (rb.isWaterLogging()) {
+	            pb.waterLogging = true;
+	            pb.f_waterFlux = rb.calcmeanAlpha();
+	            pb.waterFlux_optimized = pb.f_waterFlux * pb.waterFluxPotential;
+	            pb.waterFluxSolverAccepted = 1;
+	        } else {
+	            // Select bounds and solve water-flux residual.
+            double lowerBound, upperBound;
+            
+				if (rb.meanSoilWaterPotential >= -0.05) {
+					lowerBound = 0.2 * pb.waterFluxPotential;
+					upperBound = 1.3 * pb.waterFluxPotential;
+				} else if (rb.meanSoilWaterPotential >= -0.15) {
+					lowerBound = 0.01 * pb.waterFluxPotential;
+					upperBound = 1.2 * pb.waterFluxPotential;
+				} else {
+					lowerBound = 1e-4 * pb.waterFluxPotential;
+					upperBound = 1.2 * pb.waterFluxPotential;
+				}
+				
+				// Trial upper bounds may exceed potential flux for bracketing robustness.
+				// The accepted value is clamped before commit. If this policy changes,
+				// update solver documentation and diagnostics together.
+	            pb.waterFluxSolverLowerBound = lowerBound;
+	            pb.waterFluxSolverUpperBound = upperBound;
+	
+	            try {
+	                pb.waterFlux_optimized = solver.solve(maxEval, function, lowerBound, upperBound);
+	                pb.waterFluxSolverAccepted = 1;
+	            } catch (NoBracketingException e) {
+	                // Retry or fallback after bracketing failure.
+	                try {
+	                	pb.waterFluxSolverLowerBound = 1e-6;
+	                	pb.waterFluxSolverUpperBound = 1.4 * pb.waterFluxPotential;
+	                    pb.waterFlux_optimized = solver.solve(maxEval, function, pb.waterFluxSolverLowerBound, pb.waterFluxSolverUpperBound);
+	                    pb.waterFluxSolverAccepted = 1;
+	                } catch (NoBracketingException ex) {
+	                    println("Error -- plantBase: NoBracketingException still persists, using best residual fallback.");
+	                    PlantWaterCandidate fallbackCandidate = fallbackWaterFluxCandidate(pb, 0.0, pb.waterFluxPotential);
+	                    pb.waterFlux_optimized = fallbackCandidate.requestedPlantWaterFlux;
+	                }
+	            }
+	        }
+	
+	        // Clamp and commit accepted candidate.
+	        pb.waterFlux_optimized = Math.max(0.0, Math.min(pb.waterFluxPotential, pb.waterFlux_optimized));
+	        pb.f_waterFlux = pb.waterFluxPotential > 0.0 ? pb.waterFlux_optimized / pb.waterFluxPotential : 0.0;
+	
+	        PlantWaterCandidate accepted = evalPlantWaterFluxCandidate(pb, pb.waterFlux_optimized);
+	        commitPlantWaterCandidate(pb, accepted);
+	        applyWaterSolverDiagnostics(pb, accepted);
+	
+	    // Handle solver exceptions.
+	    } catch (TooManyEvaluationsException e) {
+        println("plantBase: TooManyEvaluationsException! \n" + e);
+        continueRunning = true;
+    } catch (NumberIsTooLargeException e) {
+        println("plantBase: NumberIsTooLargeException! \n" + e);
+        if (shouldContinue) {
+            continueRunning = true;
+        } else {
+            throw new RuntimeException("plantBase: Exception encountered and shouldContinue is false", e);
+        }
+    } catch (Exception e) {
+        println("Error in calcActualWaterFlux: " + e.getMessage());
+        throw new RuntimeException("Exception encountered in calcActualWaterFlux", e);
+    }
+
+    return pb.waterFlux_optimized;
+}
+
+/**
+ * Re-evaluates and re-commits the current `pb.waterFlux_optimized` state.
+ *
+ * This helper evaluates the current optimized flux as a fresh candidate,
+ * commits that candidate, and refreshes solver diagnostics. It should not
+ * normally be called again after `calcActualWaterFlux()` in the same time step
+ * unless an intentional re-commit of hydraulic state is required.
+ */
+private static void updateWaterFluxVariables(PlantBase pb) {
+    PlantWaterCandidate accepted = evalPlantWaterFluxCandidate(pb, pb.waterFlux_optimized);
+    commitPlantWaterCandidate(pb, accepted);
+    applyWaterSolverDiagnostics(pb, accepted);
+}

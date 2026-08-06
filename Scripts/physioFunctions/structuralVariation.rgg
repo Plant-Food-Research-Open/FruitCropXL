@@ -1,0 +1,594 @@
+import static globalParameters.*;
+import static modelOptions.*;
+import static initialConditions.*;
+import static extraTools.*;
+import static absOrgan.*;
+import static leaf.*;
+import static shoot.*;
+import static plantBase.*;
+import de.grogra.pf.io.PropertyFileReader;
+import org.apache.commons.math3.distribution.MultivariateNormalDistribution;
+import java.util.Arrays;
+import java.util.Random;
+
+/**
+ * Defines the spatial path of the primary axis based on architecture parameters.
+ * <p>
+ * The space occupied by the shoot is determined by the architecture of the primary 
+ * and secondary axes. The primary axis architecture is defined using five parameters:
+ * <ul>
+ *     <li>Mean shoot azimuth angle (θs)</li>
+ *     <li>Basal shoot elevation angle (αs)</li>
+ *     <li>Difference between basal and distal tangent angle (ϕs) - difference between basal 
+ *         and distal shoot elevation</li>
+ *     <li>Proportion of total shoot length for half curvature (MXs) - ratio between the length 
+ *         from the origin to the point of maximal curvature to total shoot length</li>
+ *     <li>Normalized length (Ls) - ratio between shoot length and mean shoot length for the 
+ *         C × T pair considered</li>
+ * </ul>
+ * </p>
+ * <p>
+ * These parameters are generated independently for each shoot and are unrelated to the shoot's 
+ * origin (X0, Y0, Z0). Although part of the same set, these parameters are not completely independent. 
+ * Some parameters display significant correlations, and the θs parameter exhibits cyclical patterns.
+ * </p>
+ * <p>
+ * To generate these parameters:
+ * <ol>
+ *     <li>The θs parameter is selected from the [0°, 360°) range using a uniform distribution.</li>
+ *     <li>The remaining four parameters are generated based on the azimuth sector of the initial 
+ *         sampling. Four azimuth sectors are identified, each associated with a multivariate normal 
+ *         distribution Nm (x̄,Σ), where x̄ is the mean vector (αs, ϕs, MXs, Ls) and S represents the 
+ *         variance-covariance matrix.</li>
+ *     <li>The proportion of shoots in each azimuth sector is adjusted based on observed data for 
+ *         the C × T pair.</li>
+ * </ol>
+ * </p>
+ */
+
+
+/*####################### Initialize tables, values and probability distributions ###########################*/
+/** Frequency that azimuth angle falls within each of the four directional sectors [North, East, South, West]. */
+private static double[] AZIMUTH_FREQUENCIES;
+
+/** Mean values of shoot parameters for azimuth angle facing [North, East, South, West]. */
+private static double[] BASAL_ELEVATION_MEANS, TANGENT_DIFFERENCE_MEANS, NORMALIZED_LENGTH_MEANS, CURVATURE_PROPORTION_MEANS;
+
+/** Covariance of basal elevation with other shoot parameters for azimuth angle facing [North, East, South, West]. */
+private static double[][] BASAL_ELEVATION_COVARIANCES;
+
+/** Covariance of tangent difference with other shoot parameters for azimuth angle facing [North, East, South, West]. */
+private static double[][] TANGENT_DIFFERENCE_COVARIANCES;
+
+/** Covariance of normalized length with other shoot parameters for azimuth angle facing [North, East, South, West]. */
+private static double[][] NORMALIZED_LENGTH_COVARIANCES;
+
+/** Covariance of curvature proportion with other shoot parameters for azimuth angle facing [North, East, South, West]. */
+private static double[][] CURVATURE_PROPORTION_COVARIANCES;
+
+/** Length of shoot before scaling (in meters). */
+private static float defaultShootLength;
+
+/** Proportion of shoot length accounted for by each internode. */
+private static float[] lengthProportions;
+
+/** Multivariate normal distribution created from mean vector and covariance matrix of shoot parameters for shoot azimuth angle facing [North, East, South, West]. */
+private static MultivariateNormalDistribution[] shootMNDs;
+
+/** Directions for indexing into parameter tables. */
+private static final int NORTH = 0, EAST = 1, SOUTH = 2, WEST = 3;
+private static int[] directions = {NORTH, EAST, SOUTH, WEST};
+
+/** Number of internodes for which shoot parameters will be generated. */
+//for apple, this will change for different bud type, so it should get from the shootBase
+private static int maxInternodeNum;
+
+/**
+ * Initializes the data required for generating shoot parameters. 
+ * This includes setting the maximum number of internodes, 
+ * processing shoot and leaf parameters, and establishing the default shoot length and proportions.
+ * It also initiates the multivariate normal distributions for shoot parameters.
+ */
+public static void initiateStructuralVariationParameters() 
+{
+	maxInternodeNum = organSize.length - 1;
+	if (printFlag) { println("maxInternodeNum" + maxInternodeNum); }
+	println("[structuralVariation] useStructuralVariation=" + useStructuralVariation
+	+ " initiation_method=" + initiation_method
+	+ " structuralVariationShoot_file=" + structuralVariationShoot_file
+	+ " rows=" + structuralVariationShoot.length
+	+ " cols=" + structuralVariationShoot[0].length);
+	
+	processShootParameterData();
+	processLeafParameterData();
+	
+	calcDefaultShootLength();
+	calcShootProportions();
+	
+	initShootParameterMNDs();
+}
+
+/**
+ * Processes the shoot parameter data by extracting azimuth frequencies, means, and covariances from a parameter file.
+ * This method initializes arrays for storing azimuth frequencies, shoot parameter means, and their respective covariances.
+ * It then populates these arrays based on data from the 'structuralVariationShoot' matrix.
+ * first row of the data is azimuth frequency, then the mean values for each direction and then the covariance matrix
+
+ */
+public static void processShootParameterData()
+{
+	AZIMUTH_FREQUENCIES = new double[4];
+	
+	BASAL_ELEVATION_MEANS = new double[4];
+	TANGENT_DIFFERENCE_MEANS = new double[4];
+	NORMALIZED_LENGTH_MEANS = new double[4];
+	CURVATURE_PROPORTION_MEANS = new double[4];
+	
+	BASAL_ELEVATION_COVARIANCES = new double[4][4];
+	TANGENT_DIFFERENCE_COVARIANCES = new double[4][4];
+	NORMALIZED_LENGTH_COVARIANCES = new double[4][4];
+	CURVATURE_PROPORTION_COVARIANCES  = new double[4][4];
+
+	double[][] sv = normalizeStructuralVariationShootTable(structuralVariationShoot);
+
+	int rows = sv.length;
+	int cols = sv[0].length;
+
+	/*
+	 * Two supported layouts after normalization:
+	 *
+	 * A) 21 x 5:
+	 *    column 0 is label/non-numeric placeholder
+	 *    columns 1..4 are values
+	 *
+	 * B) 21 x 4:
+	 *    string label column was removed by the CSV reader
+	 *    columns 0..3 are values
+	 */
+	int valueColOffset = 0;
+
+	if (rows < 21) {
+		throw new RuntimeException(
+			"Invalid structuralVariationShoot table: rows=" + rows
+			+ ", cols=" + cols
+			+ ". Expected at least 21 rows. "
+			+ "Check useStructuralVariation, structuralVariationShoot_file, and whether the CSV is transposed."
+		);
+	}
+
+	if (cols >= 5) {
+		valueColOffset = 1;
+	} else if (cols >= 4) {
+		valueColOffset = 0;
+	} else {
+		throw new RuntimeException(
+			"Invalid structuralVariationShoot table: rows=" + rows
+			+ ", cols=" + cols
+			+ ". Expected at least 4 numeric columns, or 5 columns if the first column is a label."
+		);
+	}
+
+	for (int d = 0; d < 4; d++) {
+		
+		AZIMUTH_FREQUENCIES[d] = sv[0][valueColOffset + d];
+		
+		BASAL_ELEVATION_MEANS[d] = sv[d + 1][valueColOffset + 0];
+		TANGENT_DIFFERENCE_MEANS[d] = sv[d + 1][valueColOffset + 1];
+		NORMALIZED_LENGTH_MEANS[d] = sv[d + 1][valueColOffset + 2];
+		CURVATURE_PROPORTION_MEANS[d] = sv[d + 1][valueColOffset + 3];
+		
+		for (int i = 0; i < 4; i++) {
+			BASAL_ELEVATION_COVARIANCES[d][i] =
+				sv[4 * d + 5][valueColOffset + i];
+
+			TANGENT_DIFFERENCE_COVARIANCES[d][i] =
+				sv[4 * d + 6][valueColOffset + i];
+
+			NORMALIZED_LENGTH_COVARIANCES[d][i] =
+				sv[4 * d + 7][valueColOffset + i];
+
+			CURVATURE_PROPORTION_COVARIANCES[d][i] =
+				sv[4 * d + 8][valueColOffset + i];
+		}
+	}
+}
+
+public static double[][] normalizeStructuralVariationShootTable(double[][] input)
+{
+	if (input == null) {
+		throw new RuntimeException(
+			"structuralVariationShoot is null. "
+			+ "Check structuralVariationShoot_file in model.options and confirm the file is loaded."
+		);
+	}
+
+	if (input.length == 0 || input[0] == null || input[0].length == 0) {
+		throw new RuntimeException(
+			"structuralVariationShoot is empty. "
+			+ "Check structuralVariationShoot_file and CSV formatting."
+		);
+	}
+
+	int rows = input.length;
+	int cols = input[0].length;
+
+	if (printFlag) {
+		println("[structuralVariationShoot] raw rows=" + rows + " cols=" + cols);
+	}
+
+	/*
+	 * Correct or numeric-only layout:
+	 * 21 x 5, 21 x 4, or larger.
+	 */
+	if (rows >= 21 && cols >= 4) {
+		return input;
+	}
+
+	/*
+	 * Common mistake:
+	 * file is transposed, e.g. 5 x 21 or 4 x 21.
+	 */
+	if (rows >= 4 && cols >= 21) {
+		double[][] transposed = new double[cols][rows];
+
+		for (int r = 0; r < rows; r++) {
+			for (int c = 0; c < cols; c++) {
+				transposed[c][r] = input[r][c];
+			}
+		}
+
+		if (printFlag) {
+			println("[structuralVariationShoot] transposed to rows="
+				+ transposed.length + " cols=" + transposed[0].length);
+		}
+
+		return transposed;
+	}
+
+	throw new RuntimeException(
+		"Invalid structuralVariationShoot table shape: rows=" + rows
+		+ ", cols=" + cols
+		+ ". Expected 21x5, 21x4, 5x21, or 4x21. "
+		+ "The required content is: 1 frequency row, 4 mean rows, and 16 covariance rows."
+	);
+}
+/**
+ * Initializes a multivariate normal distribution for generating shoot parameters.
+ * This method sets up distributions for basal elevation, tangent difference, normalized length, and curvature proportion
+ * based on the means and covariances defined for each direction (North, East, South, West).
+ */
+ private static void initShootParameterMNDs()
+{
+	shootMNDs = new MultivariateNormalDistribution[4];
+	
+	for (int direction = NORTH; direction < 4; direction++) {
+		double[] means = {BASAL_ELEVATION_MEANS[direction],
+						 TANGENT_DIFFERENCE_MEANS[direction], 
+						 NORMALIZED_LENGTH_MEANS[direction], 
+						 CURVATURE_PROPORTION_MEANS[direction]};
+		double[][] covariances = {BASAL_ELEVATION_COVARIANCES[direction], 
+								 TANGENT_DIFFERENCE_COVARIANCES[direction], 
+								 NORMALIZED_LENGTH_COVARIANCES[direction], 
+								 CURVATURE_PROPORTION_COVARIANCES[direction]};
+		MultivariateNormalDistribution mnd = new MultivariateNormalDistribution(means, covariances);
+		shootMNDs[direction] = mnd;
+	}
+}
+
+/**
+ * Computes the default shoot length before any scaling is applied.
+ * The calculation is based on the summation of organ sizes up to the defined MAX_PHYTOMER_NUM.
+ */
+private static void calcDefaultShootLength()
+{
+	defaultShootLength = 0;
+	for (int i = 1; i <= MAX_PHYTOMER_NUM; i++) {
+		defaultShootLength += organSize[i][3];
+	}
+}
+
+/**
+ * Calculates the proportion of the total shoot length represented by each internode.
+ * The method establishes the relative lengths of segments in comparison to the overall shoot length.
+ */
+private static void calcShootProportions()
+{
+	lengthProportions = new float[maxInternodeNum];
+	lengthProportions[0] = organSize[0][3] / defaultShootLength;
+	for (int i = 1; i < MAX_PHYTOMER_NUM; i++) {
+		lengthProportions[i] = lengthProportions[i-1] + organSize[i][3] / defaultShootLength; 
+	}
+}
+
+/*################################ Generating parameters for single new shoot #########################*/
+
+// Parameters of a single shoot
+public static float singleAzimuthAngle;
+public static float singleBasalElevation;
+public static float singleTangentDifference;
+public static float singleCurvatureProportion;
+public static float singleNormalizedLength;
+
+public static float[] singleShootInternodeAngle;
+public static float[] singleShootInternodeLength;
+public static float[] singleShootPetioleRotation;
+public static float[] singleShootPetioleDeclination;
+public static float[] singleShootLeafDeclination;
+
+/**
+ * Generates shoot parameters for an individual shoot.
+ * This method computes the azimuth angle and retrieves shoot parameters based on that angle. 
+ * It further processes internode and leaf parameters for the shoot. The generated parameters
+ * include shoot's basal elevation, tangent difference, normalized length, and curvature proportion,
+ * as well as internode lengths and angles, and leaf rotations and declinations.
+ */
+public static void generateShootParameters()
+{
+	singleAzimuthAngle = getAzimuthAngle();
+				
+	double[] shootParameters = getShootParameters(singleAzimuthAngle);
+	singleBasalElevation = shootParameters[0];
+	singleTangentDifference = shootParameters[1];
+	singleNormalizedLength = shootParameters[2];
+	singleCurvatureProportion = shootParameters[3];
+	
+	//println(" shootParameters " + Arrays.toString(shootParameters) + "singleCurvatureProportion " + singleCurvatureProportion);			
+	
+	float[][] internodeParameters = getInternodeParameters(singleCurvatureProportion, singleNormalizedLength, singleTangentDifference);
+	singleShootInternodeLength = internodeParameters[0];
+	singleShootInternodeAngle = internodeParameters[1];
+	
+	//if (printFlag) { println(" singleShootInternodeAngle " + Arrays.toString(singleShootInternodeAngle)); }
+	
+	float[][] leafParameters = getLeafParameters(singleAzimuthAngle);
+	singleShootPetioleRotation = leafParameters[0];
+	singleShootPetioleDeclination = leafParameters[1];
+	singleShootLeafDeclination = leafParameters[2];
+}
+
+/**
+ * Retrieves a random azimuth angle based on predefined sectors (WEST, NORTH, EAST, SOUTH).
+ * 
+ * <p>The method determines the azimuth sector based on a probability distribution associated
+ * with each sector. After selecting a sector, it then chooses a random azimuth angle from 
+ * within that sector using a uniform probability distribution.</p>
+ * 
+ * @return A randomly determined azimuth angle in degrees (0-360).
+ */
+private static double getAzimuthAngle()
+{
+	// Random south facing azimuth angle
+	double dirSelector = random(0, 1);
+	double angle = 0;
+	if (dirSelector < Arrays.stream(Arrays.copyOfRange(AZIMUTH_FREQUENCIES,0,NORTH+1)).sum()) {
+		angle = random(340, 380) % 360;	// (0,20) U (340,360)
+	} else if (dirSelector < Arrays.stream(Arrays.copyOfRange(AZIMUTH_FREQUENCIES,0,EAST+1)).sum()) {
+		angle = random(20, 160);
+	} else if (dirSelector < Arrays.stream(Arrays.copyOfRange(AZIMUTH_FREQUENCIES,0,SOUTH+1)).sum()) {
+		angle = random(160, 200);
+	} else if (dirSelector < Arrays.stream(Arrays.copyOfRange(AZIMUTH_FREQUENCIES,0,WEST+1)).sum()) {
+		angle = random(200, 340);
+	}
+	return angle;
+}
+/**
+ * Generates shoot parameters such as basal elevation, tangent difference, normalized length, 
+ * and curvature proportion for each shoot based on a given azimuth angle.
+ * 
+ * <p>The method determines the direction based on the provided azimuth angle and then 
+ * samples from the corresponding multivariate normal distribution to generate the shoot parameters.
+ * Currently, the method focuses mainly on the south facing azimuth angle since that's the only angle 
+ * with available data. The method ensures that certain shoot parameters like the shoot length 
+ * and proportion of shoot accounting for half of curvature are non-negative and are within 
+ * acceptable bounds.</p>
+ * 
+ * @param azimuthAngle The azimuth angle in degrees (0-360) to determine the direction and corresponding distribution.
+ * @return An array containing the generated shoot parameters in the order of basal elevation, tangent difference, 
+ * normalized length, and curvature proportion.
+ */
+ 
+ private static double[] getShootParameters(float azimuthAngle)
+{
+	// Random south facing azimuth angle
+	int direction = 0;
+	if (azimuthAngle >= 340 || azimuthAngle < 20) {
+		direction = NORTH;
+	} else if (azimuthAngle < 160) {
+		direction = EAST;
+	} else if (azimuthAngle < 200) {
+		direction = SOUTH;
+	} else {
+		direction = WEST;
+	}
+	// Generate parameters from mulitvariate normal distribution
+	double[] shootParameters = shootMNDs[direction].sample();
+			
+	// Shoot length and proportion of shoot acounting for half of curvature cannot be negative
+	// and proportion accounting for half of curvature cannot be greater than one
+	while (shootParameters[2] < 0 || shootParameters[3] < 0 || shootParameters[3] > 1) {
+		shootParameters = shootMNDs[direction].sample();
+	}
+			
+	return shootParameters;
+}
+
+// Calculate length and tangent angle of each internode using the normalized length, difference in tangent angle and
+// proportion of length accounting for half of curvature for each shoot
+private static float[][] getInternodeParameters(float curvatureProportion, float normalizedLength, float tangentDifference)
+{
+	int maximalCurvatureInternodeNum = getMaximalCurvatureInternodeNum(curvatureProportion);
+	float[][] internodeParameters = new float[2][maxInternodeNum+1];
+		
+	for (int i = 1; i <= maxInternodeNum; i++) {
+		// Generate lengths of internodes
+		internodeParameters[0][i] = organSize[i][3] * normalizedLength;
+		// Generate angles between internodes
+		// Internodes are modeled as chords of two arcs, with each arc accounting for half of total curvature
+		if (i < maximalCurvatureInternodeNum) { 
+			internodeParameters[1][i] = tangentDifference / (2 * maximalCurvatureInternodeNum);
+		} else {
+			internodeParameters[1][i] = tangentDifference / (2 * (MAX_PHYTOMER_NUM - 1 - maximalCurvatureInternodeNum));
+		}
+	}
+	return internodeParameters;
+}
+
+/**
+ * Calculates the length and tangent angle of each internode based on the provided curvature proportion,
+ * normalized length, and tangent difference for each shoot.
+ *
+ * <p>The method determines the maximal curvature internode number based on the provided curvature proportion.
+ * It then uses this value, along with the normalized length and tangent difference, to generate the lengths 
+ * and angles between internodes. Internodes are modeled as chords of two arcs, with each arc accounting 
+ * for half of the total curvature.</p>
+ *
+ * @param curvatureProportion Proportion of length accounting for half of the curvature for each shoot.
+ * @param normalizedLength The normalized length of the internodes.
+ * @param tangentDifference Difference in tangent angle to be distributed among internodes.
+ * @return A 2D float array where the first row contains the lengths of internodes and the second row contains 
+ * the angles between internodes.
+ */
+private static float[][] getLeafParameters(float shootAzimuth)
+{
+	float[][] leafParameters = new float[3][maxInternodeNum+1];
+	for (int i = 1; i <= maxInternodeNum; i++) {
+		leafParameters[0][i] = getPetioleRotation(shootAzimuth);
+		leafParameters[1][i] = getPetioleDeclination();
+		leafParameters[2][i] = getLeafDeclination(leafParameters[1][i]);
+	}
+	return leafParameters;
+}
+
+/**
+ * Determines the internode number at the point of maximal curvature for a given shoot.
+ *
+ * <p>This method first checks for NaN values in the curvatureProportion parameter. If NaN is encountered,
+ * a warning is printed, and a value of -1 is returned to indicate an error. Otherwise, the method searches 
+ * for the internode number where the curvature proportion exceeds the given threshold. The method also 
+ * contains checks to warn if the result is -1 or exceeds the maximum allowable internode number.</p>
+ *
+ * @param curvatureProportion The proportion of curvature to be used in determining the point of maximal curvature.
+ * @return The internode number at the point of maximal curvature, or -1 if NaN is encountered or if no suitable 
+ *         internode number is found.
+ */
+private static int getMaximalCurvatureInternodeNum(float curvatureProportion) {
+    // Check for NaN input
+    if (Float.isNaN(curvatureProportion)) {
+        if (printFlag) { println("Warning: curvatureProportion is NaN."); }
+        return -1; // or some other value to indicate an error
+    }
+
+    int maximalCurvatureInternodeNum = MAX_PHYTOMER_NUM - 1;
+    for (int i = 0; i < MAX_PHYTOMER_NUM; i++) {
+        if (lengthProportions[i] > curvatureProportion) {
+            maximalCurvatureInternodeNum = i - 1;
+            break;
+        }
+    }
+
+    // Check for -1 result
+    if (maximalCurvatureInternodeNum == -1) {
+        if (printFlag) { println("Warning: maximalCurvatureInternodeNum is -1."); }
+    }
+
+    // Check for result beyond 20
+    if (maximalCurvatureInternodeNum > maxInternodeNum) {
+        if (printFlag) { println("Warning: maximalCurvatureInternodeNum is greater than maxInternodeNum."); }
+    }
+
+    return maximalCurvatureInternodeNum;
+}
+/*################################ Generating parameters for leaf #########################*/
+/**
+ * This class represents the utility functions and variables related to the determination of leaf parameters.
+ * Utility class for managing and processing leaf parameters.
+ */
+
+
+// Variables
+
+/** Mean elevation angle of vector normal to the leaf surface. */
+private static float ELEVATION_MEAN;
+
+/** Standard deviation of the vector normal to the leaf surface. */
+private static float ELEVATION_SD;
+
+/** Mean azimuth angle of north-facing leaves. */
+private static float AZIMUTH_NORTH_MEAN;
+
+/** Standard deviation of the azimuth angle for north-facing leaves. */
+private static float AZIMUTH_NORTH_SD;
+
+/** Mean azimuth angle of south-facing leaves. */
+private static float AZIMUTH_SOUTH_MEAN;
+
+/** Standard deviation of the azimuth angle for south-facing leaves. */
+private static float AZIMUTH_SOUTH_SD;
+
+
+
+/**
+ * Processes the data to populate the elevation and azimuth parameters for leaves. 
+ * Assumes a predefined data structure for the input source, `structuralVariationLeaf`.
+ */
+public static void processLeafParameterData()
+{
+	ELEVATION_MEAN = structuralVariationLeaf[0][1];
+	ELEVATION_SD = structuralVariationLeaf[0][2];
+	AZIMUTH_NORTH_MEAN = structuralVariationLeaf[1][1];
+	AZIMUTH_NORTH_SD = structuralVariationLeaf[1][2];
+	AZIMUTH_SOUTH_MEAN = structuralVariationLeaf[2][1];
+	AZIMUTH_SOUTH_SD = structuralVariationLeaf[2][2];
+}
+
+/**
+ * Generates and returns a value representing the petiole declination angle.
+ * <p>
+ * Currently, this method returns a static value of -45 degrees, but future implementations might be dynamic based on various conditions.
+ * </p>
+ * @return The petiole declination angle required to achieve the desired elevation for the vector normal to the leaf surface.
+ */
+public static float getPetioleDeclination()
+{
+	return -45;
+}
+
+/**
+ * Computes the leaf declination angle based on a given petiole declination.
+ * <p>
+ * The method uses a Gaussian distribution to derive the elevation of the vector normal to the leaf surface.
+ * Using this derived elevation and the provided petiole declination, the function then calculates the declination angle for the leaf.
+ * </p>
+ * 
+ * @param petioleDeclination The declination angle of the petiole in degrees.
+ * @return The declination angle for the leaf.
+ */
+public static float getLeafDeclination(float petioleDeclination)
+{
+	float normalElevation = rng.nextGaussian() * ELEVATION_SD + ELEVATION_MEAN;
+	float leafDeclination = -(90 - normalElevation) + petioleDeclination;
+	return leafDeclination;
+}
+
+/**
+ * Computes the petiole rotation angle required to achieve a desired leaf azimuth.
+ * <p>
+ * Depending on a randomly generated boolean value, the function chooses between north and south azimuth distributions to derive the azimuth angle for the leaf.
+ * The method then calculates the relative rotation angle needed for the petiole to achieve this leaf azimuth with respect to the provided shoot azimuth.
+ * </p>
+ * 
+ * @param shootAzimuth The azimuth angle of the shoot in degrees.
+ * @return The rotation angle for the petiole to achieve the desired leaf azimuth.
+ */
+public static float getPetioleRotation(float shootAzimuth)
+{
+	boolean dirSelector = rng.nextBoolean(); // Used to determine if distribution for north or south should be used
+	float leafAzimuth = 0;
+	if (dirSelector == true) {
+		leafAzimuth = rng.nextGaussian() * AZIMUTH_NORTH_SD + AZIMUTH_NORTH_MEAN;
+	} else {
+		leafAzimuth = rng.nextGaussian() * AZIMUTH_SOUTH_SD + AZIMUTH_SOUTH_MEAN;
+	}
+	float petioleRotation = shootAzimuth - leafAzimuth + 180; // Subtract leaf angle from angle of shoot to get relative angle for rotation
+	return petioleRotation;
+}

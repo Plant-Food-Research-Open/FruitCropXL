@@ -1,0 +1,1288 @@
+
+import static environment.*;
+import static plantParameters.*;
+import static modelOptions.*;
+import static initialConditions.*;
+import static plantBase.*;
+
+
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.util.Properties;
+import java.util.Map;
+import java.util.HashMap;
+     
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import de.grogra.rgg.Library;
+import io.github.fruitcropxl.config.Config;
+import de.grogra.pf.io.PropertyFileReader;
+
+import com.fasterxml.jackson.annotation.PropertyAccessor;
+import com.fasterxml.jackson.annotation.JsonAutoDetect.Visibility;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.dataformat.csv.CsvMapper;
+import io.github.fruitcropxl.output.util.StepwiseCsvWriter;
+import io.github.fruitcropxl.output.util.SchemaMetadataWriter;
+import java.util.Random;
+// At the top of BudAppleService (class level)
+global long RNG_SEED = 12345L;   // fixed seed for reproducibility
+global Random rng = new Random(RNG_SEED); 
+
+global Config CONFIG = Config.getInstance();
+/**
+ * The ID of this model given to the DHS Model Interface.
+ */
+global String MODEL_ID = "FruitCropModel";
+
+/** select here the scenario files to specify the simulation */
+/** The filename for the model data input file. 
+ * Config Module singleton instance for accessing parameters.
+ * Replaced during scenario looping - do not remove this marker comment
+ */
+
+/* default single shoot with apple virtual fruit and root for fast testing */
+global String FILE_NAME_MODEL_OPTIONS = "model.options.default.json";
+//global String FILE_NAME_MODEL_OPTIONS = "model.options.water.grid.example.json";
+//global String FILE_NAME_MODEL_OPTIONS = "model.options.dynamicApple.leafInspect.carbon.json";
+//global String FILE_NAME_MODEL_OPTIONS = "model.options.dynamicApple.leafInspect.pot.json";
+//global String FILE_NAME_MODEL_OPTIONS = "model.options.FOPS.water-6f96619c-87ab-448f-9977-139310de5906.json";
+//global String FILE_NAME_MODEL_OPTIONS = "model.options.MFDT.demo.json";
+//global String FILE_NAME_MODEL_OPTIONS = "model.options.default.dynamic.json";
+//global String FILE_NAME_MODEL_OPTIONS = "model.options.fieldRandomCanopy.json";
+//global String FILE_NAME_MODEL_OPTIONS = "model.options.empiricalRegression.beerLambert.json";
+
+
+/* Abiotic Tests */
+//global String FILE_NAME_MODEL_OPTIONS = "model.options.DAI.2012.12L.stormTest.json";
+//global String FILE_NAME_MODEL_OPTIONS = "model.options.FOPS-D34-SatDryTest.json";
+
+/* Apple model options */
+//global String FILE_NAME_MODEL_OPTIONS = "model.options.tallSpindle-D34.json";
+//global String FILE_NAME_MODEL_OPTIONS = "model.options.dynamicApple.json";
+//global String FILE_NAME_MODEL_OPTIONS = "model.options.FOPS-dynamic-twinning.json";
+
+/* FOPS related use cases */
+//global String FILE_NAME_MODEL_OPTIONS = "model.options.FOPS-D34.json";
+//global String FILE_NAME_MODEL_OPTIONS = "model.options.FOPS-2021-D34.json";
+//global String FILE_NAME_MODEL_OPTIONS = "model.options.FOPS-2023-D65.json";
+//global String FILE_NAME_MODEL_OPTIONS = "model.options.FOPS-2024-D24.json";
+//global String FILE_NAME_MODEL_OPTIONS = "model.options.FOPS-D84.json";
+//global String FILE_NAME_MODEL_OPTIONS = "model.options.FOPS.3D.root.json";
+//global String FILE_NAME_MODEL_OPTIONS = "model.options.UC3_MOT_tallSpindle_D60.json";
+//global String FILE_NAME_MODEL_OPTIONS = "model.options.UC3_HB_tallSpindle_D60.json";
+//global String FILE_NAME_MODEL_OPTIONS = "model.options.light.grid-003d4337-9f12-4e20-97b5-2bdb6cfec77a.json";
+//global String FILE_NAME_MODEL_OPTIONS = "batch-UC3-MOT/model.options.UC3.MOT-f242a03c-d6b8-4f07-9b45-f856bcb29c29.json";
+
+//global String FILE_NAME_MODEL_OPTIONS = "batch-singlePlant/model.options.DAI.2012.12L.json";
+//global String FILE_NAME_MODEL_OPTIONS = "batch-light/model.options.FOPS-0e773b4d-509a-4c7b-9dc0-bc530121164e.json";
+
+/* Grapevine model options */
+//global String FILE_NAME_MODEL_OPTIONS = "model.options.dynamicGrapevine.json";
+//global String FILE_NAME_MODEL_OPTIONS = "model.options.Sauvignon.blanc.dynamic.NZ.json";
+//global String FILE_NAME_MODEL_OPTIONS = "model.options.Sauvignon.blanc.NZ.json";
+//global String FILE_NAME_MODEL_OPTIONS = "model.options.PN.MA07.json";
+//global String FILE_NAME_MODEL_OPTIONS = "model.options.PN.MA07.2018.json";
+//global String FILE_NAME_MODEL_OPTIONS = "model.options.Sauvignon.blanc.SV.json";
+/* Historical calibration – Literature-based grapevine */
+//global String FILE_NAME_MODEL_OPTIONS = "model.options.ANTONY.2010.json";
+//global String FILE_NAME_MODEL_OPTIONS = "model.options.DAI.2012.3L.json";
+//global String FILE_NAME_MODEL_OPTIONS = "model.options.DAI.2012.12L.json";
+//global String FILE_NAME_MODEL_OPTIONS = "model.options.Bobeica.2013.json";
+//global String FILE_NAME_MODEL_OPTIONS = "model.options.Rossouw.CT.S2.json";
+//global String FILE_NAME_MODEL_OPTIONS = "model.options.Rossouw.CT.S1.json";
+
+/* Fruit-level simulations / virtual fruit */
+//global String FILE_NAME_MODEL_OPTIONS = "model.options.virtualFruit.json";
+//global String FILE_NAME_MODEL_OPTIONS = "model.options.berry.population.json";
+//global String FILE_NAME_MODEL_OPTIONS = "model.options.DAI.2012.12L.singleBerry.json";
+//global String FILE_NAME_MODEL_OPTIONS = "model.options.DAI.2012.3L.singleBerry.json";
+
+/* Canopy architecture optimization */
+//global String FILE_NAME_MODEL_OPTIONS = "model.options.optimal.canopy.architecture.smallShoot.json";
+//global String FILE_NAME_MODEL_OPTIONS = "model.options.optimal.canopy.architecture.bigShoot.json";
+
+/* Root system / belowground modules */
+//global String FILE_NAME_MODEL_OPTIONS = "model.options.singleRoot.json";
+//global String FILE_NAME_MODEL_OPTIONS = "model.options.3D.root.json";
+//global String FILE_NAME_MODEL_OPTIONS = "model.options.FOPS.3D.root.json";	
+
+
+/* Surrogate / test / miscellaneous */
+//global String FILE_NAME_MODEL_OPTIONS = "model.options.photosynthesisTest.json";
+//global String FILE_NAME_MODEL_OPTIONS = "model.options.singleLeaf.json";
+// global String FILE_NAME_MODEL_OPTIONS = "model.options.HGU.spur.70.json";
+// global String FILE_NAME_MODEL_OPTIONS = "model.options.HGU.cane.20.json";
+//global String FILE_NAME_MODEL_OPTIONS = "HGU/spur/2025-04-08_11-01-23/model.options.HGU.spur-001ddf95-b439-40a5-94e5-af9b236c8c3c.json";
+
+
+
+/** The filename for the INITIAL CONDITIONS file.
+ */
+global String FILE_NAME_INITIAL_CONDITIONS;
+
+/** The filename for the PLANT parameter file.
+ * Update: It is now read in from a file in modelInput and overrides this assignment.
+ */
+global String FILE_NAME_PLANT_PARAMETERS; // = "plant.parameters.SB.json";
+
+/** The filename for the SOIL parameter file.
+ * Update: It is now read in from a file in modelInput and overrides this assignment.
+ */
+global String FILE_NAME_SOIL_PARAMETERS; // = "soil-parameters-pot-4.json";
+
+/** The filename for the phenology parameters file.
+ * Update: Read from phenology_file in modelInput scenario_required_files
+ */
+global String FILE_NAME_PHENOLOGY_PARAMETERS;
+
+/** Optional layout-control file for optimal-canopy stacked architecture. */
+global String FILE_NAME_OPTIMAL_CANOPY_ARCHITECTURE = "";
+global boolean useOptimalCanopyArchitectureFile = false;
+
+global String optimalCanopyLayoutMode = "layer_row_grid";
+
+global boolean optimalCanopyDeriveNrRowsFromLayers = true;
+global int optimalCanopyLayerCount = 1;
+global int optimalCanopyRowsPerLayer = 1;
+
+global String optimalCanopyRowYSpacingMode = "use_rowDistance";
+global String optimalCanopyLayerHeightMode = "wood_length_linear";
+
+/** Cordon/trunk support height in m for the first optimal-canopy layer. */
+global double optimalCanopyWoodLengthBase = 0.95;
+/** Cordon/trunk support height increment in m between optimal-canopy layers. */
+global double optimalCanopyWoodLengthStep = 0.95;
+/** Optional explicit cordon/trunk support heights in m by layer. */
+global double[] optimalCanopyWoodLengthValues = new double[0];
+
+global String optimalCanopyStripSpacingMode = "derived_block_width";
+global String optimalCanopyCloneSpacingMode = "derived_block_width";
+global String optimalCanopyDensityCalculationMode = "derived_block_width";
+
+global boolean optimalCanopyStaggerAlternateRows = false;
+global double optimalCanopyAlternateRowXOffsetFraction = 0.5;
+
+global String optimalCanopyLegacyMode = "none";
+global boolean optimalCanopyUseLegacyScenarioPreset = false;
+
+global boolean optimalCanopyWarnIfNrRowsMismatch = true;
+global boolean optimalCanopyPrintEffectiveConfig = true;
+
+/**
+ * The output table name used for simulation results export.
+ * <p>
+// * Typically constructed as: "Plant-level_" + splitAndCombine(FILE_NAME_MODEL_OPTIONS, 3) + "_" + scenario + ".csv"
+ * to uniquely identify output files for each model scenario.
+ * </p>
+ */
+global String outputTable_name;
+
+/**
+ * The unique simulation UUID assigned to this simulation run.
+ * <p>
+ * Used to group or identify all files and objects created during a specific simulation batch.
+ * This UUID is generally set at the start of the simulation and shared across all modules and objects.
+ * </p>
+ */
+global String simUUID;
+
+/********************************************************************  ****  
+	configurations variables which will be overwritten by the scenario files 
+***********************************************************************/
+
+/* This part is mainly for the boolean variables that used to configure different modules/file selections */
+// ! the update.sh script reads the model input data for determining the files, not the value here
+global String species = "grapevine";
+global String initiation_method = "ArchReader";
+/** Leaf blade geometry species. Null/empty means use the physiological species. */
+global String leafShapeSpecies = null;
+/** Active leaf blade geometry species after model-options normalization. */
+global String activeLeafShapeSpecies = "grapevine";
+/** 
+ * Select the initiation file from the following list:
+ * ! standard
+ * ! structuralVariation
+ * ! ArchReader
+ * ! reconstruction
+ * ! optimal_canopy_architecture
+ */
+ 
+/**
+ * Normalized fruit-service selector.
+ * Accepted values: simpleFruit, complexBerry, virtualFruit.
+ */
+global String fruitModule = "virtualFruit";
+
+/** If true, the ArchiSimple root module with detail 3D root will be used. If false, the simple root module will be used. */
+global boolean useComplexRoot = false;
+/** If true, complex leaf shape (leaf facet) will be used. If false, simple leaf shape (one big individual leaf) will be used. */
+global boolean useComplexLeaf = false;
+
+/** reads soil water from soil water balance model. */
+global boolean useSoilWaterBalanceModel = false;
+
+/** 
+ * Select a special scenario case by specifying one of the following options:
+ * - null: No special scenario (default).
+ * - berry_population: Special scenario related to fruit population.
+ * - optimal_canopy_architecture: Special scenario for optimal canopy architecture.
+ * - ideal_vine: Special scenario for an ideal vine.
+ */
+global String special_scenario = null;
+
+/* Field random canopy reconstruction options. Units: lengths in m, LAD in m2 m-3. */
+global String fieldCanopy_sourceMode = "field";
+global String fieldCanopy_dataRootMode = "model_input"; // Legacy placeholder; current reader always uses Model_input/<fieldCanopy_dataDir>.
+global String fieldCanopy_dataDir = "field_random_canopy";
+global String fieldCanopy_centres_file = "centres_of_patches.csv";
+global String fieldCanopy_DTM_file = "DTM_vertices.csv";
+global String fieldCanopy_layerFilePattern = "results_per_height_tree_%d.csv";
+global String fieldCanopy_plotFile = null;
+global String fieldCanopy_plotInputFolder = "InputForGroIMP";
+global int fieldCanopy_startingPatch = 0;
+global int fieldCanopy_endingPatch = 0;
+global int fieldCanopy_patchStep = 1;
+global double fieldCanopy_gridLength = 3.0;
+global double fieldCanopy_gridWidth = 3.0;
+global double fieldCanopy_layerDepth = 0.1;
+global double fieldCanopy_meanLeafLength = 0.10;
+global double fieldCanopy_fractionBorder = 0.0;
+global boolean fieldCanopy_randomizeZWithinLayer = false;
+global boolean fieldCanopy_useTerrain = false;
+global boolean fieldCanopy_createTerrainPatch = false;
+global double fieldCanopy_fieldXMin = 0.0;
+global double fieldCanopy_fieldXMax = 0.0;
+global double fieldCanopy_fieldYMin = 0.0;
+global double fieldCanopy_fieldYMax = 0.0;
+global boolean fieldCanopy_exportObj = false;
+global boolean fieldCanopy_exportOnly = false;
+global boolean fieldCanopy_usePatchAreaForFocalArea = true;
+global boolean fieldCanopy_allowCTRAM = false;
+global int fieldCanopy_maxLeavesPerLayer = 20000;
+global int fieldCanopy_totalLeafNumber = 0;
+global double fieldCanopy_totalLeafArea = 0.0;
+global double fieldCanopy_targetLeafArea = 0.0;
+global int fieldCanopy_patchCountUsed = 0;
+
+ /**
+  *  thermalUnit is the method for calculate the thermal time
+  *  for the moment, we have three methods:
+  *  1. growing degree days; 2. thermal optimal days; 3. day (less used) 
+  *  4. turgor-time (to be added) has found some reference for grapevine, 
+  * 	assume the turgor loss point is similar as P50 (or 0.9* P50, or determined value)
+  *  	the maximum turgor pressure is assumed to be the |osmotic potential|, 
+  * 	turgor time can be calculated by this (mainly for leaf, internode, and roots (needs to check the rate))
+  */
+global String thermalUnit = "thermalDay";
+
+/**********************************************/
+/* this part is mainly control certain functionalities in the model; does not change files*/
+
+/**
+ * This variable controls the method used for calculating organ growth in the model. It defines which factors 
+ * (temperature, water, carbon, and nitrogen) limit the growth rate of plant organs. The value of this variable 
+ * determines the constraints applied during organ growth simulation.
+ *
+ * The available methods are:
+ * <ul>
+ *     <li><b>TempLimited</b>: Growth is limited only by temperature without considering water, carbon, or nitrogen limitations.</li>
+ *     <li><b>TempWaterLimited</b>: Growth is limited by both temperature and water availability, but not by carbon or nitrogen.</li>
+ *     <li><b>TempWaterCarbonLimited</b>: Growth is limited by temperature, water, and carbon availability, but not by nitrogen.</li>
+ *     <li><b>TempWaterCarbonNitrogenLimited</b>: Growth is limited by temperature, water, carbon, and nitrogen availability.</li>
+ * </ul>
+ *
+ * The variable allows flexibility in how organ growth is calculated, enabling the model to be adjusted based on the
+ * constraints relevant for different simulation scenarios (e.g., varying environmental conditions or resource availability).
+ * For keeping the parameters more stable, we do not provide the options for 
+ * the combinations of TempCarbonLimited as this would require changing the Lmax value which consider the water potential limitations
+ * @TODO nitrogen limitations are yet to be added
+ * Default is TempWaterCarbonLimited
+ */
+global String organGrowthMethod = "TempLimited";
+
+/*********** toggle around the main functionality ******************************/
+ /**
+  * the following functionalities are in sequence, 
+  * the later ones are only available when the up ones are true
+  *  
+  * ! light interception
+  * ! potential photosynthesis and transpiration without water stress 
+  * ! actual photosynthesis and transpiration with water stress 
+  * ! carbon allocation and carbohydrate reserve dynamics. 
+  
+  * if you turn on globalArchitecture =false or organGrowthMethod.equals("TempLimited") = true;	 
+  * Organ will still grow in wegith or size even light interception and others turned off. 
+  * This is mainly for testing potential growth
+  */
+/** Trigger light interception or not. */
+global boolean calcLightInterception = true; 
+/** Calculate potential photosynthesis and transpiration without water stress. */
+global boolean calcPotential_PT = true;  		
+/** Calculate actual photosynthesis and transpiration with water stress. */
+global boolean calcActual_PT = false; 
+/** Calculate carbon allocation and carbohydrate reserve dynamics. */
+global boolean calcCarbonAllocation = false;
+
+global boolean lightInterceptionComputed;
+/*********** light environment ******************************/
+/**
+ * Use turtle isotropic diffuse radiation source or with weight 72 panel cloudy day condition.
+ */
+global boolean useTurtleRadiation = false;
+global boolean useDiffuseRadiation = true;
+global boolean useDirectRadiation = true;
+
+
+/***********dynamic growth******************************/
+/** Control use of global architecture or dynamic bud growth. */
+global boolean useStaticArc = true;
+/** Enable transitions between phenology stages of bud/fruit. */
+global boolean usePhenology = false;
+/** Estimate yields based on weather conditions and carbon status. */
+global boolean useYieldEst = false;
+/** Prune shoots and reset cordons on a specified day of the year. */
+global boolean usePruning = false;
+
+/***********architecture aspect******************************/
+/** Generate random values for azimuth angle, basal elevation angle, and internode lengths and angles, based on initiation_structuralVariation.rgg. */
+global boolean useStructuralVariation = false; 
+/** Use wire lifting to reposition shoots. */
+global boolean useShootPositioning = false;
+/** Optimize leaf angles. */
+global boolean useLeafAngleOpt = false;
+
+/**links with the xeg data reader**********************/
+/** Add artificial leaves to the stem. */
+global boolean addLeaves = false;      
+/** If true, scale initialized leaf rank-size templates to PlantBase.meanLeafAreaTarget_m2. */
+global boolean scaleLeafSizeToTargetMeanLeafArea = false;
+/** Add artificial buds to the stem. */
+global boolean addBuds = false;
+
+
+/***********carbon competition******************************/
+/** Set up for simulating individual berries. */
+global boolean inputVesselConditions = false;
+/** Use detail carbon transport model or not; normally a central carbon pool is enough for symmetric canopy. */
+global boolean useCTRAM = false;
+/** If true, trophic competition will be used to control axis organogenesis. */
+global boolean useTrophicCompetition = false;
+
+/** Apple annual internode biomass resolver mode from model options: density|leafAllometry. */
+global String annualInternodeBiomassMode = "density";
+
+/***********future data assimilation aspect******************************/
+/** Future scenarios for assimilating real-time data. */
+global boolean useDataAssimilation = false;
+
+
+/** ##################### some settings for debugging and visualization ####################*/
+/**
+/** Use chart to display instant simulation results. 
+	You can specify which chart to display in chart.rgg */
+global boolean useChart = false;
+
+/** Use useOutputTable to output the simulation results. 
+	You can specify which table to display in table.rgg 
+	OutputTable may increase the simulation time as it will 
+	conduct quite number of searchs for variables*/
+global boolean useOutputTable = false;
+
+/** Use Object to Json to output the simulation results. 
+	This method can output all the variables in an object that is public. 
+	It has flexibility to output individual object as well.  
+	*/
+global boolean useOrganArrays = false;
+
+/** Output information for individual berries. */
+global boolean outputIndividualFruit = false;
+
+/** Output information for individual berries. */
+global boolean outputIndividualLeaf = true;
+
+/** Output information for individual internodes. */
+global boolean outputIndividualInternode = true;
+
+/** Organ-array output interval in days. */
+global int outputOrganArrayEveryNDays = 1;
+
+/** Hour of day when scheduled organ-array outputs are written. */
+global int outputOrganArrayHour = 12;
+
+/** Write organ-array output at harvest even when it is off the normal interval. */
+global boolean outputOrganArrayAtHarvest = true;
+
+/** Write leaf-expansion and actual-leaf-summary diagnostic tables. */
+global boolean outputLeafGrowthDiagnostics = false;
+
+/** Deprecated compatibility alias for outputLeafGrowthDiagnostics. */
+global boolean debugLeafExpansion = false;
+
+/** Sampling interval for leaf expansion debug rows (steps, default 24 = daily with hourly DT). */
+global int debugLeafExpansionSampleEvery = 24;
+
+/** Write Apple development event diagnostic tables. */
+global boolean outputAppleDevelopmentDiagnostics = false;
+
+/** Write explicit carbon-transport mass-balance diagnostics. */
+global boolean outputCarbonTransportDiagnostics = false;
+
+/** Write plant hydraulic-solver diagnostics to a separate CSV stream. */
+global boolean outputWaterFluxSolverDebug = false;
+
+/** Control whether output 3DScene file and how often by using step % outputFreq3DScene, and 
+	make delay the first output by (step % outputFreq3DScene)/2 */
+global int outputFreq3DScene = 0;
+
+//Exports the current 3D scene to the specified target file and format. Check export3DScene for a subgraph 3d export. Currently supported formats of target files: - dxf - x3d - mtg - stl - ply - obj - tex - webgl
+global String output3DSceneFormat = "obj";
+
+/** Control whether output gsz file or not*/
+global boolean saveGsz = false;
+
+/**
+ * Determines whether an XEG file should be output at a given simulation step.
+ *
+ * The first output is delayed by (outputXEG / 2) steps, and all subsequent outputs follow
+ * at intervals of outputXEG steps, shifted by this initial delay.
+ * output format is year-dayOfYear-hourOfDay
+ * @param step       The current simulation step.
+ * @param outputXEG  The interval at which XEG output occurs.
+ * @return           {@code true} if an XEG file should be output at this step, {@code false} otherwise.
+ */
+static boolean shouldOutputXEG(int step, int outputFreq3DScene) {
+    if (outputFreq3DScene <= 0) {
+        return false; // No output if interval is zero or negative
+    }
+
+    int firstDelay = Math.max(1, outputFreq3DScene / 2); // Calculate first delay
+
+    if (step == firstDelay) {
+        return true; // First delayed output
+    }
+
+    return (step > firstDelay) && ((step - firstDelay) % outputFreq3DScene == 0);
+}
+
+
+/** ##################### some settings for debugging and visualization ####################*/
+/**
+ * whether should continue running the simulation even in the presence of errors
+ during optimization.
+ */
+global boolean debug = false;
+global boolean printFlag = true;
+global boolean shouldContinue = false;
+/**
+ * reduce the number of gridclones by using the boolean variable of runScenarioTest
+ */
+global boolean useShadingFactor = false;
+/** set fruit visibility, no need to visualize the fruit under headless mode
+	in some cases, fruit could potentially overlap with the leaf and affect 
+	photosynthesis if visualized*/
+global boolean fruitVisibility = true;
+
+global boolean demoVisualization = false;
+/**For DHS platform, it is easier to just store one step of results each time, 
+and then in the database to combine all step wise output into a whole file */
+global boolean stepwiseOutput = false;
+
+/* #####################  PATH DEFINITION  ####################*/
+/* #####################  loading parameters  ####################*/
+/**
+ * Main path and folder structure for the model folder.
+ * The MAINPATH is stored and read from the prop file in the GroIMP installing folder.
+ * One can add different paths for different models.
+ */
+global String MAINPATH = Library.getWD() + "/../";
+global String PATH_INPUT = MAINPATH + "Model_input/";
+global String PATH_SCENARIOS = MAINPATH + "Model_scenarios/";
+global String PATH_OUTPUT = MAINPATH + "Model_output/";
+
+/**
+ * PATH INITIATION.
+ * Path properties are stored in the GroIMP installing folder.
+ * If not set previously, you can set it in the following pathInit method.
+ * Just change the path in the writeProp.setProperty.
+ */
+global String propFile = "config.properties.txt";
+global Properties readProp = new Properties();
+
+/**
+ * Initializes path variables, including MAINPATH, PATH_INPUT, PATH_SCENARIOS,
+ * PATH_SNAPSHOT, PATH_OUTPUT, and propFile. 
+ * The paths are stored in the GroIMP installation folder.
+ * You can set the paths in this method by changing the values in writeProp.setProperty.
+ */
+protected static void pathInit() {
+	println(System.getProperty("user.dir")); // Relative to GroIMP installation
+	// Create new properties file in GroIMP directory     
+	Properties writeProp = new Properties();
+	OutputStream output = new FileOutputStream(propFile);
+	writeProp.setProperty("fruitCropModel.dir", "/var/model/");
+	writeProp.store(output, null);	 
+}  
+
+/**
+ * Updates the MAINPATH variable based on the current working directory (CWD).
+ * It extracts the parent directory of the CWD (normally is the script folder) and sets it as the new MAINPATH.
+ * Note: Replace 'getWD()' with the actual method to retrieve the current working directory.
+ */
+static void updateMainPath() {
+    String currentPath = getWD();  // Replace this with your actual getWD() method
+   // println("current path: " + currentPath);
+
+    char lastChar = currentPath.charAt(currentPath.length() - 1);
+
+    if (lastChar == '/' || lastChar == '\\') {
+        currentPath = currentPath.substring(0, currentPath.length() - 1); // Remove the trailing slash if present
+    }
+
+    int lastSlashIndex = Math.max(currentPath.lastIndexOf('/'), currentPath.lastIndexOf('\\'));
+
+    if (lastSlashIndex != -1) {
+        MAINPATH = currentPath.substring(0, lastSlashIndex + 1);  // +1 to include the slash
+    } else {
+        // Handle the case where a last slash doesn't exist
+        MAINPATH = currentPath;
+    }
+    
+   // println("MAINPATH path: " + MAINPATH + " lastSlashIndex: " + lastSlashIndex);
+}
+
+/**
+ * Initializes the path variables for the model based on configuration files.
+ * Reads the 'config.properties.txt' file to retrieve path information or initializes it if not found.
+ */
+static void initPath() {
+ 	boolean isPropertyFile = false;
+	File f = new File(System.getProperty("user.dir") + "/" + propFile);
+	isPropertyFile = f.isFile(); 
+	println("System usr.dir path: " + System.getProperty("user.dir"));
+	//println(System.getProperty("user.dir") + "/" + propFile); //works in init() in main
+	//If f does not exist initially—as in your scenario where the file represented 
+	//by the File object has not been created or does not exist at the 
+	//specified path—the method f.isFile() will return false.
+	if(!f.isFile()) 
+	{ 
+		println("initiating path");
+		pathInit(); 
+	} //only need to run once if the path property not been set before
+	
+	readProp.load(new FileInputStream(f));
+	MAINPATH = readProp.getProperty("fruitCropModel.dir"); 
+    
+	// Check if MAINPATH is not "/var/model/"
+    if (!MAINPATH.equals("/var/model/") && !isPropertyFile) {
+      updateMainPath();
+    }
+	println("Model MAINPATH is "  + MAINPATH);
+	
+	assignPath();
+}   
+
+/** assign the path after getting the main path*/
+static void assignPath() {
+	PATH_INPUT = MAINPATH + "Model_input/";
+	PATH_SCENARIOS = MAINPATH + "Model_scenarios/";
+	PATH_OUTPUT = MAINPATH + "Model_output/";
+	
+	
+}
+/************* simulation controls ******************************/
+/* ###############################################################  
+	simulation controls variables
+	the time and field set up variables will be overwritten by model input
+	##############################################################*/
+
+/**
+ * Whether to input environment conditions or not, causing differences in model calculations.
+ */
+global boolean inputEnvironmentCondition = true;
+
+/**
+ * Whether to use the dhs systems
+ */
+global boolean useDHSsystem = false;
+
+/**
+ * Whether to input soil water content or soil water potential.
+ */
+global boolean inputSoilWaterPotential = true;
+/**
+ * Method to calculate wood biomass (0 for direct input, 1 for proportion, 2 for volume).
+ */
+global int woodBiomassCalcMethod = 0;
+/**
+ * Whether to input leaf N content or calculate it from N fractions.
+ */
+//global boolean inputLeafN = true;
+
+/**
+ * Whether to calc root nitrogen uptake. this does not enable the full nitrogen dynamic calculation.
+ */
+global boolean calcNUptake = true;
+
+/** Mode for trait assignment:
+ *  - "fixed": static per-layer values (Narea_*, SLA_*)
+ *  - "dynamic_Prieto": Nm(t) decline with thermal time, LMA regression on PPFD
+ *  - "dynamic_Bertheloot": placeholder for alternative schemes
+ */
+global String nitrogenMode = "fixed";
+
+/** Canonical light-interception backend requested by model options. */
+global String lightInterceptionModeRequested = "cpu";
+/** Canonical backend currently selected after explicit fallback/overrides. */
+global String lightInterceptionModeResolved = "cpu";
+/** True when a model-options file explicitly selected the canonical mode. */
+global boolean lightInterceptionModeExplicit = false;
+/** True when the deprecated useFluxLightModel key supplied the requested mode. */
+global boolean lightInterceptionLegacyModeExplicit = false;
+/** Optional validation-scenario override applied before model-options loading. */
+global String lightInterceptionValidationModeOverride = null;
+/** Process-wide guard for the deprecated-key warning. */
+global boolean lightInterceptionLegacyWarningPrinted = false;
+/** Optional regression or surrogate model artifact, resolved relative to Model_input. */
+global String lightInterceptionModelFile = null;
+/** Optional feature/response manifest, resolved relative to Model_input. */
+global String lightInterceptionFeatureManifestFile = null;
+/** Optional prescribed-light input, resolved relative to Model_input. */
+global String lightInterceptionInputFile = null;
+/** Stop on missing, ambiguous, non-finite, or unsupported reduced-backend data. */
+global boolean lightInterceptionStrict = true;
+/** Optional canonical backend selected only after an explicitly reported failure. */
+global String lightInterceptionFallbackMode = "cpu";
+/** Provider/model identifier reported for reproducibility when supplied by an asset. */
+global String lightInterceptionBackendVersion = null;
+/** SHA-256 checksum of the active model/input asset when available. */
+global String lightInterceptionAssetChecksum = null;
+/** Fatal loader diagnostic checked outside the compatibility loader catch boundary. */
+global String lightInterceptionConfigurationError = null;
+/** Deprecated runtime alias retained only for saved-project and unit-test compatibility. */
+global boolean useFluxLightModel = false;
+
+/** True for the dedicated leaf gas-exchange scenarios that share imposed light handling. */
+public static boolean isLeafGasExchangeTestScenario() {
+	return "photosynthesisTest".equals(special_scenario) || "singleLeaf".equals(special_scenario);
+}
+
+/**
+ * True only when the whole-plant hydraulic solve is intentionally bypassed.
+ * singleLeaf shares the light/test leaf path but retains its existing plant hydraulics.
+ */
+public static boolean isLeafHydraulicBypassTestScenario() {
+	return isLeafGasExchangeTestScenario() && "photosynthesisTest".equals(special_scenario);
+}
+/**
+ * Show text labels with leaves and organs indicating fraction of potential biomass.
+ */
+global boolean showLabels = false;
+/**
+ * Take snapshots during simulation?
+ */
+global boolean snapShot = false;
+/**
+ * Toggles leaf senescence (falling of leaves).
+ */
+global boolean leafSenescence = false;
+/** Enable mature leaf self-pruning from a rolling leaf carbon balance. */
+global boolean enableCarbonDeficitLeafRemoval = false;
+/** Rolling leaf carbon-balance window length (calendar days). */
+global double leafCarbonDeficitWindowDays = 10.0;
+/** Removal threshold for rolling leaf self-carbon balance (mg C leaf-1 window-1). */
+global double leafCarbonDeficitBalanceThresholdMgC = 0.0;
+/** Required populated fraction of the rolling carbon-balance window before removal. */
+global double leafCarbonDeficitMinValidFraction = 0.95;
+/** Mature age multiplier for removal eligibility; 1.0 means age >= te. */
+global double leafCarbonDeficitMatureAgeFactor = 1.0;
+/** Hour of day when mature carbon-deficit leaf removal is applied. */
+global int leafCarbonDeficitRemovalHour = 23;
+/** Minimum plant leaf area retained by carbon-deficit removal guard (m2 plant-1). */
+global double leafCarbonDeficitMinPlantLeafArea = 0.05;
+/** Set true when carbon-deficit leaf removal changes topology and light must rebuild. */
+global boolean carbonDeficitLeafRemovalOccurred = false;
+/**
+ * Determine whether or not to run the light model based on leaf area (equals zero).
+ */
+global boolean runLightModel = true;
+/**
+ * Continue running the simulation even in the presence of errors during optimization.
+ */
+global boolean continueRunning = true;
+
+/**
+ * using PAR sensors to determine relative light penetration or not. 
+ */
+global boolean useLightSensors  = true; 
+
+
+/**
+ * Fruit simulation scenarios: whether to account for fruit skin transpiration.
+ */
+global boolean berrySkinTranspiration = true;
+/**
+ * Fruit simulation scenarios: whether to allow cell wall extension.
+ */
+global boolean cellExtension = true;
+/**
+ * Fruit simulation scenarios: whether to calculate cell wall extensibility (false uses a constant value).
+ */
+global boolean calcPhi = false; 
+
+/** Associate plants to tiles. If true, each plant has a certain number of tiles; else, one soil layer. */
+global boolean associatePlantsToTiles = true;
+
+/** Choose whether to keep the table contents or not. */
+global boolean keepTable = false;
+/** Running control scenario. */
+global int scenario = 0;
+/** Additional running control scenario. */
+global int scenario2 = 0;
+/**
+ * Scale factor for the unit of organ size and length in the measurement file (default: 0.01 for meters).
+ */
+global double coordinateScale = 0.01;
+
+
+/**
+ * Threshold for total radiation intensity at the horizontal plane.
+ * Below this value, there may be errors in water flux functions.
+ */
+const float LIGHT_THRESHOLD = 50;
+// Put these near your other globals so they persist across steps
+// Warn-once flags
+global boolean warnedRB   = false;  // RootBase
+global boolean warnedFR   = false;  // Fine root
+global boolean warnedSoil = false;  // Soil
+global boolean warnedTrunk = false;  // trunk
+
+/* Keep the time variable here and moved the field configuration to model input */
+/** Timestamp with year, dayOfYear and hourOfDay in ISO date-time format. */
+global String timestamp;
+/** Current year in the simulation. */
+global int year = START_YEAR;
+/** Number of days simulated. */
+global int day = 0;
+/** Day of the year. */
+global int dayOfYear = START_DAY;
+/** days Since Winter Solstice to unify north and south hemisphere*/
+global int daysSinceWinterSolstice;
+/** Current hour; in daily mode, it is constant at 12 o'clock. */
+global int hourOfDay = 0;
+/** Check the time of the day, whether it is daytime or nighttime. */
+global boolean daytime = false;
+/** Thermal time counter in degree days. */
+global double tt;
+/** Time at which the simulation should stop irrespective of any harvests. Default is 1 day */
+global int halt = 1;
+/** Time step for the model, using hourly step.*/
+global float DT = 1/24f;
+/** Counting the simulation steps. */
+global int step = 0;
+
+
+
+/** Number of tiles per plant per edge (e.g., nrTiles=3 means 3*3=9 tiles per plant). */
+global int nrTiles = 1;
+/** Total bud number. */
+global float totalBudNum = 1f;
+/** Bud burst number. */
+global float budBurstNum = 0;
+/** Flowering number. */
+global float floweringNum = 0;
+/** Veraison number. */
+global float veraisonNum = 0;
+
+
+/** Number of plants not in the border per species. */
+global long focalPlants;
+/** Total ground area for the whole scene. */
+global double totalArea;
+/** Area containing focal plants per species. */
+global double focalArea;
+/** Population density (plants / m2) per species. */
+global double dens;
+/** Number of grid clones along the row. */
+global int cloneX = 3;
+/** Number of grid clones perpendicular to the row direction. */
+global int cloneY = 3;
+/** Coordinates of the plant at the far edge of the field, used to determine weed area in init(). */
+global double borderX;
+global double borderY;
+
+/** Light model used for simulation. */
+global LightModel lm;
+/** GPU LIGHT flux model. */
+global FluxLightModel FluxLM;
+/** Total number of light rays emitted by light sources. */
+global int rayCount = 10000000; // 10 million rays
+/** Maximum number of ray reflections/transmissions. */
+global int depth = 4;
+/** Initial value for carbon potential in the carbon transport model. */
+const float Initial_cp = 0.001;
+/** Total soil depth in meters. */
+global double totalSoilDepth = 1;
+
+
+/* ###############################################################  
+					Light Parameters 
+##############################################################*/
+/** Reflectance of PAR by leaves and stem. */
+global double reflectancePAR = 0.06;
+/** Transmittance of PAR by leaves. */
+global double transmittancePAR = 0.07;
+/** Reflectance of red light by leaves and stem. */
+const double reflectanceRed = 0.04;
+/** Transmittance of red light by leaves. */
+const double transmittanceRed = 0.03;
+/** Reflectance of far-red light by leaves and stem. */
+const double reflectanceFarRed = 0.38;
+/** Transmittance of far-red light by leaves and stem. */
+const double transmittanceFarRed = 0.45;
+
+/** Phong shader for light properties. */
+const Phong LightShader = new Phong().(setDiffuse(new RGBColor(reflectancePAR, reflectanceRed, reflectanceFarRed)), 
+                                      setDiffuseTransparency(new RGBColor(transmittancePAR, transmittanceRed, transmittanceFarRed)));
+
+/** Phong shader for opaque light properties. */
+const Phong LightOpaqueShader = new Phong().(setDiffuse(new RGBColor(reflectancePAR + transmittancePAR,
+                                                               reflectanceRed + transmittanceRed,
+                                                               reflectanceFarRed + transmittanceFarRed)), 
+                                            setDiffuseTransparency(new Graytone(0)));
+
+                                             
+const Phong AdaxialShader = new Phong().(setDiffuse(new RGBColor(reflectancePAR, reflectanceRed, reflectanceFarRed)), 
+                                      setDiffuseTransparency(new RGBColor(transmittancePAR, transmittanceRed, transmittanceFarRed)));
+
+
+const Phong AbaxialShader = new Phong().(setDiffuse(new RGBColor(reflectancePAR * 1.2, reflectanceRed, reflectanceFarRed)), 
+                                      setDiffuseTransparency(new RGBColor(transmittancePAR*1.2, transmittanceRed, transmittanceFarRed)));
+
+
+const SideSwitchShader leafSideSwitchShader = new SideSwitchShader(AdaxialShader, AbaxialShader);
+
+
+/**
+ * Understory optical properties (diffuse reflectance / transmittance) used by GroIMP {@link Phong} shaders.
+ *
+ * <p><b>Band definitions in this model:</b></p>
+ * <ul>
+ *   <li><b>PAR</b>: 400–700 nm</li>
+ *   <li><b>Red</b>: ~600–700 nm (proxy band for phytochrome-related R)</li>
+ *   <li><b>Far-red</b>: ~700–800 nm (proxy band for phytochrome-related FR)</li>
+ * </ul>
+ *
+ * <p><b>Literature basis for reflective films:</b> In orchards with traditional grass ground cover,
+ * reflected PAR is typically ~5–10%, while reflective ground covers can increase reflected PAR
+ * up to ~30–40% of incoming PAR.</p>
+ *
+ * <p><b>Reference:</b> Bastías, R.M. &amp; Corelli-Grappadelli, L. (2012).
+ * <i>Light quality management in fruit orchards: physiological and technological aspects</i>.
+ * Chilean Journal of Agricultural Research 72(4):574–581.
+ * (See section “Light reflection management”, p. 578: grass 5–10% vs reflective covers 30–40% PAR.)</p>
+ *
+ * :contentReference[oaicite:0]{index=0}
+ */
+
+/* =========================
+ * A) Typical NZ apple-orchard floor (grass/soil mix)
+ * ========================= */
+/**
+ * Diffuse reflectance of PAR from a typical orchard floor (grassed alley / soil mix).
+ *
+ * <p>Default is set near measured grass-strip PAR reflection (~0.066) reported by Blanke (2008).
+ * You may tune this upward (e.g., 0.07–0.10) if your floor is brighter (dry soil, short turf) or
+ * downward if darker (wet soil, dense green cover).</p>
+ *
+ * @see Blanke (2008), PAR reflection for uncovered grass strips ~6.6%. :contentReference[oaicite:3]{index=3}
+
+ */
+global double floor_reflectancePAR = 0.066;
+
+/**
+ * Diffuse reflectance of red light (approx. 650 nm) from the orchard floor.
+ *
+ * <p>Red reflectance is typically lower than broadband PAR for green vegetation due to chlorophyll
+ * absorption; soil can increase it. This is a pragmatic modelling default.</p>
+ */
+global double floor_reflectanceRed = 0.05;
+
+/**
+ * Diffuse reflectance of far-red light (approx. 730 nm) from the orchard floor.
+ *
+ * <p>Far-red reflectance is often higher than red for vegetation and many soils; this parameter mainly
+ * affects R:FR composition of upward flux.</p>
+ */
+global double floor_reflectanceFarRed = 0.18;
+
+
+global double floor_transmittancePAR    = 0.00;  // opaque
+global double floor_transmittanceRed    = 0.00;
+global double floor_transmittanceFarRed = 0.00;
+
+const Phong OrchardFloorShader =
+  new Phong().(
+    setDiffuse(new RGBColor(floor_reflectancePAR, floor_reflectanceRed, floor_reflectanceFarRed)),
+    setDiffuseTransparency(new RGBColor(floor_transmittancePAR, floor_transmittanceRed, floor_transmittanceFarRed))
+  );
+
+
+/* =========================
+ * B) Extenday®-like reflective film (reflective groundcover)
+ * ========================= */
+
+/**
+ * Diffuse reflectance of PAR from a reflective woven groundcover (Extenday™/Extenday® class).
+ *
+ * <p>Default is set near measured Extenday™ PAR reflection (~0.139) reported by Blanke (2008),
+ * measured shortly after deployment (i.e., "fresh" condition). Field performance can vary with
+ * soiling, ageing, moisture, and installation geometry.</p>
+ *  orchard with traditional grass ground cover, the PAR reflected is almost 5-10%, while with reflective ground covers PAR
+ 	reflection incoming reached up to 30-40% (Widmer et al., 2001; Layne, 2001; Glenn and Puterka, 2007;
+	Blanke, 2007; Figure 1).
+ 
+ * Richard M. Bastías1, 2*, and Luca Corelli-Grappadell 2012, review
+ * @see Extenday product concept and use as reflective groundcover. :contentReference[oaicite:5]{index=5}
+ */
+global double film_reflectancePAR     = 0.35;   // reflective covers often ~30–40% reflected PAR
+global double film_reflectanceRed     = 0.25;
+global double film_reflectanceFarRed  = 0.55;
+
+global double film_transmittancePAR    = 0.00;  // assume opaque fabric
+global double film_transmittanceRed    = 0.00;
+global double film_transmittanceFarRed = 0.00;
+
+const Phong ExtendayFilmShader =
+  new Phong().(
+    setDiffuse(new RGBColor(film_reflectancePAR, film_reflectanceRed, film_reflectanceFarRed)),
+    setDiffuseTransparency(new RGBColor(film_transmittancePAR, film_transmittanceRed, film_transmittanceFarRed))
+  );
+
+/* =========================
+ * C) Black ground (diagnostic: maximize apparent light penetration)
+ * ========================= */
+/**
+ * Black ground shader used for light-penetration diagnostics.
+ *
+ * <p>Set reflectance/transmittance to ~0 so almost no upward reflected radiation is contributed
+ * by the ground. This helps evaluate light reaching the floor without reflection feedback.</p>
+ */
+const Phong BlackGroundShader =
+  new Phong().(
+    setDiffuse(new RGBColor(0.0, 0.0, 0.0)),
+    setDiffuseTransparency(new RGBColor(0.0, 0.0, 0.0))
+  );
+
+/**
+ * Selected ground/understory shader.
+ * Updated from model options (mean_climate.groundShaderMode) in modelOptions.rgg.
+ * AUTO mode defaults to orchard floor shading.
+ */
+global Phong SelectedGroundShader = OrchardFloorShader;
+
+
+
+
+/** Shader for wood stem texture. */
+const Shader woodTexture = shader("woodStem");
+/** Shader for cordon stem texture. */
+const Shader cordonTexture = shader("cordonStem");
+
+/** Shader for leaf texture. */
+const Shader appleLeaf = shader("appleLeaf");
+const Shader RossetLeaf = shader("R1T");
+/** Shader for fruit skin texture. */
+const Shader fruitTexture = shader("appleSkin");
+const Shader petiole = shader("pedoncule2");
+
+//shaders for the flower and fruit object:
+const ShaderRef Eta1 = new ShaderRef("etamine1");
+const ShaderRef Eta2 = new ShaderRef("etamine2");
+const ShaderRef Pet1D = new ShaderRef("pet1D");
+const ShaderRef Pet1T = new ShaderRef("pet1T");
+const ShaderRef Pet2D = new ShaderRef("pet2D");
+const ShaderRef Pet2T = new ShaderRef("pet2T");
+const ShaderRef Pet3D = new ShaderRef("pet3D");
+const ShaderRef Pet3T = new ShaderRef("pet3T");
+const ShaderRef Sep = new ShaderRef("sepal");
+const ShaderRef Peto1 = new ShaderRef("peto1"); //petal
+const ShaderRef Peto2 = new ShaderRef("peto2");
+
+const ShaderRef Pom1 = new ShaderRef("Pomme1");
+const ShaderRef Pom2 = new ShaderRef("Pomme2");
+const ShaderRef Pom3 = new ShaderRef("Pomme3");
+const ShaderRef Pom4 = new ShaderRef("Pomme4");
+const ShaderRef Pom5 = new ShaderRef("Pomme5");
+const ShaderRef Pom6 = new ShaderRef("Pomme6");
+const ShaderRef Pom7 = new ShaderRef("Pomme7");
+
+
+
+
+
+/** Phong shader for soil properties. */
+const Phong SoilShader = new Phong().(setDiffuse(new RGBColor(0, 0, 0)), setDiffuseTransparency(new RGBColor(1, 1, 1)));
+
+// Light layers set up for different organs
+/** Layer to show leaves. */
+global int leafLayer = 3;
+/** Layer to show border plants. */
+global int borderLayer = 4;
+/** Layer to show soil. */
+global int soilLayer = 5;
+/** Layer to show the root. */
+global int rootLayer = 6;
+/** Layer to show light sources. */
+global int lightLayer = 7;
+/** Layer to show tiles. */
+global int tileLayer = 10;
+// leaf layer constants 
+/**
+ * Tag each leaf with a canopy layer based on its height z.
+ * LOW:  z <= height_low
+ * MID:  height_low < z <= height_mid
+ * UP:   height_mid  < z <= plantHeight
+ *
+ * Assumes: Leaf has fields z, plantNumber, and an int field `layer`.
+ */
+global int LAYER_LOW = 1;
+global int LAYER_MID = 2;
+global int LAYER_UP  = 3;
+/**percentage of light penetrating to each layer  */
+global float fLow = 0.5;
+global float fMid = 0.7;
+global float fUp  = 0.9;
+/** Step-level far-red correction factor loaded from the shading table. */
+global double fabsFarRedCorrection = 1.0;
+/* ###############################################################  
+	 physical constants 
+##############################################################*/
+
+/** Universal gas constant (J K-1 mol-1). */
+const float R = 8.314;
+/** Gas constant (cm3 bar mol-1 K-1). */
+const float Rberry = 83;
+/** Stefan-Boltzmann constant (J m-2 s-1 K-4). */
+const double BOLZ = 5.67e-8;
+/** Emissivity for thermal radiation*/
+const float emissivity = 0.95; 
+/** Volumetric heat capacity of air (J m-3 oC-1). */
+const float RHOCP = 1200.0;
+/** PSYCHROmetric constant (kPa K-1). */
+const float PSYCHRO = 0.067;
+/** Latent heat of vaporized water (J kg-1 water). */
+const float LAMBDA = 2.4e6;
+/** Conversion factor from mg to gram, especially in the fruit module. */
+const float mgTogram = 1e-3;
+/** Conversion factor from ug to mg, especially in photosynthesis. */
+const float ugTomg = 1e-3;
+/** Conversion factor from gr CO2 to gr biomass. */
+const double fCO2 = 0.606;
+/** Conversion factor degrees to radians. */
+const float DEGREE_TO_RADIANS = Math.PI/180;
+/** Conversion factor radians to degrees. */
+const float RADIANS_TO_DEGREE = 180/Math.PI;
+/** CO2 molar mass (gr/mol). */
+const float MOL_CO2 = 44.01;
+/** C molar mass (gr/mol). */
+const float MOL_C = 12;
+/** Water molar mass (gr/mol). */
+const float MOL_H2O = 18;
+/** Mean molecular mole mass of glucose and fructose in the fruit (gr/mol). C6H12O6 */
+const float MOL_HEXOSE = 180.2;
+/** Mean molecular mole mass of sucrose in the fruit (gr/mol). C12H22O11 */
+const float MOL_SURCROSE = 342.30;
+/** Mean molecular mole mass of Sorbitol in the apple phloem (gr/mol). C6H14O6*/
+const float MOL_SORBITOL = 182.172;
+/** Mean molecular mole mass of starch (gr/mol). (C6H10O5)n, where 
+n can vary and is typically in the range of hundreds to thousands. */
+const float MOL_STARCH = 162.14*2;
+
+/** Molar mass of ABA (C15H20O4). */
+const float MOL_ABA = 264.32;
+/** Molar mass of malic acid (C4H6O5). */
+const float MOL_MALIC = 134.0874;
+/** Molar mass of tartaric acid (C4H6O6). */
+const float MOL_TARTARIC = 150.087;
+/** Molar mass of citric acid (C6H8O7). */
+const float MOL_CITRIC = 192.124;
+/** Water density (g/cm^3). */
+const float Dw = 0.98;
+/** Dry mass density (g/cm-3). */
+const float Ds = 1.60;
+/** Gravitational acceleration (m/s^2). */
+const float gacc = 9.81;
+/** Specific water volume (cm3/mol). */
+const float SpVw = 18;
+/** Carbon fraction of sucrose. */
+const float CARBON_FRACTION_SUCROSE = 0.4210526;
+/** Carbon fraction of glucose. */
+const float CARBON_FRACTION_GLUCOSE = 0.399556;
+/** Carbon fraction of sorbitol. */
+const float CARBON_FRACTION_SORBITOL = 0.3956;
+/** Carbon fraction of dry matter in the fruit. */
+const float CARBON_FRACTION_DM_Berry = 0.41;
+/** Conversion factor to calculate maintenance cost using biomass. */
+const float CONVERT_CH2O_TO_C = 12.0 / (12.0 + 2.0 + 16.0);
+/** Conversion factor to convert stomata conductance (gs) from m/s to mol/(m2s). */
+const float UNIT_CONVERSION_STOMATA = -0.1424 * Ta + 43.917;
+/** Conversion factor for ABA from ng/mL to umol/m3. */
+const float ngML_umolM3 = 3.783293;
+/** Density of water (kg/m^3) at 4 degrees. */
+const float DENSITY_OF_WATER = 1000.0;
+/** Conversion factor from [W/m2] to Photosynthetic Photon Flux Density (PAR) [umolPPFD/(m2s)]. */
+const float WATT_TO_PPFD = 4.55;
+/** Wind speed measurement height. */
+const float windSpeed_refHeight = 10;
+
+/** Conversion factor to hydraulic conductivity from mm/h to m2/s/MPa */
+const float SOILKs_HOURLY_TO_PLANTKs= 2.8344e-05; //m2/s/MPa;
+
+/** Conversion factor to hydraulic conductivity from mm/day to m2/s/MPa */
+const float SOILKs_DAILY_TO_PLANTKs = 1.181e-6; //m2/s/MPa;
+
+
+ /**
+ * Converts phloem carbon concentration to sugar concentration.
+ * This function calculates sugar concentration based on the carbon concentration in the phloem.
+ * The calculation is species-dependent, with specific formulas used for apples.
+ * For apple species, the sugar concentration is derived from both sucrose and sorbitol carbon fractions.
+ * For other species, the calculation uses only the sucrose carbon fraction.
+ *
+ * @param carbonConcentration_phloem The carbon concentration in the phloem (mg/L).
+ * @return The sugar concentration derived from the carbon concentration.
+ */
+
+/**percetage of sorbitol in the sugar transport in phloem. 
+   Apple is about 75% sorbitol, while grape is zero */
+global float FRACTION_SORBITOL;
+
+
+static float convertPhloemCtoSugar(float carbonConcentration_phloem) {
+	float sugarConcentration = 0; // Initialize sugarConcentration to ensure all paths return a value
+	if (species.equals("apple")) {
+		FRACTION_SORBITOL = 0.75;
+		sugarConcentration = (1 - FRACTION_SORBITOL) * carbonConcentration_phloem / CARBON_FRACTION_SUCROSE + 
+							 FRACTION_SORBITOL * carbonConcentration_phloem / CARBON_FRACTION_SORBITOL;
+	} else {
+		FRACTION_SORBITOL = 0;
+		sugarConcentration = carbonConcentration_phloem / CARBON_FRACTION_SUCROSE;
+	}
+	return sugarConcentration;
+}
+
+
+//Mol concentration in the input of virtual fruit model is 
+//[mol sucre.dm-3 sève 0.05 - 0.53, divided by 1000 to convert into mol sucre.dm-3 sève which is used inside the model
+static float convertSugarToMol(float sugarConcentration_phloem) {
+	float MolConcentration = 0; // Initialize MolConcentration to ensure all paths return a value
+	if (species.equals("apple")) {
+		FRACTION_SORBITOL = 0.75;
+		MolConcentration = 1000 * sugarConcentration_phloem/(FRACTION_SORBITOL*MOL_SORBITOL +  (1 - FRACTION_SORBITOL) * MOL_SURCROSE);
+	} else {
+		FRACTION_SORBITOL = 0;
+		MolConcentration = 1000 * sugarConcentration_phloem / MOL_SURCROSE;
+	}
+	return MolConcentration;
+}
+
+static float calculateCarbonFraction() {
+    float carbonFraction;
+    if (species.equalsIgnoreCase("apple")) {
+    	FRACTION_SORBITOL = 0.75;
+        carbonFraction = (1 - FRACTION_SORBITOL) * CARBON_FRACTION_SUCROSE +
+                          FRACTION_SORBITOL * CARBON_FRACTION_SORBITOL;
+    } else {
+        carbonFraction = CARBON_FRACTION_SUCROSE;
+    }
+    return carbonFraction;
+}
+
+
+/**
+ * Convert phloem sugar concentration (g sugar cm^-3) to carbon concentration
+ * used by the transport model (g C cm^-3), i.e. the inverse of
+ * {@code convertPhloemCtoSugar(float)}.
+ *
+ * <p>Derivation:
+ * For non-apple: sugar = c / CARBON_FRACTION_SUCROSE  =>  c = sugar * CARBON_FRACTION_SUCROSE.
+ * For apple: sugar = c * [ (1 - f)/CARBON_FRACTION_SUCROSE + f/CARBON_FRACTION_SORBITOL ],
+ * where f = FRACTION_SORBITOL, so
+ * c = sugar / [ (1 - f)/CARBON_FRACTION_SUCROSE + f/CARBON_FRACTION_SORBITOL ].
+ *
+ * @param sugarConcentration sugar concentration in phloem (g sugar cm^-3)
+ * @return carbon concentration in phloem (g C cm^-3)
+ */
+static float convertSugarToPhloemC(float sugarConcentration) {
+    // clamp non-physical negatives defensively
+    if (sugarConcentration < 0f) sugarConcentration = 0f;
+
+    float carbonConcentration;
+    if (species.equals("apple")) {
+        float f = FRACTION_SORBITOL;
+        float denom = (1f - f) / CARBON_FRACTION_SUCROSE
+                    + f / CARBON_FRACTION_SORBITOL;
+        // numerical guard
+        if (denom <= 0f) denom = 1e-12f;
+        carbonConcentration = sugarConcentration / denom;
+    } else {
+        carbonConcentration = sugarConcentration * CARBON_FRACTION_SUCROSE;
+    }
+    return carbonConcentration;
+}
+
+
+/* ###############################################################  
+	 Output configuration
+############################################################## */
+
+global char CSV_QUOTE_CHAR = '"';
+global char CSV_COLUMN_SEPARATOR = ',';
+
+global String plantLevelOutputFilePath;
+global String meanFruitOutputFilePath;
+global String fieldLevelOutputFilePath;
+global String waterFluxSolverDebugOutputFilePath;
+
+global String plantLevelMetadataFilePath;
+global String meanFruitMetadataFilePath;
+global String fieldLevelMetadataFilePath;
+global String waterFluxSolverDebugMetadataFilePath;
+
+/**
+ * Map<String, StepwiseCsvWriter>
+ */
+static HashMap csvWriters = new HashMap();
+
+static void initCsvWriters(String outputTable_name) {
+	// Init file paths
+	plantLevelOutputFilePath = PATH_OUTPUT + "plant-level" + "-" + outputTable_name + ".csv";
+	meanFruitOutputFilePath = PATH_OUTPUT + "mean-fruit"+ "-" + outputTable_name + ".csv";
+	fieldLevelOutputFilePath = PATH_OUTPUT + "field-level"+ "-" + outputTable_name + ".csv";
+	waterFluxSolverDebugOutputFilePath = PATH_OUTPUT + "waterFluxSolverDebug_" + outputTable_name + ".csv";
+
+	plantLevelMetadataFilePath = PATH_OUTPUT + "plant-level.metadata.json";
+	meanFruitMetadataFilePath = PATH_OUTPUT + "mean-fruit.metadata.json";
+	fieldLevelMetadataFilePath = PATH_OUTPUT + "field-level.metadata.json";
+	waterFluxSolverDebugMetadataFilePath = PATH_OUTPUT + "waterFluxSolverDebug.metadata.json";
+	// Write metadata for data models
+	ObjectMapper objectMapper = new ObjectMapper();
+
+	(new SchemaMetadataWriter(plantLevelMetadataFilePath, PlantLevelOutputData.class, objectMapper)).writeMetadata();
+	(new SchemaMetadataWriter(meanFruitMetadataFilePath, MeanFruitOutputData.class, objectMapper)).writeMetadata();
+	(new SchemaMetadataWriter(fieldLevelMetadataFilePath, FieldLevelOutputData.class, objectMapper)).writeMetadata();
+
+	// Instantiate data model CSV writers
+	CsvMapper csvMapper = new CsvMapper();
+	csvMapper.setVisibility(PropertyAccessor.ALL, Visibility.NONE);
+	csvMapper.setVisibility(PropertyAccessor.FIELD, Visibility.DEFAULT);
+
+	csvWriters.put(plantLevelOutputFilePath, new StepwiseCsvWriter(plantLevelOutputFilePath, csvMapper));
+	csvWriters.put(meanFruitOutputFilePath, new StepwiseCsvWriter(meanFruitOutputFilePath, csvMapper));
+	csvWriters.put(fieldLevelOutputFilePath, new StepwiseCsvWriter(fieldLevelOutputFilePath, csvMapper));
+}

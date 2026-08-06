@@ -1,0 +1,2138 @@
+
+//java packages
+import java.util.Arrays;
+import java.util.ArrayList;
+import java.util.List;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.dataformat.csv.CsvMapper;
+import com.fasterxml.jackson.annotation.PropertyAccessor;
+import com.fasterxml.jackson.annotation.JsonAutoDetect.Visibility;
+import io.github.fruitcropxl.output.util.StepwiseCsvWriter;
+import io.github.fruitcropxl.output.util.SchemaMetadataWriter;
+
+//rgg modules
+import static plantParameters.*;
+import static absOrgan.*;
+import static leaf.*;
+import static shoot.*;
+import static plantBase.*;
+import static globalParameters.*;
+import static modelOptions.*;
+import static initialConditions.*;
+import static environment.*;
+import static carbonTransport.*;
+import static rootSystem.*;
+import static soil.*;
+import static extraTools.*;
+import static fruitBase.*;
+import static fineRoot.*;
+import static structuralRoot.*;
+import static fieldBase.*;
+import static main.*;
+import static carbonTransport.*;
+import static diagnosticTables.*;
+import budPlanner.*;
+import leafPlanner.*;
+import fruitPlanner.*;
+
+/**
+ * Descriptions for various output tables.
+ */
+private static String[] TABLE_DESCRIPTION = {
+		// Plant-level output
+		"Plant-level output", // 0
+		// Field-level output
+		"Field-level output", // 1
+		// Fruit properties
+		"Fruit properties" // 2
+};
+
+/**
+ * Selection of tables for output.
+ */
+global int[] TABLES = { 0, 1, 2 }; // for water optimization set 3
+// static int[] TABLES = {0,1,2,3}; //for carbon optimization set 4; for water
+// optimization set 3
+
+/**
+ * Returns the indices of the selected output tables.
+ *
+ * @return Array of table indices.
+ */
+static int[] getTableInd() {
+	return TABLES;
+}
+
+/**
+ * Returns descriptions of the output tables.
+ *
+ * @return Array of table descriptions.
+ */
+static String[] getTableDescription() {
+	return TABLE_DESCRIPTION;
+}
+
+/**
+ * A static reference ID to the PlantBase object.
+ */
+global long fbID;
+static FieldBase getFieldBase() {
+    return (FieldBase) graph().getNodeForId(fbID);
+}
+
+static void addFieldBase(FieldBase f) {
+	outputTables.fbID = f.getId();
+}
+
+/**
+ * A static reference ID to the PlantBase object.
+ */
+global long pbID;
+
+static PlantBase getPlantBase() {
+    return (PlantBase) graph().getNodeForId(pbID);
+}
+
+/**
+ * Sets the static PlantBase object reference.
+ * 
+ * @param pb The PlantBase object to set.
+ */
+static void addPlantBase(PlantBase pb) {
+	outputTables.pbID = pb.getId();
+}
+
+
+/**
+ * A static reference to the RootBase object.
+ */
+//global RootBase rb;
+global long rbID;
+/**
+ * A static reference to the fine root object.
+ */
+
+global long rtID;
+/**
+ * A static reference to the Soil object.
+ */
+global long slID;
+
+/**
+ * Sets the static Soil and FineRoot object references id.
+ * 
+ * @param sl The Soil object to set.
+ * @param fr The FineRoot object to set.
+ */
+static void addSoilRoot(Soil sl, FineRoot rt, RootBase rb) {
+	outputTables.slID = sl.getId();
+	outputTables.rtID = rt.getId();
+	outputTables.rbID = rb.getId();
+}
+
+/**
+ * get the Soil, rootbase and FineRoot object by references id.
+ */
+
+static RootBase getRootBase() {
+    return (RootBase) graph().getNodeForId(rbID);
+}
+
+static FineRoot getFineRoot() {
+    return (FineRoot) graph().getNodeForId(rtID);
+}
+
+static Soil getSoil() {
+    return (Soil) graph().getNodeForId(slID);
+}
+
+
+
+/**
+ * A static reference to the FruitService object id.
+ */
+global long fsID;
+
+static void addFruitService(FruitService fr) {
+	outputTables.fsID = fr.getId();
+}
+
+static FruitService getFruitService() {
+    return (FruitService) graph().getNodeForId(fsID);
+}
+
+/**
+ * A static reference to the Trunk object id.
+ */
+global long trID;
+
+
+static void addTrunk(Trunk tr) {
+	outputTables.trID = tr.getId();
+}
+
+static Trunk getTrunk() {
+    return (Trunk) graph().getNodeForId(trID);
+}
+
+static PlantBase findOutputPlantBase() {
+	PlantBase pb = first((* p:PlantBase, (p.isReportable && p.fieldInstanceId == 0 && p.plantNumber == INDI_ID_A && p.border == false) *));
+	if (pb == null) pb = first((* p:PlantBase, (p.isReportable && p.fieldInstanceId == 0 && p.plantNumber == INDI_ID_A) *));
+	if (pb == null) pb = first((* p:PlantBase, (p.isReportable && p.fieldInstanceId == 0 && p.border == false) *));
+	if (pb == null) pb = first((* p:PlantBase, (p.isReportable && p.fieldInstanceId == 0) *));
+	if (pb == null) pb = first((* p:PlantBase, (p.isReportable && p.plantNumber == INDI_ID_A && p.border == false) *));
+	if (pb == null) pb = first((* p:PlantBase, (p.isReportable && p.plantNumber == INDI_ID_A) *));
+	if (pb == null) pb = first((* p:PlantBase, (p.isReportable && p.border == false) *));
+	if (pb == null) pb = first((* p:PlantBase, (p.isReportable) *));
+	return pb;
+}
+
+static FieldBase findOutputFieldBase() {
+	FieldBase fb = first((* f:FieldBase, (f.isReportable && f.fieldInstanceId == 0) *));
+	if (fb == null) fb = first((* f:FieldBase, (f.isReportable) *));
+	return fb;
+}
+
+static RootBase findOutputRootBase(PlantBase pb) {
+	if (pb == null) return null;
+	return first((* r:RootBase, (
+		r.plantNumber == pb.plantNumber &&
+		r.fieldInstanceId == pb.fieldInstanceId &&
+		r.isReportable == pb.isReportable
+	) *));
+}
+
+static FineRoot findOutputFineRoot(PlantBase pb) {
+	if (pb == null) return null;
+	return first((* f:FineRoot, (
+		f.plantNumber == pb.plantNumber &&
+		f.fieldInstanceId == pb.fieldInstanceId &&
+		f.isReportable == pb.isReportable
+	) *));
+}
+
+static Soil findOutputSoil(PlantBase pb) {
+	if (pb == null) return null;
+	return first((* s:Soil, (
+		s.plantNumber == pb.plantNumber &&
+		s.fieldInstanceId == pb.fieldInstanceId &&
+		s.isReportable == pb.isReportable
+	) *));
+}
+
+static FruitService findOutputFruitService(PlantBase pb) {
+	if (pb == null) return null;
+	return first((* b:FruitService, (
+		b.plantNumber == pb.plantNumber &&
+		b.fieldInstanceId == pb.fieldInstanceId &&
+		b.isReportable == pb.isReportable
+	) *));
+}
+
+static Trunk findOutputTrunk(PlantBase pb) {
+	if (pb == null) return null;
+	return first((* t:Trunk, (
+		t.plantNumber == pb.plantNumber &&
+		t.fieldInstanceId == pb.fieldInstanceId &&
+		t.isReportable == pb.isReportable
+	) *));
+}
+
+static void logSelectedOutputPlant(String context, PlantBase pb) {
+	if (pb != null && printFlag && (debug || step <= 3)) {
+		println("outputTables[" + context + "] pbId=" + pb.getId()
+			+ " plantNumber=" + pb.plantNumber
+			+ " fieldInstanceId=" + pb.fieldInstanceId
+			+ " isReportable=" + pb.isReportable
+			+ " fabs=" + pb.fabs
+			+ " fpar=" + pb.fpar
+			+ " leafPAR=" + pb.leafPAR);
+	}
+}
+
+
+
+
+
+
+
+/**
+ * Output table data models
+ */
+global PlantLevelOutputData plantLevel_out = new PlantLevelOutputData();
+global MeanFruitOutputData meanFruit_out = new MeanFruitOutputData();
+global FieldLevelOutputData fieldLevel_out = new FieldLevelOutputData();
+
+/**
+ * Preserve the mean-fruit DTO schema while marking variables that a
+ * demand-only fruit service does not calculate as unavailable.
+ */
+static void markDetailedFruitOutputsUnavailable(MeanFruitOutputData out) {
+	if (out == null) return;
+
+	out.meanFruitFW = Float.NaN;
+	out.meanFruitFW_sd = Float.NaN;
+	out.meanFruitSc = Float.NaN;
+	out.meanFruitSc_sd = Float.NaN;
+	out.diameter = Float.NaN;
+	out.vol = Float.NaN;
+	out.Afruit = Float.NaN;
+
+	out.sugarUptake_active = Float.NaN;
+	out.sugarUptake_passive = Double.NaN;
+	out.sugarUptake_massflow = Double.NaN;
+	out.waterUptake = Double.NaN;
+	out.waterUptake_xylem = Double.NaN;
+	out.waterUptake_phloem = Double.NaN;
+	out.transpirationLost = Double.NaN;
+	out.osmoticWaterPotential_fruit = Double.NaN;
+	out.turgorPressure_fruit = Double.NaN;
+	out.waterPotential_fruit = Double.NaN;
+	out.osmoticWaterPotential_phloem = Double.NaN;
+	out.fruit_cpm = Float.NaN;
+	out.turgorPressure_phloem = Double.NaN;
+	out.waterPotential_phloem = Double.NaN;
+	out.Lphloem = Double.NaN;
+	out.Lxylem = Double.NaN;
+	out.osmoticWaterPotential_partialContribution = Double.NaN;
+	out.cellWallExtensibility = Double.NaN;
+	out.elasticModulus = Double.NaN;
+	out.ro = Double.NaN;
+	out.malicAcid = Double.NaN;
+	out.tartaricAcid = Double.NaN;
+	out.malicConcentration_fruit = Double.NaN;
+	out.tartaricConcentration_fruit = Double.NaN;
+
+	out.mSuc = Double.NaN;
+	out.mSor = Double.NaN;
+	out.mGlu = Double.NaN;
+	out.mFru = Double.NaN;
+	out.mSta = Double.NaN;
+	out.mSyn = Double.NaN;
+
+	out.meanFruitFW_1 = Float.NaN;
+	out.meanFruitFW_2 = Float.NaN;
+	out.meanFruitFW_3 = Float.NaN;
+	out.meanFruitFW_4 = Float.NaN;
+	out.meanFruitSc_1 = Float.NaN;
+	out.meanFruitSc_2 = Float.NaN;
+	out.meanFruitSc_3 = Float.NaN;
+	out.meanFruitSc_4 = Float.NaN;
+}
+
+static final int CANOPY_ZONE_MEAN_ANET = 0;
+static final int CANOPY_ZONE_MEAN_WATER_POTENTIAL = 1;
+static final int CANOPY_ZONE_MEAN_GS = 2;
+static final int CANOPY_ZONE_COUNT_ANET = 3;
+static final int CANOPY_ZONE_COUNT_WATER_POTENTIAL = 4;
+static final int CANOPY_ZONE_COUNT_GS = 5;
+static final int CANOPY_ZONE_RESULT_ROWS = 6;
+
+global boolean warnedUnexpectedOutputHeightZoneCount = false;
+
+/**
+ * Returns the half-open output-height zone containing {@code z}.
+ * The final zone has no upper bound; values below the first boundary are excluded.
+ */
+public static int findOutputHeightZone(double z, double[] heights) {
+	if (heights == null || heights.length == 0 || Double.isNaN(z) || Double.isInfinite(z)) return -1;
+	for (int i = 0; i < heights.length; i++) {
+		double lower = heights[i];
+		if (Double.isNaN(lower) || Double.isInfinite(lower) || z < lower) continue;
+		if (i == heights.length - 1) return i;
+		double upper = heights[i + 1];
+		if (!Double.isNaN(upper) && !Double.isInfinite(upper) && z < upper) return i;
+	}
+	return -1;
+}
+
+/**
+ * Calculates committed leaf physiology means in one leaf pass.
+ * Rows 0-2 contain means for AlimActual, waterPotential and gs; rows 3-5
+ * contain their independent finite-value counts.
+ */
+public static double[][] calculateCanopyZonePhysiology(Leaf[] focalLeaves, double[] heights) {
+	int zoneCount = (heights == null) ? 0 : heights.length;
+	double[][] result = new double[CANOPY_ZONE_RESULT_ROWS][zoneCount];
+	if (focalLeaves == null || zoneCount == 0) return result;
+	double[] sumAnetZone = new double[zoneCount];
+	double[] sumLeafWaterPotentialZone = new double[zoneCount];
+	double[] sumGsZone = new double[zoneCount];
+	int[] countAnetZone = new int[zoneCount];
+	int[] countLeafWaterPotentialZone = new int[zoneCount];
+	int[] countGsZone = new int[zoneCount];
+
+	for (int i = 0; i < focalLeaves.length; i++) {
+		Leaf focalLeaf = focalLeaves[i];
+		if (focalLeaf == null) continue;
+		int zone = findOutputHeightZone(focalLeaf.z, heights);
+		if (zone < 0 || zone >= zoneCount) continue;
+
+		double anet = focalLeaf.AlimActual;
+		if (!Double.isNaN(anet) && !Double.isInfinite(anet)) {
+			sumAnetZone[zone] += anet;
+			countAnetZone[zone]++;
+		}
+		double waterPotential = focalLeaf.waterPotential;
+		if (!Double.isNaN(waterPotential) && !Double.isInfinite(waterPotential)) {
+			sumLeafWaterPotentialZone[zone] += waterPotential;
+			countLeafWaterPotentialZone[zone]++;
+		}
+		double gs = focalLeaf.gs;
+		if (!Double.isNaN(gs) && !Double.isInfinite(gs)) {
+			sumGsZone[zone] += gs;
+			countGsZone[zone]++;
+		}
+	}
+
+	for (int zone = 0; zone < zoneCount; zone++) {
+		result[CANOPY_ZONE_COUNT_ANET][zone] = countAnetZone[zone];
+		result[CANOPY_ZONE_COUNT_WATER_POTENTIAL][zone] = countLeafWaterPotentialZone[zone];
+		result[CANOPY_ZONE_COUNT_GS][zone] = countGsZone[zone];
+		result[CANOPY_ZONE_MEAN_ANET][zone] = (countAnetZone[zone] > 0)
+			? sumAnetZone[zone] / countAnetZone[zone] : 0.0;
+		result[CANOPY_ZONE_MEAN_WATER_POTENTIAL][zone] = (countLeafWaterPotentialZone[zone] > 0)
+			? sumLeafWaterPotentialZone[zone] / countLeafWaterPotentialZone[zone] : 0.0;
+		result[CANOPY_ZONE_MEAN_GS][zone] = (countGsZone[zone] > 0)
+			? sumGsZone[zone] / countGsZone[zone] : 0.0;
+	}
+	return result;
+}
+
+/** Writes the optional plant hydraulic-solver diagnostics to one fixed stream. */
+protected static void writeWaterFluxSolverDebug(PlantBase pb) {
+	if (!outputWaterFluxSolverDebug || pb == null) return;
+
+	PlantWaterFluxSolverDebugOutputData debugRow = new PlantWaterFluxSolverDebugOutputData();
+	debugRow.timestamp = timestamp;
+	debugRow.year = year;
+	debugRow.dayOfYear = dayOfYear;
+	debugRow.hourOfDay = hourOfDay;
+	debugRow.scenario = scenario;
+	debugRow.simuuid = simUUID;
+	debugRow.plantNumber = pb.plantNumber;
+	debugRow.fieldInstanceId = pb.fieldInstanceId;
+	debugRow.waterFluxSolverResidual = pb.waterFluxSolverResidual;
+	debugRow.waterFluxSolverFallbackUsed = pb.waterFluxSolverFallbackUsed;
+	debugRow.waterFluxSolverAccepted = pb.waterFluxSolverAccepted;
+	debugRow.meanLeafWaterPotential_solver = pb.meanLeafWaterPotential_solver;
+	debugRow.minLeafWaterPotential_solver = pb.minLeafWaterPotential_solver;
+	debugRow.maxLeafWaterPotential_solver = pb.maxLeafWaterPotential_solver;
+	debugRow.meanPLC_leaf_solver = pb.meanPLC_leaf_solver;
+	debugRow.meanGs_solver = pb.meanGs_solver;
+	debugRow.waterFluxSolverLowerBound = pb.waterFluxSolverLowerBound;
+	debugRow.waterFluxSolverUpperBound = pb.waterFluxSolverUpperBound;
+	debugRow.waterFluxSolverLeafSum = pb.waterFluxSolverLeafSum;
+	debugRow.waterFluxSolverRepeatedResidualDelta = pb.waterFluxSolverRepeatedResidualDelta;
+	debugRow.waterFluxSolverEvalCount = pb.waterFluxSolverEvalCount;
+
+	DiagnosticTableCoordinator.writeWaterFluxSolver(debugRow);
+}
+
+global float fw_mean = 0;
+global float dw_mean = 0;
+global float sc_mean = 0;
+global double fpar_ground = 0;
+global double fparSoil = 0.0;
+global double fabsSoil = 0.0;
+
+// updates the table
+protected static void assignOutputRef() {
+	/**
+     * Checks if outputTables.fr (FruitService object) is null.
+     * If null, it searches for the FruitService object with plantNumber matching INDI_ID_A
+     * and then adds it to outputTables.
+     * same for trunk 
+     */
+	 PlantBase pb1 = findOutputPlantBase();
+ 	 if((outputTables.pbID <= 0 || step <=1) && pb1 != null) { 
+	 	 if(pb1 != null) {
+	 	 	 outputTables.addPlantBase(pb1);
+	 	 	 if (printFlag) { println(" Plantbase instance is added to output table"); }
+	 	 }
+	 } 
+	 if(outputTables.slID <= 0 || outputTables.rtID <= 0 || outputTables.rbID <= 0 || step <=1) { 
+	 	 FineRoot fr = findOutputFineRoot(pb1);
+	 	 RootBase rb = findOutputRootBase(pb1);
+	 	 Soil s = findOutputSoil(pb1);
+	 	 
+	 	 if(fr != null && s != null && rb != null) {
+	 	 	 outputTables.addSoilRoot(s, fr, rb);
+	 	 	 if (printFlag) { println(" soil and root instance is added to output table"); }
+	 	 }
+	 }
+	 
+	 if(outputTables.fsID <= 0 || step <=1) { 
+		 FruitService b = findOutputFruitService(pb1);
+		 if(b != null) {
+			 outputTables.addFruitService(b);
+			 if (printFlag) { println(" one fruit instance is added"); }
+		 }
+	 }
+	 
+	 if(outputTables.trID <= 0 || step <=1) { 
+			Trunk w = findOutputTrunk(pb1);
+			if(w != null) {
+				outputTables.addTrunk(w);
+				if (printFlag) { println(" one trunk instance is added"); }
+			}
+		}
+}
+
+// updates the table
+protected static void updateTables() {
+	// update tables to monitor a single individual
+		PlantBase pb = null;
+		PlantBase pb1 = findOutputPlantBase();
+		if(pb1 != null && (outputTables.pbID <= 0 || step <=1 || outputTables.pbID != pb1.getId())) { 
+			 outputTables.addPlantBase(pb1);
+			 if (printFlag) { println(" Plantbase instance is added to output table"); }
+		}
+		  
+		 try {
+			if (outputTables.pbID > 0) {
+				pb = getPlantBase();  // e.g., graph().getNodeForId(pbID)	
+				if (pb == null) {
+					pb = findOutputPlantBase();
+					if (pb != null) outputTables.addPlantBase(pb);
+				}
+			}
+		} catch (Exception e) {
+			//println("⚠️ Failed to retrieve or process PlantBase: " + e.getMessage());
+			return;
+		}
+		if (pb == null) {
+			return;
+		}
+		logSelectedOutputPlant("select", pb);
+	
+	for (int i = 0; i < TABLES.length; i++) {
+		writeTablesToDataModels(TABLES[i], pb);
+	}
+
+}
+
+protected static void writeTablesToDataModels(int table, PlantBase pb) {
+	if (table == 0) {
+		
+		/****** create the local organ object by references ******/
+		// =========================
+		// RootBase and FineRoot Updates
+		// =========================
+		
+		RootBase rb = null;
+		FineRoot rt = null;
+		Soil sl = null;
+		
+		 if(slID <= 0 || rtID <= 0 || rbID <= 0 || step <=1) { 
+			 FineRoot rt1 = findOutputFineRoot(pb);
+			 RootBase rb1 = findOutputRootBase(pb);
+			 Soil s1 = findOutputSoil(pb);
+			 
+			 if(rt1 != null && s1 != null && rb1 != null) {
+				 outputTables.addSoilRoot(s1, rt1, rb1);
+				 if (printFlag) { println(" soil and root instance is added to output table"); }
+			 }
+		 }
+		 
+		// RootBase
+		try {
+			rb = getRootBase();
+			if (rb != null && warnedRB) warnedRB = false;            // recovered
+		} catch (Throwable t) {                                      // catch Throwable to stop any spammy cast errors
+			if (!warnedRB) {
+				println("⚠️ RootBase not available yet (suppressing repeats).");
+				warnedRB = true;
+			}
+		}
+		
+		// Fine root
+		try {
+			rt = getFineRoot();
+			if (rt != null && warnedFR) warnedFR = false;            // recovered
+		} catch (Throwable t) {
+			if (!warnedFR) {
+				println("⚠️ Fine root not available yet (suppressing repeats).");
+				warnedFR = true;
+			}
+		}
+		
+		// Soil
+		try {
+			sl = getSoil();
+			if (sl != null && warnedSoil) warnedSoil = false;        // recovered
+		} catch (Throwable t) {
+			if (!warnedSoil) {
+				println("⚠️ Soil not available yet (suppressing repeats).");
+				warnedSoil = true;
+			}
+		}
+		
+		 Trunk tr = null;
+
+
+		if(outputTables.trID <= 0 || step <=1) { 
+			Trunk w = findOutputTrunk(pb);
+			if(w != null) {
+				outputTables.addTrunk(w);
+				if (printFlag) { println(" one trunk instance is added"); }
+			}
+		}
+	 	
+		try {
+			tr = getTrunk();
+			if (tr == null) {
+				tr = findOutputTrunk(pb);
+				if (tr != null) outputTables.addTrunk(tr);
+			}
+			if (tr != null && warnedTrunk) warnedTrunk = false;        // recovered
+		} catch (Throwable t) {
+			if (!warnedTrunk) {
+				println("⚠️ Trunk not available yet (suppressing repeats).");
+				warnedTrunk = true;
+			}
+		}
+		
+		// ========== Calculate output fields
+
+		
+		
+		// Preinitialize fPAR values
+		// Preinitialize cumulative LAI and water potential values
+		double[] cumLAI_ = new double[output_height.length];		
+		int leafNumber = 0;
+		double leaf_waterPotential = Double.NaN; 
+		if(pb != null) totalFruitNum = Math.toIntExact(count((*b:FruitService,(
+			b.plantNumber == pb.plantNumber &&
+			b.fieldInstanceId == pb.fieldInstanceId &&
+			b.isReportable == pb.isReportable
+		)*))) * berryNumPerBunch;
+		
+		// List to store fPAR_ values dynamically (Java 5 compatible)
+		List fPAR_ = new ArrayList();
+		// Ensure calculations are only performed if valid data exists
+		if (pb != null && count((*l:Leaf, (
+			l.plantNumber == pb.plantNumber &&
+			l.fieldInstanceId == pb.fieldInstanceId &&
+			l.isReportable == pb.isReportable
+		)*)) > 0) {
+		
+			// Calculate leaf water potential in the middle layer
+			leaf_waterPotential = mean((*lf:Leaf, (
+					lf.plantNumber == pb.plantNumber &&
+					lf.fieldInstanceId == pb.fieldInstanceId &&
+					lf.isReportable == pb.isReportable &&
+					lf.z >= 0.5 * (pb.plantHeight + pb.trunkHeight) &&
+					lf.z <= 0.8 * (pb.plantHeight + pb.trunkHeight)
+			)*).waterPotential);
+			
+			// Single-leaf and sparse-canopy runs may have no leaves in the middle band.
+			// Fall back to the focal plant mean instead of writing a coerced zero.
+			if (Double.isNaN(leaf_waterPotential) || Double.isInfinite(leaf_waterPotential)) {
+				leaf_waterPotential = mean((*lf:Leaf, (
+					lf.plantNumber == pb.plantNumber &&
+					lf.fieldInstanceId == pb.fieldInstanceId &&
+					lf.isReportable == pb.isReportable
+				)*).waterPotential);
+			}
+		
+			// Loop through all output_height values
+			for (int i = 0; i < output_height.length; i++) {
+				double fPAR_value = 0;
+				if(i < output_height.length-1) {
+					fPAR_value = mean((* l:Leaf, (
+							l.plantNumber == pb.plantNumber &&
+							l.fieldInstanceId == pb.fieldInstanceId &&
+							l.isReportable == pb.isReportable &&
+							l.z >= output_height[i] &&
+							l.z < output_height[i+1]
+					)*).incPARm2) / (fPAR * globalRadiation);
+				} else {
+					fPAR_value = mean((* l:Leaf, (
+							l.plantNumber == pb.plantNumber &&
+							l.fieldInstanceId == pb.fieldInstanceId &&
+							l.isReportable == pb.isReportable &&
+							l.z >= output_height[i])*).incPARm2) / (fPAR * globalRadiation);
+				} 
+				if (Double.isNaN(fPAR_value) || Double.isInfinite(fPAR_value)) fPAR_value = 0.0;
+				fPAR_.add(Double.valueOf(fPAR_value));  // Use valueOf() to avoid deprecation
+				if(debug & printFlag) {
+					println("output_height[i]: " + output_height[i] + " value: " + fPAR_value);
+				}
+			}
+	
+		
+			// Check for NaN or infinite values
+			if (Double.isNaN(leaf_waterPotential) || Double.isInfinite(leaf_waterPotential)) {
+				leaf_waterPotential = 0.0f;
+			}
+		}
+
+	
+		
+		// Ensure valid cumulative LAI calculations
+		if (pb != null && count((*lf:Leaf, (
+			lf.border == false &&
+			lf.fieldInstanceId == pb.fieldInstanceId &&
+			lf.isReportable == pb.isReportable
+		)*)) > 0) {
+			
+			for (int i = 0; i < output_height.length; i++) {
+				cumLAI_[i] = sum((* lf:Leaf, (
+					lf.border == false &&
+					lf.fieldInstanceId == pb.fieldInstanceId &&
+					lf.isReportable == pb.isReportable &&
+					lf.z > output_height[i]
+				)*).area) / focalArea;
+				//println("output_height:" + i + ": " + output_height[i] +" " + cumLAI_[i]);
+			}
+		
+			// Ensure leafNumber calculation is safe
+			leafNumber = Math.toIntExact(count((*l:Leaf, (
+				l.plantNumber == pb.plantNumber &&
+				l.fieldInstanceId == pb.fieldInstanceId &&
+				l.isReportable == pb.isReportable
+			)*)));
+
+			if (outputLeafGrowthDiagnostics) {
+				int actualLeafCount = 0;
+				double actualLeafAreaSum = 0.0;
+				double actualPotentialFinalSizeSum = 0.0;
+				double actualRealizedFinalSizeSum = 0.0;
+				int actualProfileLockedLeafCount = 0;
+				double actualCurrentAreaToRealizedSum = 0.0;
+				int actualRosetteLeafCount = 0;
+				int actualBourseLeafCount = 0;
+				int actualVegetativeLeafCount = 0;
+				int activeGrowingLeafCount = 0;
+				double sumLeafAge = 0.0;
+				double sumLeafTe = 0.0;
+				double sumLeafFc = 0.0;
+				double sumLeafFw = 0.0;
+				double sumLeafLpot = 0.0;
+
+				for (Leaf leafDiag : (* ld:Leaf, (ld.plantNumber == pb.plantNumber && ld.fieldInstanceId == pb.fieldInstanceId && ld.isReportable == pb.isReportable) *)) {
+					if (leafDiag == null) continue;
+					actualLeafCount++;
+					actualLeafAreaSum += leafDiag.area;
+					actualPotentialFinalSizeSum += leafDiag.potentialFinalSize;
+					actualRealizedFinalSizeSum += leafDiag.realizedFinalSize;
+					if (leafDiag.profileFinalSizeLocked) actualProfileLockedLeafCount++;
+					actualCurrentAreaToRealizedSum += leafDiag.currentAreaToRealizedFinalRatio;
+					if ("rosetteLeaf".equals(leafDiag.organType)) actualRosetteLeafCount++;
+					if ("bourseLeaf".equals(leafDiag.organType)) actualBourseLeafCount++;
+					if ("vegetativeLeaf".equals(leafDiag.organType)) actualVegetativeLeafCount++;
+					if (leafDiag.age < leafDiag.te) activeGrowingLeafCount++;
+					sumLeafAge += leafDiag.age;
+					sumLeafTe += leafDiag.te;
+					sumLeafFc += leafDiag.dbg_fc;
+					sumLeafFw += leafDiag.dbg_fw;
+					sumLeafLpot += leafDiag.dbg_Lpot;
+				}
+
+				int matureLeafCount = actualLeafCount - activeGrowingLeafCount;
+				double denomLeafCount = (actualLeafCount > 0) ? Double.valueOf(actualLeafCount).doubleValue() : 1.0;
+				double actualCurrentAreaToRealizedMean = actualCurrentAreaToRealizedSum / denomLeafCount;
+				double meanLeafAge = sumLeafAge / denomLeafCount;
+				double meanLeafTe = sumLeafTe / denomLeafCount;
+				double meanLeafFc = sumLeafFc / denomLeafCount;
+				double meanLeafFw = sumLeafFw / denomLeafCount;
+				double meanLeafLpot = sumLeafLpot / denomLeafCount;
+				int plannedProfileLeafRows = (int) DiagnosticTableCoordinator.getRowCount(
+					DiagnosticTableCoordinator.TABLE_APPLE_SPUR_BOURSE);
+				int emittedLeafEvents = (int) DiagnosticTableCoordinator.getRowCount(
+					DiagnosticTableCoordinator.TABLE_APPLE_LEAF_AXIS);
+				int profileRowsNotYetEmitted = plannedProfileLeafRows - actualLeafCount;
+				ActualLeafSummaryDiagnosticOutputData leafSummary =
+					new ActualLeafSummaryDiagnosticOutputData();
+				leafSummary.timestamp = timestamp;
+				leafSummary.step = step;
+				leafSummary.year = year;
+				leafSummary.dayOfYear = dayOfYear;
+				leafSummary.hourOfDay = hourOfDay;
+				leafSummary.scenario = scenario;
+				leafSummary.simuuid = simUUID;
+				leafSummary.plantNumber = pb.plantNumber;
+				leafSummary.fieldInstanceId = pb.fieldInstanceId;
+				leafSummary.actualLeafCount = actualLeafCount;
+				leafSummary.actualLeafAreaSum = actualLeafAreaSum;
+				leafSummary.actualPotentialFinalSizeSum = actualPotentialFinalSizeSum;
+				leafSummary.actualRealizedFinalSizeSum = actualRealizedFinalSizeSum;
+				leafSummary.actualProfileLockedLeafCount = actualProfileLockedLeafCount;
+				leafSummary.actualCurrentAreaToRealizedMean = actualCurrentAreaToRealizedMean;
+				leafSummary.actualRosetteLeafCount = actualRosetteLeafCount;
+				leafSummary.actualBourseLeafCount = actualBourseLeafCount;
+				leafSummary.actualVegetativeLeafCount = actualVegetativeLeafCount;
+				leafSummary.activeGrowingLeafCount = activeGrowingLeafCount;
+				leafSummary.matureLeafCount = matureLeafCount;
+				leafSummary.meanLeafAge = meanLeafAge;
+				leafSummary.meanLeafTe = meanLeafTe;
+				leafSummary.meanLeafFc = meanLeafFc;
+				leafSummary.meanLeafFw = meanLeafFw;
+				leafSummary.meanLeafLpot = meanLeafLpot;
+				leafSummary.plannedProfileLeafRows = plannedProfileLeafRows;
+				leafSummary.emittedLeafEvents = emittedLeafEvents;
+				leafSummary.currentActualLeafObjects = actualLeafCount;
+				leafSummary.profileRowsNotYetEmitted = profileRowsNotYetEmitted;
+				DiagnosticTableCoordinator.writeActualLeafSummary(leafSummary);
+			}
+		}
+		
+		// Keep fs aligned with output_height only; the extra sensor_heights top layer is sky reference only.
+		double skyHeight = Double.NaN;
+		float sky = 1e-5f;
+		float[] fs = new float[output_height.length];
+		
+		if (useLightSensors && output_height.length >= 1) {
+			if (sensor_heights != null && sensor_heights.length > output_height.length) {
+				skyHeight = sensor_heights[output_height.length];
+			} else {
+				skyHeight = output_height[output_height.length - 1] * 2.0;
+			}
+
+			double skyMean = mean((* par:LightSensor, (
+				Math.abs(par.height - skyHeight) <= 1e-3 && !Double.isNaN(par.abs)
+			)*).abs);
+
+			if (!Double.isNaN(skyMean)) {
+				sky = (float) Math.max(1e-5, skyMean);
+			}
+		
+			for (int i = 0; i < output_height.length; i++) {
+				double layerMean = mean((* par:LightSensor, (
+					Math.abs(par.height - output_height[i]) <= 1e-3 && !Double.isNaN(par.abs)
+				)*).abs);
+
+				fs[i] = Double.isNaN(layerMean) ? Float.NaN : (float) (layerMean / sky);
+			}
+		}
+		
+		// out the water potential at different height
+		double[] intWaterPotential = new double[output_height.length];
+		
+		if (pb != null && count((* l:Internode, (
+			l.plantNumber == pb.plantNumber &&
+			l.fieldInstanceId == pb.fieldInstanceId &&
+			l.isReportable == pb.isReportable
+		) *)) > 0) {
+		  int n = output_height.length;
+		
+		  for (int i = 0; i < n; i++) {
+			if (i < n - 1) {
+			  // half‑open interval [low, high)
+			  intWaterPotential[i] = mean((* l:Internode, (
+				l.plantNumber == pb.plantNumber &&
+				l.fieldInstanceId == pb.fieldInstanceId &&
+				l.isReportable == pb.isReportable &&
+				l.z >= output_height[i] &&
+				l.z <  output_height[i+1]
+			  ) *).waterPotential);
+			} else {
+			  // last bin: [lastThreshold, +inf)
+			  intWaterPotential[i] = mean((* l:Internode, (
+				l.plantNumber == pb.plantNumber &&
+				l.fieldInstanceId == pb.fieldInstanceId &&
+				l.isReportable == pb.isReportable &&
+				l.z >= output_height[i]
+			  ) *).waterPotential);
+			}
+			if (Double.isNaN(intWaterPotential[i]) || Double.isInfinite(intWaterPotential[i])) intWaterPotential[i] = 0.0;
+		  }
+		}
+
+		// helper: convert carbon potential (Phi) -> concentration (c)
+		// c = sqrt(2 * Phi), clamped at 0 for safety
+		
+		// compute mean sugar concentration per height bin from cpt
+		double[] sugarConcentration = new double[output_height.length];
+		if(useCTRAM == true) {
+			if (pb != null && count((* it:Internode, (
+				it.plantNumber == pb.plantNumber &&
+				it.fieldInstanceId == pb.fieldInstanceId &&
+				it.isReportable == pb.isReportable
+			) *)) > 0) {
+		  for (int i = 0; i < output_height.length; i++) {
+			double meanPhi;
+			if (i < output_height.length - 1) {
+			  // [z_i, z_{i+1})
+			  meanPhi = mean((* l:Internode, (
+								  l.plantNumber == pb.plantNumber &&
+								  l.fieldInstanceId == pb.fieldInstanceId &&
+								  l.isReportable == pb.isReportable &&
+							  l.z >= output_height[i] &&
+							  l.z <  output_height[i+1]
+							) *).cpt);
+			} else {
+			  // last bin: [z_last, +inf)
+			  meanPhi = mean((* l:Internode, (
+								  l.plantNumber == pb.plantNumber &&
+								  l.fieldInstanceId == pb.fieldInstanceId &&
+								  l.isReportable == pb.isReportable &&
+							  l.z >= output_height[i]
+							) *).cpt);
+			}
+			sugarConcentration[i] = sugarFromCp(meanPhi);
+			if (Double.isNaN(sugarConcentration[i]) || Double.isInfinite(sugarConcentration[i])) sugarConcentration[i] = 0.0;
+		  }
+		}
+	}
+		
+		// (optional) if you’re exporting, name the column accordingly
+		// e.g., writeColumn("sugarConcentration_1", sugarConcentration);
+
+
+		
+		
+		/****** time identifier ******/
+		plantLevel_out.timestamp                        = timestamp;
+		
+		plantLevel_out.year                             = year;
+		plantLevel_out.dayOfYear                        = dayOfYear;
+		plantLevel_out.hourOfDay                        = hourOfDay;
+		plantLevel_out.scenario                         = scenario;
+		plantLevel_out.simuuid                     		= simUUID;
+		
+		plantLevel_out.plantAge_days                    = (pb!= null)? pb.ageD:0;
+		plantLevel_out.plantAge_Td                      = (pb!= null)? pb.ageTd:0;
+		plantLevel_out.degreeDay                    	= tt;
+		/****** weather conditions ******/
+		plantLevel_out.Ta                               = Ta;		
+		plantLevel_out.rh                               = rh;
+		plantLevel_out.incomingRadiation                = globalRadiation;
+		plantLevel_out.cca                              = cca;
+		plantLevel_out.wind                             = wind;
+		plantLevel_out.rainfall                         = rainfall;
+				
+		/** soil conditions*/
+		
+		plantLevel_out.soilWaterContent 				= Arrays.toString(Arrays.copyOfRange(soilWaterContentArray, 0, numofSoilLayers));
+		
+        plantLevel_out.soilWaterPotential 				= Arrays.toString(Arrays.copyOfRange(soilWaterPotentialArray, 0, numofSoilLayers));
+
+		
+		plantLevel_out.soilNContent                     = (sl!= null)? sl.Ncontent:0;
+
+		//plantLevel_out.soilWaterPotential = Arrays.asList(Arrays.copyOfRange(soilWaterPotentialArray, 0, numofSoilLayers));
+		
+		
+		/**radiation absorption, and distribution at 1/3, 2/3 and 3/3 of the canopy.
+     	the actual height of the calculation changes with canopy height*/ 
+      
+		if (pb != null) {
+			plantLevel_out.leafArea                         = (pb!= null)? pb.leafArea:0;
+			plantLevel_out.leafNumber                       = leafNumber;
+			plantLevel_out.totalFruitNumber                 = totalFruitNum;
+			plantLevel_out.AbsorbedTotRad                   = pb.leafRad;
+			plantLevel_out.AbsorbedPAR                      = pb.leafPAR;
+			
+			plantLevel_out.fabsTotRad                       = pb.fabs;
+			plantLevel_out.fabsPAR                          = pb.fpar;
+			
+				//customize the fraction of light interception at different height
+				//use: (trunkHeight + (plantHeight - trunkHeight)/3)
+				plantLevel_out.fPARLow_1_3                      = pb.fPARLow;
+				plantLevel_out.fPARMid_2_3                      = pb.fPARMid;
+				plantLevel_out.fPARUp_3_3                       = pb.fPARUp;
+
+				// Fruit light interception totals and banded outputs.
+				plantLevel_out.fruitCount_b1 = 0;
+				plantLevel_out.fruitCount_b2 = 0;
+				plantLevel_out.fruitCount_b3 = 0;
+				plantLevel_out.fruitCount_b4 = 0;
+				plantLevel_out.fruitIncidentPAR_mean_b1_umol_m2_s = 0;
+				plantLevel_out.fruitIncidentPAR_mean_b2_umol_m2_s = 0;
+				plantLevel_out.fruitIncidentPAR_mean_b3_umol_m2_s = 0;
+				plantLevel_out.fruitIncidentPAR_mean_b4_umol_m2_s = 0;
+				
+				
+				for (int i = 0; i < output_height.length; i++) {
+					int fruitCountBand = 0;
+					double fruitIncidentPARBand = 0;
+						double fruitAbsorbedPARBand = 0;
+						double fruitAbsorbedRadiationBand = 0;
+						if (i < output_height.length - 1) {
+							fruitCountBand = Math.toIntExact(count((* b:FruitService, (
+								b.plantNumber == pb.plantNumber &&
+								b.fieldInstanceId == pb.fieldInstanceId &&
+								b.isReportable == pb.isReportable &&
+								b.z >= output_height[i] &&
+								b.z < output_height[i + 1]
+							) *)));
+							fruitIncidentPARBand = mean((* b:FruitService, (
+								b.plantNumber == pb.plantNumber &&
+								b.fieldInstanceId == pb.fieldInstanceId &&
+								b.isReportable == pb.isReportable &&
+								b.z >= output_height[i] &&
+								b.z < output_height[i + 1]
+							) *).fruitIncidentPAR);
+							fruitAbsorbedPARBand = sum((* b:FruitService, (
+								b.plantNumber == pb.plantNumber &&
+								b.fieldInstanceId == pb.fieldInstanceId &&
+								b.isReportable == pb.isReportable &&
+								b.z >= output_height[i] &&
+								b.z < output_height[i + 1]
+							) *).fruitAbsorbedPAR);
+							fruitAbsorbedRadiationBand = sum((* b:FruitService, (
+								b.plantNumber == pb.plantNumber &&
+								b.fieldInstanceId == pb.fieldInstanceId &&
+								b.isReportable == pb.isReportable &&
+								b.z >= output_height[i] &&
+								b.z < output_height[i + 1]
+							) *).fruitAbsorbedRadiation);
+						} else {
+							fruitCountBand = Math.toIntExact(count((* b:FruitService, (
+								b.plantNumber == pb.plantNumber &&
+								b.fieldInstanceId == pb.fieldInstanceId &&
+								b.isReportable == pb.isReportable &&
+								b.z >= output_height[i]
+							) *)));
+							fruitIncidentPARBand = mean((* b:FruitService, (
+								b.plantNumber == pb.plantNumber &&
+								b.fieldInstanceId == pb.fieldInstanceId &&
+								b.isReportable == pb.isReportable &&
+								b.z >= output_height[i]
+							) *).fruitIncidentPAR);
+							fruitAbsorbedPARBand = sum((* b:FruitService, (
+								b.plantNumber == pb.plantNumber &&
+								b.fieldInstanceId == pb.fieldInstanceId &&
+								b.isReportable == pb.isReportable &&
+								b.z >= output_height[i]
+							) *).fruitAbsorbedPAR);
+							fruitAbsorbedRadiationBand = sum((* b:FruitService, (
+								b.plantNumber == pb.plantNumber &&
+								b.fieldInstanceId == pb.fieldInstanceId &&
+								b.isReportable == pb.isReportable &&
+								b.z >= output_height[i]
+							) *).fruitAbsorbedRadiation);
+						}
+					if (Double.isNaN(fruitIncidentPARBand) || Double.isInfinite(fruitIncidentPARBand)) fruitIncidentPARBand = 0.0;
+					if (Double.isNaN(fruitAbsorbedPARBand) || Double.isInfinite(fruitAbsorbedPARBand)) fruitAbsorbedPARBand = 0.0;
+					if (Double.isNaN(fruitAbsorbedRadiationBand) || Double.isInfinite(fruitAbsorbedRadiationBand)) fruitAbsorbedRadiationBand = 0.0;
+
+					if (i == 0) {
+						plantLevel_out.fruitIncidentPAR_mean_b1_umol_m2_s = fruitIncidentPARBand;
+						
+					} else if (i == 1) {
+						plantLevel_out.fruitIncidentPAR_mean_b2_umol_m2_s = fruitIncidentPARBand;
+						
+					} else if (i == 2) {
+						plantLevel_out.fruitIncidentPAR_mean_b3_umol_m2_s = fruitIncidentPARBand;
+						
+					} else if (i == 3) {
+						plantLevel_out.fruitIncidentPAR_mean_b4_umol_m2_s = fruitIncidentPARBand;
+						
+					}
+				}
+				
+			/** Photosynthesis and Water Flux */
+			plantLevel_out.meanPAnet                        = pb.meanPAnet;
+			plantLevel_out.meanAnet                         = pb.meanAnet;
+			plantLevel_out.carbonAssimilation               = pb.carbonAssimilation;
+			plantLevel_out.waterFlux_optimized              = pb.waterFlux_optimized;
+			plantLevel_out.WUE                              = pb.WUE;
+			plantLevel_out.waterFluxPotential               = pb.waterFluxPotential;
+			plantLevel_out.xylemWaterPotential              = pb.xylemWaterPotential;
+			plantLevel_out.leaf_waterPotential              = Math.min(pb.xylemWaterPotential, leaf_waterPotential);
+			
+			plantLevel_out.potentialSupplyDemandRatio       = pb.potentialSupplyDemandRatio;
+			plantLevel_out.phloemSugarConcentration         = pb.sugarConcentration_phloem;
+			
+			/** Biomass of Different Components */
+			plantLevel_out.biomassPlant                     = pb.biomass;
+			plantLevel_out.biomassLeaf                      = pb.biomassLeaf;
+			plantLevel_out.biomassInternode                 = pb.biomassInternode;
+			plantLevel_out.biomassFruit                     = pb.biomassFruit;
+			plantLevel_out.biomassFineRoot                  = pb.biomassFineRoot;
+			plantLevel_out.biomassStructuralRoot            = pb.biomassStructuralRoot;
+			plantLevel_out.biomassFlower                    = pb.biomassFlower;
+			plantLevel_out.biomassCordon                    = pb.biomassCordon;
+			plantLevel_out.biomassTrunk                     = pb.biomassTrunk;
+			
+			/** Nonstructural Carbon Concentrations in Different Parts */
+			plantLevel_out.leafNSC                          = pb.leafNSC;
+			plantLevel_out.fineRootNSC                      = pb.fineRootNSC;
+			plantLevel_out.structuralRootNSC                = pb.structuralRootNSC;
+			plantLevel_out.internodeNSC                     = pb.internodeNSC;
+			plantLevel_out.cordonNSC                        = pb.cordonNSC;
+			plantLevel_out.trunkNSC                         = pb.trunkNSC;
+			
+			/** Fraction of Unloadings */
+			plantLevel_out.totalUnloading                   = pb.totalUnloading;
+			
+			plantLevel_out.fraction_leafUnloading           = pb.fraction_leafUnloading;
+			plantLevel_out.fraction_fruitUnloading          = pb.fraction_fruitUnloading;
+			plantLevel_out.fraction_fineRootUnloading       = pb.fraction_fineRootUnloading;
+			plantLevel_out.fraction_structuralRootUnloading = pb.fraction_structuralRootUnloading;
+			plantLevel_out.fraction_internodeUnloading      = pb.fraction_internodeUnloading;
+			plantLevel_out.fraction_perennielWoodUnloading  = pb.fraction_perennielWoodUnloading;
+			
+			plantLevel_out.fraction_flowerUnloading         = pb.fraction_flowerUnloading;
+			plantLevel_out.fraction_petioleUnloading        = pb.fraction_petioleUnloading;
+		
+			/** Fraction of Loadings */
+			plantLevel_out.fraction_leafLoading             = pb.fraction_leafLoading;
+			plantLevel_out.fraction_internodeLoading        = pb.fraction_internodeLoading;
+			plantLevel_out.fraction_perennielWoodLoading    = pb.fraction_perennielWoodLoading;
+			plantLevel_out.fraction_fineRootLoading         = pb.fraction_fineRootLoading;
+			plantLevel_out.fraction_structuralRootLoading   = pb.fraction_structuralRootLoading;
+			
+			/** carbon leakage during transport*/
+			plantLevel_out.totalLeakage		         		= pb.totalLeakage;
+			plantLevel_out.internodeLeakage		         	= pb.internodeLeakage;
+			plantLevel_out.structuralRootLeakage		   	= pb.structuralRootLeakage;
+			
+			/** maintenance cost */
+			plantLevel_out.maintenanceDM                    = pb.maintenanceDM;
+			plantLevel_out.maintenanceLeaf 					= pb.maintenanceLeaf;
+			plantLevel_out.maintenanceInternode             = pb.maintenanceInternode;
+			plantLevel_out.maintenanceFruit            		= pb.maintenanceFruit;
+			plantLevel_out.maintenanceFineRoot 				= pb.maintenanceFineRoot;
+			plantLevel_out.maintenanceStructuralRoot		= pb.maintenanceStructuralRoot;
+
+			/** growth cost */
+			plantLevel_out.growthCost                       = pb.growthCost;
+			plantLevel_out.growthCostLeaf 					= pb.growthCostLeaf;
+			plantLevel_out.growthCostInternode              = pb.growthCostInternode;
+			plantLevel_out.growthCostFruit            		= pb.growthCostFruit;
+			plantLevel_out.growthCostFineRoot 				= pb.growthCostFineRoot;
+			plantLevel_out.growthCostStructuralRoot		    = pb.growthCostStructuralRoot;
+
+			/** Carbon balance and perennial-structure carbon costs */
+			plantLevel_out.previousDailyNetCarbonBalance    = pb.previousDailyNetCarbonBalance;
+			plantLevel_out.cordonStructureDM_SEC            = pb.cordonStructureDM_SEC;
+			plantLevel_out.trunkStructureDM_SEC             = pb.trunkStructureDM_SEC;
+			plantLevel_out.perennielWoodStructureDM_SEC     = pb.perennielWoodStructureDM_SEC;
+			plantLevel_out.structuralRootStructureDM_SEC    = pb.structuralRootStructureDM_SEC;
+			plantLevel_out.cordonMaintenanceDM              = pb.cordonMaintenanceDM;
+			plantLevel_out.trunkMaintenanceDM               = pb.trunkMaintenanceDM;
+			plantLevel_out.perennielWoodMaintenanceDM       = pb.perennielWoodMaintenanceDM;
+			plantLevel_out.structuralRootMaintenanceDM      = pb.structuralRootMaintenanceDM;
+			plantLevel_out.cordonReserveDM                  = pb.cordonReserveDM;
+			plantLevel_out.trunkReserveDM                   = pb.trunkReserveDM;
+			plantLevel_out.perennielWoodReserveDM           = pb.perennielWoodReserveDM;
+			plantLevel_out.structuralRootReserveDM          = pb.structuralRootReserveDM;
+
+			/** Reserve turnover diagnostics */
+			double reserveHydrolysisFlux = 0.0;
+			double reserveSynthesisFlux = 0.0;
+			double reserveSeasonBeta = 0.0;
+			double hydRateWeighted = 0.0;
+			double hydRateWeight = 0.0;
+			for (Internode annualInternodeDiag : (* ioDiag:Internode, (
+				ioDiag.plantNumber == pb.plantNumber &&
+				ioDiag.fieldInstanceId == pb.fieldInstanceId &&
+				ioDiag.isReportable == pb.isReportable &&
+				!((ioDiag instanceof Cordon) || (ioDiag instanceof Trunk))
+			) *)) {
+				reserveHydrolysisFlux += annualInternodeDiag.loading;
+				reserveSynthesisFlux += annualInternodeDiag.reserveDM;
+				reserveSeasonBeta = annualInternodeDiag.getReserveSeasonBeta(daysSinceWinterSolstice);
+				if (annualInternodeDiag.carbon_nonStructure > 0.0) {
+					hydRateWeighted += annualInternodeDiag.carbon_nonStructure * annualInternodeDiag.adjustHydRateSeasonally(daysSinceWinterSolstice);
+					hydRateWeight += annualInternodeDiag.carbon_nonStructure;
+				}
+			}
+			for (Cordon cordonDiag : (* coDiag:Cordon, (
+				coDiag.plantNumber == pb.plantNumber &&
+				coDiag.fieldInstanceId == pb.fieldInstanceId &&
+				coDiag.isReportable == pb.isReportable
+			) *)) {
+				reserveHydrolysisFlux += cordonDiag.loading;
+				reserveSynthesisFlux += cordonDiag.reserveDM;
+				reserveSeasonBeta = cordonDiag.getReserveSeasonBeta(daysSinceWinterSolstice);
+				if (cordonDiag.carbon_nonStructure > 0.0) {
+					hydRateWeighted += cordonDiag.carbon_nonStructure * cordonDiag.adjustHydRateSeasonally(daysSinceWinterSolstice);
+					hydRateWeight += cordonDiag.carbon_nonStructure;
+				}
+			}
+			for (Trunk trunkDiag : (* trDiag:Trunk, (
+				trDiag.plantNumber == pb.plantNumber &&
+				trDiag.fieldInstanceId == pb.fieldInstanceId &&
+				trDiag.isReportable == pb.isReportable
+			) *)) {
+				reserveHydrolysisFlux += trunkDiag.loading;
+				reserveSynthesisFlux += trunkDiag.reserveDM;
+				reserveSeasonBeta = trunkDiag.getReserveSeasonBeta(daysSinceWinterSolstice);
+				if (trunkDiag.carbon_nonStructure > 0.0) {
+					hydRateWeighted += trunkDiag.carbon_nonStructure * trunkDiag.adjustHydRateSeasonally(daysSinceWinterSolstice);
+					hydRateWeight += trunkDiag.carbon_nonStructure;
+				}
+			}
+			for (StructuralRoot structuralRootDiag : (* srDiag:StructuralRoot, (
+				srDiag.plantNumber == pb.plantNumber &&
+				srDiag.fieldInstanceId == pb.fieldInstanceId &&
+				srDiag.isReportable == pb.isReportable
+			) *)) {
+				reserveHydrolysisFlux += structuralRootDiag.loading;
+				reserveSynthesisFlux += structuralRootDiag.reserveDM;
+				reserveSeasonBeta = structuralRootDiag.getReserveSeasonBeta(daysSinceWinterSolstice);
+				if (structuralRootDiag.carbon_nonStructure > 0.0) {
+					hydRateWeighted += structuralRootDiag.carbon_nonStructure * structuralRootDiag.adjustHydRateSeasonally(daysSinceWinterSolstice);
+					hydRateWeight += structuralRootDiag.carbon_nonStructure;
+				}
+			}
+			plantLevel_out.reserveSeasonBeta = reserveSeasonBeta;
+			plantLevel_out.effectiveHydRate = (hydRateWeight > 0.0) ? hydRateWeighted / hydRateWeight : 0.0;
+			plantLevel_out.reserveHydrolysisFlux = reserveHydrolysisFlux;
+			plantLevel_out.reserveSynthesisFlux = reserveSynthesisFlux;
+			plantLevel_out.netReserveChange = reserveSynthesisFlux - reserveHydrolysisFlux;
+			
+			plantLevel_out.pruneFlowersRemoved        		= FruitPlanner.pruneFlowersRemoved;
+			plantLevel_out.pruneFruitsRemoved        		= FruitPlanner.pruneFruitsRemoved;
+			plantLevel_out.pruneFruitBiomassRemoved    		= FruitPlanner.pruneBiomassRemoved;
+			
+			plantLevel_out.pruneLeafAreaRemoved         = (float) LeafPlanner.pruneLeafAreaRemoved;
+			plantLevel_out.pruneLeafBiomassRemoved      = (float) LeafPlanner.pruneLeafBiomassRemoved;
+			plantLevel_out.pruneInternodeBiomassRemoved = (float) LeafPlanner.pruneInternodeBiomassRemoved;
+			plantLevel_out.flowerSelfAssimC               = pb.flowerSelfAssimC;
+			plantLevel_out.droppedFlowerCount             = pb.droppedFlowerCount;
+			plantLevel_out.totalFlowerCount               = pb.totalFlowerCount;
+
+
+			/**Nitrogen information*/
+			plantLevel_out.totalNitrogen       			    = pb.totalNitrogen;
+			plantLevel_out.plantNitrogenCommonPool          = pb.nitrogenCommonPool;
+			plantLevel_out.plantNitrogenContent             = pb.NConcentration;
+			plantLevel_out.Nuptake             				= pb.Nuptake;
+			plantLevel_out.meanLeafNcontent             	= mean((*l:Leaf, (
+				l.plantNumber == pb.plantNumber &&
+				l.fieldInstanceId == pb.fieldInstanceId &&
+				l.isReportable == pb.isReportable
+			)*)[leafNcontent]);
+			if (Double.isNaN(plantLevel_out.meanLeafNcontent) || Double.isInfinite(plantLevel_out.meanLeafNcontent)) plantLevel_out.meanLeafNcontent = 0.0;
+			plantLevel_out.Ndegradation                 	= pb.Ndegradation;
+			plantLevel_out.Nsynthesis                   	= pb.Nsynthesis;
+		} 
+		
+		
+
+		// Safely update soil-related outputs from RootBase
+		if (rb != null && rb.availalbeWater != null && rb.availalbeWater.length > 0) {
+			plantLevel_out.totalSoilAvailableWater = sum(rb.availalbeWater);
+			plantLevel_out.meanSoilWaterPotential = rb.meanSoilWaterPotential;
+		
+			if ("photosynthesisTest".equals(special_scenario)) {
+				plantLevel_out.meanSoilWaterPotential = inputWaterPotential;
+			}
+		} else {
+			if (printFlag && step <= 3) println("Warning: `rb` is null or `availalbeWater` array is empty. Assigning 0.");
+			plantLevel_out.totalSoilAvailableWater = 0.0;
+			plantLevel_out.meanSoilWaterPotential = 0.0;
+		}
+		
+		// Safely update fine root outputs from FineRoot (rt)
+		if (rtID > 0 && rt != null) {
+			// Sum across matching FineRoot nodes if rt has non-NaN values
+			plantLevel_out.sumNuptakeCostRoot = !Double.isNaN(rt.NuptakeCost)
+				? sum((* r1:FineRoot, (
+					r1.plantNumber == pb.plantNumber &&
+					r1.fieldInstanceId == pb.fieldInstanceId &&
+					r1.isReportable == pb.isReportable
+				) *)[NuptakeCost])
+				: 0.0;
+		
+			plantLevel_out.sumRootConductance = !Double.isNaN(rt.Gr)
+				? sum((* r1:FineRoot, (
+					r1.plantNumber == pb.plantNumber &&
+					r1.fieldInstanceId == pb.fieldInstanceId &&
+					r1.isReportable == pb.isReportable
+				) *)[Gr])
+				: 0.0;
+		} else {
+			if (printFlag && step <= 3) println("Warning: `rt` is null. Assigning default 0 values to root output.");
+			plantLevel_out.sumNuptakeCostRoot = 0.0;
+			plantLevel_out.sumRootConductance = 0.0;
+		}
+
+	
+	
+		
+		/** information at different heights */
+		plantLevel_out.fPAR_1 = (fPAR_.size() > 0) ? ((Double) fPAR_.get(0)).doubleValue() : 0.0;
+		plantLevel_out.fPAR_2 = (fPAR_.size() > 1) ? ((Double) fPAR_.get(1)).doubleValue() : 0.0;
+		plantLevel_out.fPAR_3 = (fPAR_.size() > 2) ? ((Double) fPAR_.get(2)).doubleValue() : 0.0;
+		plantLevel_out.fPAR_4 = (fPAR_.size() > 3) ? ((Double) fPAR_.get(3)).doubleValue() : 0.0;
+
+		//cumulative leaf area above a certain height
+		plantLevel_out.cumLAI_1 = (cumLAI_.length > 0) ? cumLAI_[0] : 0.0;
+		plantLevel_out.cumLAI_2 = (cumLAI_.length > 1) ? cumLAI_[1] : 0.0;
+		plantLevel_out.cumLAI_3 = (cumLAI_.length > 2) ? cumLAI_[2] : 0.0;
+		plantLevel_out.cumLAI_4 = (cumLAI_.length > 3) ? cumLAI_[3] : 0.0;
+ 
+		// Assign light sensor values dynamically
+		for (int i = 0; i < fs.length; i++) {
+			if (i == 0) plantLevel_out.fs_1 = fs[i];
+			else if (i == 1) plantLevel_out.fs_2 = fs[i];
+			else if (i == 2) plantLevel_out.fs_3 = fs[i];
+			else if (i == 3) plantLevel_out.fs_4 = fs[i];
+		}
+		
+		// Assign internode water potential values dynamically
+		 for (int i = 0; i < intWaterPotential.length; i++) {
+			if (i == 0) plantLevel_out.intWaterPotential_1 = intWaterPotential[i];
+			else if (i == 1) plantLevel_out.intWaterPotential_2 = intWaterPotential[i];
+			else if (i == 2) plantLevel_out.intWaterPotential_3 = intWaterPotential[i];
+			else if (i == 3) plantLevel_out.intWaterPotential_4 = intWaterPotential[i];
+		}
+		// Committed leaf physiology in the same user-defined height zones.
+		plantLevel_out.meanAnet_1 = 0.0;
+		plantLevel_out.meanAnet_2 = 0.0;
+		plantLevel_out.meanAnet_3 = 0.0;
+		plantLevel_out.meanAnet_4 = 0.0;
+		plantLevel_out.meanLeafWaterPotential_1 = 0.0;
+		plantLevel_out.meanLeafWaterPotential_2 = 0.0;
+		plantLevel_out.meanLeafWaterPotential_3 = 0.0;
+		plantLevel_out.meanLeafWaterPotential_4 = 0.0;
+		plantLevel_out.meanGs_1 = 0.0;
+		plantLevel_out.meanGs_2 = 0.0;
+		plantLevel_out.meanGs_3 = 0.0;
+		plantLevel_out.meanGs_4 = 0.0;
+
+		int outputHeightZoneCount = (output_height == null) ? 0 : output_height.length;
+		if (outputHeightZoneCount != 4 && !warnedUnexpectedOutputHeightZoneCount) {
+			println("Warning: output_height defines " + outputHeightZoneCount
+				+ " canopy zones, but plant-level physiology exposes four zone columns; "
+				+ "only the first four available zones will be written.");
+			warnedUnexpectedOutputHeightZoneCount = true;
+		}
+		Leaf[] focalPhysiologyLeaves = array((* zoneLeaf:Leaf, (
+			zoneLeaf.plantNumber == pb.plantNumber &&
+			zoneLeaf.fieldInstanceId == pb.fieldInstanceId &&
+			zoneLeaf.isReportable == pb.isReportable
+		) *));
+		double[][] canopyZonePhysiology = calculateCanopyZonePhysiology(focalPhysiologyLeaves, output_height);
+		int availablePhysiologyZones = Math.min(4, outputHeightZoneCount);
+		if (availablePhysiologyZones > 0) {
+			plantLevel_out.meanAnet_1 = canopyZonePhysiology[CANOPY_ZONE_MEAN_ANET][0];
+			plantLevel_out.meanLeafWaterPotential_1 = canopyZonePhysiology[CANOPY_ZONE_MEAN_WATER_POTENTIAL][0];
+			plantLevel_out.meanGs_1 = canopyZonePhysiology[CANOPY_ZONE_MEAN_GS][0];
+		}
+		if (availablePhysiologyZones > 1) {
+			plantLevel_out.meanAnet_2 = canopyZonePhysiology[CANOPY_ZONE_MEAN_ANET][1];
+			plantLevel_out.meanLeafWaterPotential_2 = canopyZonePhysiology[CANOPY_ZONE_MEAN_WATER_POTENTIAL][1];
+			plantLevel_out.meanGs_2 = canopyZonePhysiology[CANOPY_ZONE_MEAN_GS][1];
+		}
+		if (availablePhysiologyZones > 2) {
+			plantLevel_out.meanAnet_3 = canopyZonePhysiology[CANOPY_ZONE_MEAN_ANET][2];
+			plantLevel_out.meanLeafWaterPotential_3 = canopyZonePhysiology[CANOPY_ZONE_MEAN_WATER_POTENTIAL][2];
+			plantLevel_out.meanGs_3 = canopyZonePhysiology[CANOPY_ZONE_MEAN_GS][2];
+		}
+		if (availablePhysiologyZones > 3) {
+			plantLevel_out.meanAnet_4 = canopyZonePhysiology[CANOPY_ZONE_MEAN_ANET][3];
+			plantLevel_out.meanLeafWaterPotential_4 = canopyZonePhysiology[CANOPY_ZONE_MEAN_WATER_POTENTIAL][3];
+			plantLevel_out.meanGs_4 = canopyZonePhysiology[CANOPY_ZONE_MEAN_GS][3];
+		}
+
+		if (useCTRAM == true) {
+			for (int i = 0; i < sugarConcentration.length; i++) {
+				if (i == 0) plantLevel_out.sugarConcentration_1 = sugarConcentration[i];
+				else if (i == 1) plantLevel_out.sugarConcentration_2 = sugarConcentration[i];
+				else if (i == 2) plantLevel_out.sugarConcentration_3 = sugarConcentration[i];
+				else if (i == 3) plantLevel_out.sugarConcentration_4 = sugarConcentration[i];
+			}
+		}
+		if (printFlag && (debug || step <= 3)) {
+			println("outputTables[plant-row] step=" + step
+				+ " pbId=" + pb.getId()
+				+ " plantNumber=" + pb.plantNumber
+				+ " fieldInstanceId=" + pb.fieldInstanceId
+				+ " isReportable=" + pb.isReportable
+				+ " leafArea=" + plantLevel_out.leafArea
+				+ " totalFruitNumber=" + plantLevel_out.totalFruitNumber
+				+ " AbsorbedTotRad=" + plantLevel_out.AbsorbedTotRad
+				+ " AbsorbedPAR=" + plantLevel_out.AbsorbedPAR
+				+ " fabs=" + plantLevel_out.fabsTotRad
+				+ " fpar=" + plantLevel_out.fabsPAR);
+		}
+		
+		
+		
+		
+		// Write output data to csv.
+		writeWaterFluxSolverDebug(pb);
+		if (!stepwiseOutput) {
+			StepwiseCsvWriter plantLevelCsvWriter = (StepwiseCsvWriter) csvWriters.get(plantLevelOutputFilePath);
+			if (plantLevelCsvWriter == null) {
+				plantLevelCsvWriter = new StepwiseCsvWriter(plantLevelOutputFilePath, new CsvMapper());
+				csvWriters.put(plantLevelOutputFilePath, plantLevelCsvWriter);
+
+			}
+			plantLevelCsvWriter.deleteFileIf(step == 1).write(plantLevel_out);
+		} else {
+			plantLevelOutputFilePath = PATH_OUTPUT + "plant-level" + "-" + outputTable_name + "-" + "step-" + step + ".csv";
+			StepwiseCsvWriter plantLevelCsvWriter = new StepwiseCsvWriter(plantLevelOutputFilePath, new CsvMapper());
+			plantLevelCsvWriter.deleteFileIf(true).write(plantLevel_out);
+		}
+	
+	
+	} else if (table == 1) {
+		FieldBase fb = null;
+		if (outputTables.fbID <= 0 || step <=1) { 
+			FieldBase f = findOutputFieldBase();
+			if (f != null) {
+				outputTables.addFieldBase(f);
+				if (printFlag) { println("Field base is added"); }
+			} else {
+				if (printFlag && step <= 3) { println("No FieldBase found, unable to initialize outputTables.fb"); }
+				// Handle the case where f is null if necessary
+			}
+		}
+		
+		
+		// Ensure that outputTables.fb is still not null after the above logic
+		if (outputTables.fbID > 0) {
+			fb = getFieldBase();
+			if (fb == null) {
+				fb = findOutputFieldBase();
+				if (fb != null) outputTables.addFieldBase(fb);
+			}
+			
+			fpar_ground = 0.0; // Initialize to a default value
+			fparSoil = 0.0;
+			fabsSoil = 0.0;
+			double k_ground = 0.0; // Initialize to a default value
+			//fpar_ground = daytime ? mean((* t:Tile*)[fabs]) : 0;
+			//with a small number of plant, there are more light penetrated to the ground 
+			//in the simulation, so we use an alternative approach and try to calculate it from
+			// the plant. Assume 6% is reflected by canopy and shoots
+			if(useShadingFactor == true) {
+				fpar_ground = daytime ? Math.max(0.01, (1- 1.06*fb.fpar)) : 0;
+				fparSoil = mean((* t:Tile, (t.border == false && t.isReportable && t.fieldInstanceId == fb.fieldInstanceId) *)[fpar]);
+				fabsSoil = mean((* t:Tile, (t.border == false && t.isReportable && t.fieldInstanceId == fb.fieldInstanceId) *)[fabs]);
+			} else {
+			
+				fpar_ground = mean((* t:Tile, (t.border == false && t.isReportable && t.fieldInstanceId == fb.fieldInstanceId) *)[fpar]);
+				fparSoil = mean((* t:Tile, (t.border == false && t.isReportable && t.fieldInstanceId == fb.fieldInstanceId) *)[fpar]);
+				fabsSoil = mean((* t:Tile, (t.border == false && t.isReportable && t.fieldInstanceId == fb.fieldInstanceId) *)[fabs]);
+			}
+			if (Double.isNaN(fpar_ground) || Double.isInfinite(fpar_ground)) fpar_ground = 0.0;
+			if (Double.isNaN(fparSoil) || Double.isInfinite(fparSoil)) fparSoil = 0.0;
+			if (Double.isNaN(fabsSoil) || Double.isInfinite(fabsSoil)) fabsSoil = 0.0;
+			// leaf coextinction coefficient
+			// Compute mean fpar_ground safely
+			//fpar_ground = mean((* t:Tile*)[fabs]);
+			
+			// Ensure fb and fb.lai are not null before accessing
+			if (fbID > 0) {
+				
+				if (fpar_ground > 0 && fb.lai > 0) {
+					// Additional check: Prevent Math.log(0) or negative values
+					if (fpar_ground < 1) {
+						k_ground = - Math.log(1 - fpar_ground) / fb.lai;
+					} else {
+						//println("Warning: fpar_ground is 1 or greater, setting k_ground to a default safe value.");
+						k_ground = 0; // Assigning a safe default value
+					}
+				} else {
+					//println("Warning: fpar_ground is non-positive or fb.lai is zero, setting k_ground to 0.");
+					k_ground = 0; // Default fallback value
+				}
+			} else {
+				//println("Error: fb or fb.lai is null, unable to compute k_ground.");
+				k_ground = 0; // Default fallback to prevent a crash
+				return;
+			}
+			
+
+			fieldLevel_out.timestamp               = timestamp;
+			fieldLevel_out.year                    = year;
+			fieldLevel_out.dayOfYear               = dayOfYear;
+			fieldLevel_out.hourOfDay               = hourOfDay;
+			fieldLevel_out.latitude                = latitude;
+			fieldLevel_out.longitude               = longitude;
+			fieldLevel_out.rowDistance             = rowDistance;
+			fieldLevel_out.plantDistance           = plantDistance;
+			fieldLevel_out.rowOrientation          = rowOrientation;
+			fieldLevel_out.scenario                = scenario;
+			fieldLevel_out.age_degreeDay           = (pb != null) ? pb.age : 0;
+			fieldLevel_out.age_days                = (pb != null) ? pb.ageD : 0;
+			fieldLevel_out.incomingRadiation       = globalRadiation;
+			fieldLevel_out.azimuth                 = azimuth;
+			fieldLevel_out.zenith                  = zenith;
+			fieldLevel_out.solarElevation          = solarElevation;
+			fieldLevel_out.leafAreaPerPlant        = fb.leafAreaPerTree;
+			fieldLevel_out.LAI                     = fb.lai;
+			fieldLevel_out.hourlyAbsorbedRadiation = fb.hourlyAbsorbedRadiation;
+			
+			fieldLevel_out.fabsPlant               = fb.fabs;
+			fieldLevel_out.fparPlant               = fb.fpar;
+			fieldLevel_out.k                       = fb.k;
+			
+			fieldLevel_out.fabsSoil                = fabsSoil;
+			fieldLevel_out.fparSoil                = fparSoil;			
+			fieldLevel_out.fparGround              = fpar_ground;
+			fieldLevel_out.k_ground                = k_ground;
+			
+			fieldLevel_out.fPARLow                 = (pb != null) ? pb.fPARLow : 0;
+			fieldLevel_out.fPARMid                 = (pb != null) ? pb.fPARMid : 0;
+			fieldLevel_out.fPARUp                  = (pb != null) ? pb.fPARUp : 0;
+			fieldLevel_out.fPARGlobal              = fPAR;
+			fieldLevel_out.fDiffuseLight           = fdiff;
+			fieldLevel_out.plantDensity            = dens;
+			fieldLevel_out.simuuid                 = simUUID;
+			// Write output data to csv.
+			
+		// Write output data to csv.	
+		if (!stepwiseOutput) {
+			StepwiseCsvWriter fieldLevelCsvWriter = (StepwiseCsvWriter) csvWriters.get(fieldLevelOutputFilePath);
+			if (fieldLevelCsvWriter == null) {
+				// If not present, create it and add to the map
+				fieldLevelCsvWriter = new StepwiseCsvWriter(fieldLevelOutputFilePath, new CsvMapper());
+				csvWriters.put(fieldLevelOutputFilePath, fieldLevelCsvWriter);
+			}
+			fieldLevelCsvWriter.deleteFileIf(step == 1).write(fieldLevel_out);
+		} else {
+			fieldLevelOutputFilePath = PATH_OUTPUT + "field-level" + "-" + outputTable_name + "-step-" + step + ".csv";
+			StepwiseCsvWriter fieldLevelCsvWriter = new StepwiseCsvWriter(fieldLevelOutputFilePath, new CsvMapper());
+			fieldLevelCsvWriter.deleteFileIf(true).write(fieldLevel_out);
+		}
+		
+		} else {
+			if (printFlag && step <= 3) { println("outputTables.fb is still null after attempting to initialize. Cannot add rows to dataset."); }
+			// Handle the case where outputTables.fb is null
+		}
+	} else if (table == 2 && daysSinceWinterSolstice < harvestDAWS) {
+		
+		FruitService fr = null;
+		
+    
+		if((fsID <= 0 || step <=1) && findOutputFruitService(pb) != null) { 
+			FruitService b = findOutputFruitService(pb);
+			if(b != null) {
+				outputTables.addFruitService(b);
+				if (printFlag) { println(" one fruit instance is added"); }
+			}
+		} 
+	
+		// Ensure `fr` is not null before accessing its properties
+		if (pb != null && fsID > 0 && daysSinceWinterSolstice < harvestDAWS && count((*b:FruitService, (
+			b.plantNumber == pb.plantNumber &&
+			b.fieldInstanceId == pb.fieldInstanceId &&
+			b.isReportable == pb.isReportable
+		)*)) > 0) {
+			fr = getFruitService();
+			if (fr == null) {
+				fr = findOutputFruitService(pb);
+				if (fr != null) outputTables.addFruitService(fr);
+			}
+			fw_mean = mean((*b:FruitService,(
+				b.plantNumber == pb.plantNumber &&
+				b.fieldInstanceId == pb.fieldInstanceId &&
+				b.isReportable == pb.isReportable
+			)*).freshWeight);
+			dw_mean = mean((*b:FruitService,(
+				b.plantNumber == pb.plantNumber &&
+				b.fieldInstanceId == pb.fieldInstanceId &&
+				b.isReportable == pb.isReportable
+			)*).biomass);
+			sc_mean = mean((*b:FruitService,(
+				b.plantNumber == pb.plantNumber &&
+				b.fieldInstanceId == pb.fieldInstanceId &&
+				b.isReportable == pb.isReportable
+			)*).sugarConcentration_fruit);
+			
+			float fw_sd = stddev(array((*b:FruitService,(
+				b.plantNumber == pb.plantNumber &&
+				b.fieldInstanceId == pb.fieldInstanceId &&
+				b.isReportable == pb.isReportable
+			)*).freshWeight),fw_mean);
+			float dw_sd = stddev(array((*b:FruitService,(
+				b.plantNumber == pb.plantNumber &&
+				b.fieldInstanceId == pb.fieldInstanceId &&
+				b.isReportable == pb.isReportable
+			)*).biomass),dw_mean);
+			float sc_sd = stddev(array((*b:FruitService,(
+				b.plantNumber == pb.plantNumber &&
+				b.fieldInstanceId == pb.fieldInstanceId &&
+				b.isReportable == pb.isReportable
+			)*).sugarConcentration_fruit),sc_mean);
+			
+			// Check for NaN and assign zero if needed
+			if (Double.isNaN(fw_mean) || Double.isInfinite(fw_mean)) fw_mean = 0.0f;
+			if (Double.isNaN(dw_mean) || Double.isInfinite(dw_mean)) dw_mean = 0.0f;
+			if (Double.isNaN(sc_mean) || Double.isInfinite(sc_mean)) sc_mean = 0.0f;
+			
+			if (Double.isNaN(fw_sd) || Double.isInfinite(fw_sd)) fw_sd = 0.0f;
+			if (Double.isNaN(dw_sd) || Double.isInfinite(dw_sd)) dw_sd = 0.0f;
+			if (Double.isNaN(sc_sd) || Double.isInfinite(sc_sd)) sc_sd = 0.0f;
+			
+				// Initialize arrays for different fruit properties (4 bands defined by output_height bounds).
+				int[] totalFruitNumber = new int[output_height.length];
+				int[] fruitCountBand = new int[output_height.length];
+				double[] meanFruitFW = new double[output_height.length];
+				double[] meanFruitDW = new double[output_height.length];
+				double[] meanFruitSc = new double[output_height.length];
+				double[] fruitIncidentPARMean = new double[output_height.length];
+				double[] fruitAbsorbedPARSum = new double[output_height.length];
+				double[] fruitAbsorbedRadiationSum = new double[output_height.length];
+				double[] fruitLightAreaSum = new double[output_height.length];
+				
+				// Ensure calculations are only performed if valid data exists
+				if (count((*b:FruitService, (
+					b.plantNumber == pb.plantNumber &&
+					b.fieldInstanceId == pb.fieldInstanceId &&
+					b.isReportable == pb.isReportable
+				)*)) > 0) {
+					for (int i = 0; i < output_height.length; i++) {
+						if (i < output_height.length - 1) {
+							fruitCountBand[i] = Math.toIntExact(count((*b:FruitService, (
+								b.plantNumber == pb.plantNumber &&
+								b.fieldInstanceId == pb.fieldInstanceId &&
+								b.isReportable == pb.isReportable &&
+								b.z >= output_height[i] &&
+								b.z < output_height[i + 1]
+							)*)));
+							totalFruitNumber[i] = fruitCountBand[i] * berryNumPerBunch;
+							meanFruitFW[i] = mean((*b:FruitService, (
+								b.plantNumber == pb.plantNumber &&
+								b.fieldInstanceId == pb.fieldInstanceId &&
+								b.isReportable == pb.isReportable &&
+								b.z >= output_height[i] &&
+								b.z < output_height[i + 1]
+							)*).freshWeight);
+							meanFruitDW[i] = mean((*b:FruitService, (
+								b.plantNumber == pb.plantNumber &&
+								b.fieldInstanceId == pb.fieldInstanceId &&
+								b.isReportable == pb.isReportable &&
+								b.z >= output_height[i] &&
+								b.z < output_height[i + 1]
+							)*).biomass);
+							meanFruitSc[i] = mean((*b:FruitService, (
+								b.plantNumber == pb.plantNumber &&
+								b.fieldInstanceId == pb.fieldInstanceId &&
+								b.isReportable == pb.isReportable &&
+								b.z >= output_height[i] &&
+								b.z < output_height[i + 1]
+							)*).sugarConcentration_fruit);
+							fruitIncidentPARMean[i] = mean((*b:FruitService, (
+								b.plantNumber == pb.plantNumber &&
+								b.fieldInstanceId == pb.fieldInstanceId &&
+								b.isReportable == pb.isReportable &&
+								b.z >= output_height[i] &&
+								b.z < output_height[i + 1]
+							)*).fruitIncidentPAR);
+							fruitAbsorbedPARSum[i] = sum((*b:FruitService, (
+								b.plantNumber == pb.plantNumber &&
+								b.fieldInstanceId == pb.fieldInstanceId &&
+								b.isReportable == pb.isReportable &&
+								b.z >= output_height[i] &&
+								b.z < output_height[i + 1]
+							)*).fruitAbsorbedPAR);
+							fruitAbsorbedRadiationSum[i] = sum((*b:FruitService, (
+								b.plantNumber == pb.plantNumber &&
+								b.fieldInstanceId == pb.fieldInstanceId &&
+								b.isReportable == pb.isReportable &&
+								b.z >= output_height[i] &&
+								b.z < output_height[i + 1]
+							)*).fruitAbsorbedRadiation);
+							fruitLightAreaSum[i] = sum((*b:FruitService, (
+								b.plantNumber == pb.plantNumber &&
+								b.fieldInstanceId == pb.fieldInstanceId &&
+								b.isReportable == pb.isReportable &&
+								b.z >= output_height[i] &&
+								b.z < output_height[i + 1]
+							)*).fruitLightArea_m2);
+						} else {
+							fruitCountBand[i] = Math.toIntExact(count((*b:FruitService, (
+								b.plantNumber == pb.plantNumber &&
+								b.fieldInstanceId == pb.fieldInstanceId &&
+								b.isReportable == pb.isReportable &&
+								b.z >= output_height[i]
+							)*)));
+							totalFruitNumber[i] = fruitCountBand[i] * berryNumPerBunch;
+							meanFruitFW[i] = mean((*b:FruitService, (
+								b.plantNumber == pb.plantNumber &&
+								b.fieldInstanceId == pb.fieldInstanceId &&
+								b.isReportable == pb.isReportable &&
+								b.z >= output_height[i]
+							)*).freshWeight);
+							meanFruitDW[i] = mean((*b:FruitService, (
+								b.plantNumber == pb.plantNumber &&
+								b.fieldInstanceId == pb.fieldInstanceId &&
+								b.isReportable == pb.isReportable &&
+								b.z >= output_height[i]
+							)*).biomass);
+							meanFruitSc[i] = mean((*b:FruitService, (
+								b.plantNumber == pb.plantNumber &&
+								b.fieldInstanceId == pb.fieldInstanceId &&
+								b.isReportable == pb.isReportable &&
+								b.z >= output_height[i]
+							)*).sugarConcentration_fruit);
+							fruitIncidentPARMean[i] = mean((*b:FruitService, (
+								b.plantNumber == pb.plantNumber &&
+								b.fieldInstanceId == pb.fieldInstanceId &&
+								b.isReportable == pb.isReportable &&
+								b.z >= output_height[i]
+							)*).fruitIncidentPAR);
+							fruitAbsorbedPARSum[i] = sum((*b:FruitService, (
+								b.plantNumber == pb.plantNumber &&
+								b.fieldInstanceId == pb.fieldInstanceId &&
+								b.isReportable == pb.isReportable &&
+								b.z >= output_height[i]
+							)*).fruitAbsorbedPAR);
+							fruitAbsorbedRadiationSum[i] = sum((*b:FruitService, (
+								b.plantNumber == pb.plantNumber &&
+								b.fieldInstanceId == pb.fieldInstanceId &&
+								b.isReportable == pb.isReportable &&
+								b.z >= output_height[i]
+							)*).fruitAbsorbedRadiation);
+							fruitLightAreaSum[i] = sum((*b:FruitService, (
+								b.plantNumber == pb.plantNumber &&
+								b.fieldInstanceId == pb.fieldInstanceId &&
+								b.isReportable == pb.isReportable &&
+								b.z >= output_height[i]
+							)*).fruitLightArea_m2);
+						}
+						if (Double.isNaN(meanFruitFW[i]) || Double.isInfinite(meanFruitFW[i])) meanFruitFW[i] = 0.0;
+						if (Double.isNaN(meanFruitDW[i]) || Double.isInfinite(meanFruitDW[i])) meanFruitDW[i] = 0.0;
+						if (Double.isNaN(meanFruitSc[i]) || Double.isInfinite(meanFruitSc[i])) meanFruitSc[i] = 0.0;
+						if (Double.isNaN(fruitIncidentPARMean[i]) || Double.isInfinite(fruitIncidentPARMean[i])) fruitIncidentPARMean[i] = 0.0;
+						if (Double.isNaN(fruitAbsorbedPARSum[i]) || Double.isInfinite(fruitAbsorbedPARSum[i])) fruitAbsorbedPARSum[i] = 0.0;
+						if (Double.isNaN(fruitAbsorbedRadiationSum[i]) || Double.isInfinite(fruitAbsorbedRadiationSum[i])) fruitAbsorbedRadiationSum[i] = 0.0;
+						if (Double.isNaN(fruitLightAreaSum[i]) || Double.isInfinite(fruitLightAreaSum[i])) fruitLightAreaSum[i] = 0.0;
+					}
+				}
+
+			
+			//mean fruit information
+			
+			meanFruit_out.timestamp                     = timestamp;
+			meanFruit_out.year                          = year;
+			meanFruit_out.dayOfYear                     = dayOfYear;
+			meanFruit_out.hourOfDay                     = hourOfDay;
+			meanFruit_out.scenario                      = scenario;
+			if (fr != null) {
+				meanFruit_out.fruitAge_h = fr.ageHour;
+			} else {
+				if(step <= 3) println("⚠️ Fruit service (fr) is null — skipping ageHour assignment.");
+				meanFruit_out.fruitAge_h = 0;  // Or any default value
+			}
+			/**Mean fruit dry, fresh weight and sugar concentrations*/
+			meanFruit_out.totalFruitNumber              = totalFruitNum;
+			meanFruit_out.meanFruitFW                   = fw_mean;
+			meanFruit_out.meanFruitFW_sd                = fw_sd;
+			meanFruit_out.meanFruitDW                   = dw_mean;
+			meanFruit_out.meanFruitDW_sd                = dw_sd;
+			meanFruit_out.meanFruitSc                   = sc_mean;
+			meanFruit_out.meanFruitSc_sd                = sc_sd;
+			// Mean Sugar2 component pools per fruit (g C).
+			meanFruit_out.mSuc                          = mean((*b:FruitService, (b.plantNumber == pb.plantNumber && b.fieldInstanceId == pb.fieldInstanceId && b.isReportable == pb.isReportable)*).mSuc);
+			meanFruit_out.mSor                          = mean((*b:FruitService, (b.plantNumber == pb.plantNumber && b.fieldInstanceId == pb.fieldInstanceId && b.isReportable == pb.isReportable)*).mSor);
+			meanFruit_out.mGlu                          = mean((*b:FruitService, (b.plantNumber == pb.plantNumber && b.fieldInstanceId == pb.fieldInstanceId && b.isReportable == pb.isReportable)*).mGlu);
+			meanFruit_out.mFru                          = mean((*b:FruitService, (b.plantNumber == pb.plantNumber && b.fieldInstanceId == pb.fieldInstanceId && b.isReportable == pb.isReportable)*).mFru);
+			meanFruit_out.mSta                          = mean((*b:FruitService, (b.plantNumber == pb.plantNumber && b.fieldInstanceId == pb.fieldInstanceId && b.isReportable == pb.isReportable)*).mSta);
+			meanFruit_out.mSyn                          = mean((*b:FruitService, (b.plantNumber == pb.plantNumber && b.fieldInstanceId == pb.fieldInstanceId && b.isReportable == pb.isReportable)*).mSyn);
+			if (Double.isNaN(meanFruit_out.mSuc) || Double.isInfinite(meanFruit_out.mSuc)) meanFruit_out.mSuc = 0.0;
+			if (Double.isNaN(meanFruit_out.mSor) || Double.isInfinite(meanFruit_out.mSor)) meanFruit_out.mSor = 0.0;
+			if (Double.isNaN(meanFruit_out.mGlu) || Double.isInfinite(meanFruit_out.mGlu)) meanFruit_out.mGlu = 0.0;
+			if (Double.isNaN(meanFruit_out.mFru) || Double.isInfinite(meanFruit_out.mFru)) meanFruit_out.mFru = 0.0;
+			if (Double.isNaN(meanFruit_out.mSta) || Double.isInfinite(meanFruit_out.mSta)) meanFruit_out.mSta = 0.0;
+			if (Double.isNaN(meanFruit_out.mSyn) || Double.isInfinite(meanFruit_out.mSyn)) meanFruit_out.mSyn = 0.0;
+			/**fruit dimeter and volume*/
+			meanFruit_out.diameter                      = mean((*b:FruitService, (b.plantNumber == pb.plantNumber && b.fieldInstanceId == pb.fieldInstanceId && b.isReportable == pb.isReportable)*).diameter) * 100;
+			meanFruit_out.vol                           = mean((*b:FruitService, (b.plantNumber == pb.plantNumber && b.fieldInstanceId == pb.fieldInstanceId && b.isReportable == pb.isReportable)*).vol);
+			meanFruit_out.Afruit                        = mean((*b:FruitService, (b.plantNumber == pb.plantNumber && b.fieldInstanceId == pb.fieldInstanceId && b.isReportable == pb.isReportable)*).Afruit);
+			
+			/**furit sugar uptake and carbon balance */
+			meanFruit_out.unloadingPerFruit             = mean((*b:FruitService, (b.plantNumber == pb.plantNumber && b.fieldInstanceId == pb.fieldInstanceId && b.isReportable == pb.isReportable)*).unloadingPerFruit);
+			meanFruit_out.sugarUptake_active            = mean((*b:FruitService, (b.plantNumber == pb.plantNumber && b.fieldInstanceId == pb.fieldInstanceId && b.isReportable == pb.isReportable)*).sugarUptake_active) / mgTogram;
+			meanFruit_out.sugarUptake_passive           = mean((*b:FruitService, (b.plantNumber == pb.plantNumber && b.fieldInstanceId == pb.fieldInstanceId && b.isReportable == pb.isReportable)*).sugarUptake_passive) / mgTogram;
+			meanFruit_out.sugarUptake_massflow          = mean((*b:FruitService, (b.plantNumber == pb.plantNumber && b.fieldInstanceId == pb.fieldInstanceId && b.isReportable == pb.isReportable)*).sugarUptake_massflow) / mgTogram;
+			meanFruit_out.maintenanceDM          		= mean((*b:FruitService, (b.plantNumber == pb.plantNumber && b.fieldInstanceId == pb.fieldInstanceId && b.isReportable == pb.isReportable)*).maintenanceDM);
+			meanFruit_out.growthCost          	 		= mean((*b:FruitService, (b.plantNumber == pb.plantNumber && b.fieldInstanceId == pb.fieldInstanceId && b.isReportable == pb.isReportable)*).growthCost);
+			
+			/** Fruit Pressure Dynamics */
+			meanFruit_out.osmoticWaterPotential_fruit   = mean((*b:FruitService, (b.plantNumber == pb.plantNumber && b.fieldInstanceId == pb.fieldInstanceId && b.isReportable == pb.isReportable)*).osmoticWaterPotential_fruit);
+			meanFruit_out.turgorPressure_fruit          = mean((*b:FruitService, (b.plantNumber == pb.plantNumber && b.fieldInstanceId == pb.fieldInstanceId && b.isReportable == pb.isReportable)*).turgorPressure_fruit);
+			meanFruit_out.waterPotential_fruit          = mean((*b:FruitService, (b.plantNumber == pb.plantNumber && b.fieldInstanceId == pb.fieldInstanceId && b.isReportable == pb.isReportable)*).turgorPressure_fruit)  
+														 - mean((*b:FruitService, (b.plantNumber == pb.plantNumber && b.fieldInstanceId == pb.fieldInstanceId && b.isReportable == pb.isReportable)*).osmoticWaterPotential_fruit);
+			/** Phloem Hydraulic Properties */
+			meanFruit_out.osmoticWaterPotential_phloem  = mean((*b:FruitService, (b.plantNumber == pb.plantNumber && b.fieldInstanceId == pb.fieldInstanceId && b.isReportable == pb.isReportable)*).osmoticWaterPotential_phloem);
+			meanFruit_out.fruit_cpm 					 = mean((*b:FruitService, (b.plantNumber == pb.plantNumber && b.fieldInstanceId == pb.fieldInstanceId && b.isReportable == pb.isReportable)*).Cpm);
+			meanFruit_out.turgorPressure_phloem         = mean((*b:FruitService, (b.plantNumber == pb.plantNumber && b.fieldInstanceId == pb.fieldInstanceId && b.isReportable == pb.isReportable)*).turgorPressure_phloem);
+			meanFruit_out.waterPotential_phloem         = mean((*b:FruitService, (b.plantNumber == pb.plantNumber && b.fieldInstanceId == pb.fieldInstanceId && b.isReportable == pb.isReportable)*).turgorPressure_phloem) 
+														 - mean((*b:FruitService, (b.plantNumber == pb.plantNumber && b.fieldInstanceId == pb.fieldInstanceId && b.isReportable == pb.isReportable)*).osmoticWaterPotential_phloem);
+			
+			meanFruit_out.Lphloem                       = mean((*b:FruitService, (b.plantNumber == pb.plantNumber && b.fieldInstanceId == pb.fieldInstanceId && b.isReportable == pb.isReportable)*).Lphloem);
+			meanFruit_out.Lxylem                        = mean((*b:FruitService, (b.plantNumber == pb.plantNumber && b.fieldInstanceId == pb.fieldInstanceId && b.isReportable == pb.isReportable)*).Lxylem);
+			
+			/** Fruit Water Balance */
+			meanFruit_out.waterUptake                   = mean((*b:FruitService, (b.plantNumber == pb.plantNumber && b.fieldInstanceId == pb.fieldInstanceId && b.isReportable == pb.isReportable)*).waterUptake_xylem) 
+														 + mean((*b:FruitService, (b.plantNumber == pb.plantNumber && b.fieldInstanceId == pb.fieldInstanceId && b.isReportable == pb.isReportable)*).waterUptake_phloem);
+			meanFruit_out.waterUptake_xylem             = mean((*b:FruitService, (b.plantNumber == pb.plantNumber && b.fieldInstanceId == pb.fieldInstanceId && b.isReportable == pb.isReportable)*).waterUptake_xylem);
+			meanFruit_out.waterUptake_phloem            = mean((*b:FruitService, (b.plantNumber == pb.plantNumber && b.fieldInstanceId == pb.fieldInstanceId && b.isReportable == pb.isReportable)*).waterUptake_phloem);
+			meanFruit_out.transpirationLost             = mean((*b:FruitService, (b.plantNumber == pb.plantNumber && b.fieldInstanceId == pb.fieldInstanceId && b.isReportable == pb.isReportable)*).transpirationMass);
+			
+			meanFruit_out.osmoticWaterPotential_partialContribution = mean((*b:FruitService, (b.plantNumber == pb.plantNumber && b.fieldInstanceId == pb.fieldInstanceId && b.isReportable == pb.isReportable)*).osmoticWaterPotential_partialContribution);
+			
+			meanFruit_out.cellWallExtensibility         = mean((*b:FruitService, (b.plantNumber == pb.plantNumber && b.fieldInstanceId == pb.fieldInstanceId && b.isReportable == pb.isReportable)*).cellWallExtensibility);
+			meanFruit_out.elasticModulus                = mean((*b:FruitService, (b.plantNumber == pb.plantNumber && b.fieldInstanceId == pb.fieldInstanceId && b.isReportable == pb.isReportable)*).elasticModulus);
+			
+			meanFruit_out.ro                            = mean((*b:FruitService, (b.plantNumber == pb.plantNumber && b.fieldInstanceId == pb.fieldInstanceId && b.isReportable == pb.isReportable)*).ro);
+			meanFruit_out.malicAcid                     = mean((*b:FruitService, (b.plantNumber == pb.plantNumber && b.fieldInstanceId == pb.fieldInstanceId && b.isReportable == pb.isReportable)*).malicAcid);
+			meanFruit_out.tartaricAcid                  = mean((*b:FruitService, (b.plantNumber == pb.plantNumber && b.fieldInstanceId == pb.fieldInstanceId && b.isReportable == pb.isReportable)*).tartaricAcid);
+				meanFruit_out.malicConcentration_fruit      = mean((*b:FruitService, (b.plantNumber == pb.plantNumber && b.fieldInstanceId == pb.fieldInstanceId && b.isReportable == pb.isReportable)*).malicConcentration_fruit);
+				meanFruit_out.tartaricConcentration_fruit   = mean((*b:FruitService, (b.plantNumber == pb.plantNumber && b.fieldInstanceId == pb.fieldInstanceId && b.isReportable == pb.isReportable)*).tartaricConcentration_fruit);
+				meanFruit_out.fruitIncidentPAR              = mean((*b:FruitService, (b.plantNumber == pb.plantNumber && b.fieldInstanceId == pb.fieldInstanceId && b.isReportable == pb.isReportable)*).fruitIncidentPAR);
+				meanFruit_out.fruitAbsorbedPAR              = mean((*b:FruitService, (b.plantNumber == pb.plantNumber && b.fieldInstanceId == pb.fieldInstanceId && b.isReportable == pb.isReportable)*).fruitAbsorbedPAR);
+				meanFruit_out.fruitAbsorbedRadiation        = mean((*b:FruitService, (b.plantNumber == pb.plantNumber && b.fieldInstanceId == pb.fieldInstanceId && b.isReportable == pb.isReportable)*).fruitAbsorbedRadiation);
+				meanFruit_out.fruitAbsorbedRadiation_m2     = mean((*b:FruitService, (b.plantNumber == pb.plantNumber && b.fieldInstanceId == pb.fieldInstanceId && b.isReportable == pb.isReportable)*).fruitAbsorbedRadiation_m2);
+				meanFruit_out.fruitLightArea_m2             = mean((*b:FruitService, (b.plantNumber == pb.plantNumber && b.fieldInstanceId == pb.fieldInstanceId && b.isReportable == pb.isReportable)*).fruitLightArea_m2);
+				meanFruit_out.fruitBerryCountEffective      = mean((*b:FruitService, (b.plantNumber == pb.plantNumber && b.fieldInstanceId == pb.fieldInstanceId && b.isReportable == pb.isReportable)*).fruitBerryCountEffective);
+				meanFruit_out.simuuid         		        = simUUID;
+				if (Double.isNaN(meanFruit_out.fruitLightArea_m2) || Double.isInfinite(meanFruit_out.fruitLightArea_m2)) meanFruit_out.fruitLightArea_m2 = 0;
+				if (Double.isNaN(meanFruit_out.fruitBerryCountEffective) || Double.isInfinite(meanFruit_out.fruitBerryCountEffective)) meanFruit_out.fruitBerryCountEffective = 0;
+
+				meanFruit_out.fruitIncidentPAR_mean_1 = 0;
+				meanFruit_out.fruitIncidentPAR_mean_2 = 0;
+				meanFruit_out.fruitIncidentPAR_mean_3 = 0;
+				meanFruit_out.fruitIncidentPAR_mean_4 = 0;
+				meanFruit_out.fruitAbsorbedPAR_sum_1 = 0;
+				meanFruit_out.fruitAbsorbedPAR_sum_2 = 0;
+				meanFruit_out.fruitAbsorbedPAR_sum_3 = 0;
+				meanFruit_out.fruitAbsorbedPAR_sum_4 = 0;
+				meanFruit_out.fruitAbsorbedRadiation_sum_1 = 0;
+				meanFruit_out.fruitAbsorbedRadiation_sum_2 = 0;
+				meanFruit_out.fruitAbsorbedRadiation_sum_3 = 0;
+				meanFruit_out.fruitAbsorbedRadiation_sum_4 = 0;
+				meanFruit_out.fruitCount_1 = 0;
+				meanFruit_out.fruitCount_2 = 0;
+				meanFruit_out.fruitCount_3 = 0;
+				meanFruit_out.fruitCount_4 = 0;
+				meanFruit_out.fruitLightArea_sum_1 = 0;
+				meanFruit_out.fruitLightArea_sum_2 = 0;
+				meanFruit_out.fruitLightArea_sum_3 = 0;
+				meanFruit_out.fruitLightArea_sum_4 = 0;
+				for (int i = 0; i < totalFruitNumber.length; i++) {
+					if (i == 0) {
+						meanFruit_out.totalFruitNumber_1 = totalFruitNumber[i];
+						meanFruit_out.meanFruitFW_1 = meanFruitFW[i];
+						meanFruit_out.meanFruitDW_1 = meanFruitDW[i];
+						meanFruit_out.meanFruitSc_1 = meanFruitSc[i];
+						meanFruit_out.fruitIncidentPAR_mean_1 = fruitIncidentPARMean[i];
+						meanFruit_out.fruitAbsorbedPAR_sum_1 = fruitAbsorbedPARSum[i];
+						meanFruit_out.fruitAbsorbedRadiation_sum_1 = fruitAbsorbedRadiationSum[i];
+						meanFruit_out.fruitCount_1 = fruitCountBand[i];
+						meanFruit_out.fruitLightArea_sum_1 = fruitLightAreaSum[i];
+					} else if (i == 1) {
+						meanFruit_out.totalFruitNumber_2 = totalFruitNumber[i];
+						meanFruit_out.meanFruitFW_2 = meanFruitFW[i];
+						meanFruit_out.meanFruitDW_2 = meanFruitDW[i];
+						meanFruit_out.meanFruitSc_2 = meanFruitSc[i];
+						meanFruit_out.fruitIncidentPAR_mean_2 = fruitIncidentPARMean[i];
+						meanFruit_out.fruitAbsorbedPAR_sum_2 = fruitAbsorbedPARSum[i];
+						meanFruit_out.fruitAbsorbedRadiation_sum_2 = fruitAbsorbedRadiationSum[i];
+						meanFruit_out.fruitCount_2 = fruitCountBand[i];
+						meanFruit_out.fruitLightArea_sum_2 = fruitLightAreaSum[i];
+					} else if (i == 2) {
+						meanFruit_out.totalFruitNumber_3 = totalFruitNumber[i];
+						meanFruit_out.meanFruitFW_3 = meanFruitFW[i];
+						meanFruit_out.meanFruitDW_3 = meanFruitDW[i];
+						meanFruit_out.meanFruitSc_3 = meanFruitSc[i];
+						meanFruit_out.fruitIncidentPAR_mean_3 = fruitIncidentPARMean[i];
+						meanFruit_out.fruitAbsorbedPAR_sum_3 = fruitAbsorbedPARSum[i];
+						meanFruit_out.fruitAbsorbedRadiation_sum_3 = fruitAbsorbedRadiationSum[i];
+						meanFruit_out.fruitCount_3 = fruitCountBand[i];
+						meanFruit_out.fruitLightArea_sum_3 = fruitLightAreaSum[i];
+					} else if (i == 3) {
+						meanFruit_out.totalFruitNumber_4 = totalFruitNumber[i];
+						meanFruit_out.meanFruitFW_4 = meanFruitFW[i];
+						meanFruit_out.meanFruitDW_4 = meanFruitDW[i];
+						meanFruit_out.meanFruitSc_4 = meanFruitSc[i];
+						meanFruit_out.fruitIncidentPAR_mean_4 = fruitIncidentPARMean[i];
+						meanFruit_out.fruitAbsorbedPAR_sum_4 = fruitAbsorbedPARSum[i];
+						meanFruit_out.fruitAbsorbedRadiation_sum_4 = fruitAbsorbedRadiationSum[i];
+						meanFruit_out.fruitCount_4 = fruitCountBand[i];
+						meanFruit_out.fruitLightArea_sum_4 = fruitLightAreaSum[i];
+					}
+				}
+
+				if (fr != null && !fr.hasDetailedFruitPhysiologyOutputs()) {
+					markDetailedFruitOutputsUnavailable(meanFruit_out);
+				}
+			
+			// Write output data to csv.
+		if (!stepwiseOutput) {
+			StepwiseCsvWriter fruitCsvWriter = (StepwiseCsvWriter) csvWriters.get(meanFruitOutputFilePath);
+			if (fruitCsvWriter == null) {
+				// Create the writer if it doesn't exist, and store it for future use
+				fruitCsvWriter = new StepwiseCsvWriter(meanFruitOutputFilePath, new CsvMapper());
+				csvWriters.put(meanFruitOutputFilePath, fruitCsvWriter);
+			}
+			fruitCsvWriter.deleteFileIf(step == 1).write(meanFruit_out);
+		} else {
+			meanFruitOutputFilePath = PATH_OUTPUT + "mean-fruit" + "-" + outputTable_name + "-step-" + step + ".csv";
+			StepwiseCsvWriter fruitCsvWriter = new StepwiseCsvWriter(meanFruitOutputFilePath, new CsvMapper());
+			fruitCsvWriter.deleteFileIf(true).write(meanFruit_out);
+		}
+
+
+		} else {
+			if (printFlag && step <= 3) { println("outputTables fruit is still null after attempting to initialize. Cannot add rows to dataset."); }
+			// Handle the case where outputTables.fr is null
+		}
+	
+		
+	}
+}
+
+/**
+ * Returns true when organ-level array outputs should be written at this step.
+ *
+ * This prevents leaf, fruit, and internode arrays from being written every
+ * simulation step when the model runs hourly. Plant-level, field-level, and
+ * other summary outputs should not be affected by this gate.
+ */
+protected static boolean shouldWriteOrganArrayOutput() {
+	if (!useOrganArrays) {
+		return false;
+	}
+
+	int everyNDays = Math.max(1, outputOrganArrayEveryNDays);
+	int targetHour = outputOrganArrayHour;
+	if (targetHour < 0) targetHour = 0;
+	if (targetHour > 23) targetHour = 23;
+
+	int hourForOutput = hourOfDay;
+	if (hourForOutput < 0 || hourForOutput > 23) {
+		hourForOutput = ((step - 1) % 24);
+		if (hourForOutput < 0) hourForOutput += 24;
+	}
+
+	boolean isTargetHour = (hourForOutput == targetHour);
+	boolean isOutputDay = (((int) daysSinceWinterSolstice) % everyNDays == 0);
+	boolean isScheduledOutput = isTargetHour && isOutputDay;
+
+	boolean isFinalHarvestOutput = false;
+	if (outputOrganArrayAtHarvest) {
+		isFinalHarvestOutput =
+			Math.abs(daysSinceWinterSolstice - harvestDAWS) < 0.5 ||
+			((int) daysSinceWinterSolstice == (int) harvestDAWS);
+	}
+
+	return isScheduledOutput || isFinalHarvestOutput;
+}
+
+protected static void writeOutputToCsv() {
+	ObjectMapper objectMapper = new ObjectMapper(); // Used for writing object metadata
+	objectMapper.setVisibility(PropertyAccessor.ALL, Visibility.NONE);
+	objectMapper.setVisibility(PropertyAccessor.FIELD, Visibility.DEFAULT);
+
+	CsvMapper csvMapper = new CsvMapper(); // Used for writing objects to CSV
+	csvMapper.setVisibility(PropertyAccessor.ALL, Visibility.NONE);
+	csvMapper.setVisibility(PropertyAccessor.FIELD, Visibility.DEFAULT);
+
+ 	/** output all the fruit variables that are in public*/  
+	// if(outputTables.fr != null) {
+	// 	if (step == 1) {
+	// 		(new SchemaMetadataWriter(PATH_OUTPUT + outputTable_name + "_fruit.metadata.json", fr.getClass(), objectMapper)).writeMetadata();
+	// 	}
+	// 	(new StepwiseCsvWriter(PATH_OUTPUT + outputTable_name + "_fruit.csv", csvMapper))
+	// 		.deleteFileIf(step == 1)
+	// 		.write(fr);
+	// }
+
+	/** output all the rootbase variables that are in public*/
+	if(outputTables.rbID > 0) {
+		RootBase rb = null;
+		 
+		// RootBase
+		try {
+			rb = getRootBase();
+			if (rb != null && warnedRB) warnedRB = false;            // recovered
+		} catch (Throwable t) {                                      // catch Throwable to stop any spammy cast errors
+			if (!warnedRB) {
+				println("⚠️ RootBase not available yet (suppressing repeats).");
+				warnedRB = true;
+			}
+		}
+		
+		if (rb != null) {
+			insertObjectToJsonFile(rb, PATH_OUTPUT + "root-level-" + outputTable_name + ".json");
+		}
+		
+		//println("root is here " );
+		if (step == 1 && rb != null) {
+			(new SchemaMetadataWriter(PATH_OUTPUT + "root.metadata.json", rb.getClass(), objectMapper)).writeMetadata();
+		}
+	}
+	
+	/** output all the plantbase variables that are in public*/
+	// if(outputTables.pb != null) {
+	// 	if (step == 1) {
+	// 		(new SchemaMetadataWriter(PATH_OUTPUT + outputTable_name + "_plantBase.metadata.json", pb.getClass(), objectMapper)).writeMetadata();
+	// 	}
+	// 	(new StepwiseCsvWriter(PATH_OUTPUT + outputTable_name + "_plantBase.csv", csvMapper))
+	// 		.deleteFileIf(step == 1)
+	// 		.write(pb);
+	// }
+
+	/** output all the fieldbase variables that are in public*/
+	// if(outputTables.fb != null) {
+	// 	if (step == 1) {
+	// 		(new SchemaMetadataWriter(PATH_OUTPUT + outputTable_name + "_fieldBase.metadata.json", fb.getClass(), objectMapper)).writeMetadata();
+	// 	}
+	// 	(new StepwiseCsvWriter(PATH_OUTPUT + outputTable_name + "_fieldBase.csv", csvMapper))
+	// 		.deleteFileIf(step == 1)
+	// 		.write(fb);
+	// } 
+	
+
+	/** output all the leaf variables that are in public
+		this is mainly used for taining surrogate model for light interception at leaf level*/
+	if (outputIndividualLeaf == true && shouldWriteOrganArrayOutput()) {
+		/**
+		 * A static array reference to all leaf
+		 */
+		Leaf[] leafArray;
+
+		PlantBase outputPb = findOutputPlantBase();
+		// Initialize the 'leafArray' using the selected report plant identity.
+		if (outputPb != null) {
+	    	leafArray = array((*l:Leaf, (
+	    		l.plantNumber == outputPb.plantNumber &&
+	    		l.fieldInstanceId == outputPb.fieldInstanceId &&
+	    		l.isReportable == outputPb.isReportable
+	    	)*));
+		} else {
+			leafArray = new Leaf[0];
+		}
+    	//example of using array calculation. 
+		/* double[] biomassArray = new double[leafArray.length];
+		
+		// Loop through leafArray and extract biomass values
+		for (int i = 0; i < leafArray.length; i++) {
+			biomassArray[i] = ((GrowingOrgan) leafArray[i]).biomass;  // Cast to Leaf and access biomass
+		}
+		// Sum the extracted values
+		double biomassLeaf = sum(biomassArray); */
+
+
+		// Check if the 'leafArray' is not null and not empty
+		if (leafArray != null && leafArray.length > 0) {
+				// Safely access the first element and print its length
+				//println("leaf array length: " + leafArray.length); // Print the length of the leaf array
+
+				// for(int i = 0; i < leafArray.length; i++) {
+				// 	(new StepwiseCsvWriter(PATH_OUTPUT + outputTable_name + "_leaf_" + leafArray[i].organUUId + ".csv", csvMapper))
+				// 		.deleteFileIf(step == 1)
+				// 		.write(leafArray[i]);
+				// }
+
+				// Print out leafArray entirely
+				// Keep schema metadata synchronized with the scheduled leaf-array
+				// export. The default array hour is 12, so a step-1-only write
+				// would never create this file.
+				(new SchemaMetadataWriter(PATH_OUTPUT + "leaf.metadata.json", Leaf.class, objectMapper)).writeMetadata();
+				
+				if (!stepwiseOutput) {
+					(new StepwiseCsvWriter(PATH_OUTPUT + "leafArray_" + outputTable_name +".csv", csvMapper))
+						.deleteFileIf(step == 1)
+						.writeArray(leafArray);
+				} else {
+					(new StepwiseCsvWriter(PATH_OUTPUT + "leafArray_" + outputTable_name + "-step-" + step +".csv", csvMapper))
+						.deleteFileIf(true)
+						.writeArray(leafArray);
+				}
+		
+				} else {
+				if (printFlag) { println("leaf array is empty or null."); }
+		}
+		
+		// Empty the array after use
+		leafArray = null;
+	}
+	
+	/** output all the internode variables that are in public
+		this is mainly used for taining surrogate model for light interception at leaf level*/
+	if (outputIndividualInternode == true && shouldWriteOrganArrayOutput()) {
+		/**
+		* A static reference to all internodes
+		*/
+		Internode[] internodeArray;
+		PlantBase outputPb = findOutputPlantBase();
+		// Initialize the 'internodeArray' using the selected report plant identity.
+		if (outputPb != null) {
+	    	internodeArray = array((*l:Internode, (
+	    		l.plantNumber == outputPb.plantNumber &&
+	    		l.fieldInstanceId == outputPb.fieldInstanceId &&
+	    		l.isReportable == outputPb.isReportable
+	    	)*));
+		} else {
+			internodeArray = new Internode[0];
+		}
+    
+		// Check if the 'internodeArray' is not null and not empty
+		if (internodeArray != null && internodeArray.length > 0) {
+			//println("internode array length: " + internodeArray.length); // Print the length of the leaf array
+				// Safely access the first element and print its length
+				// for(int i = 0; i < internodeArray.length; i++) {
+				// 	(new StepwiseCsvWriter(PATH_OUTPUT + outputTable_name + "_internode_" + internodeArray[i].organUUId + ".csv", csvMapper))
+				// 		.deleteFileIf(step == 1)
+				// 		.write(internodeArray[i]);
+				// }
+
+				// Print out internodeArray entirely
+				if (step == 1) {
+					(new SchemaMetadataWriter(PATH_OUTPUT + "internode.metadata.json", Internode.class, objectMapper)).writeMetadata();
+				}
+				
+				if (!stepwiseOutput) {
+					(new StepwiseCsvWriter(PATH_OUTPUT + "internodeArray_" + outputTable_name + ".csv", csvMapper))
+						.deleteFileIf(step == 1)
+						.writeArray(internodeArray);
+				} else {
+					(new StepwiseCsvWriter(PATH_OUTPUT + "internodeArray_" + outputTable_name + "-step-" + step + ".csv", csvMapper))
+						.deleteFileIf(true)
+						.writeArray(internodeArray);
+				}
+				
+				
+				
+			} else {
+				if (printFlag) { println("leaf array is empty or null."); }
+		}
+		internodeArray = null;
+	}
+
+	/** output all the fruit variables that are in public */
+	if (outputIndividualFruit == true
+		&& daysSinceWinterSolstice <= harvestDAWS
+		&& shouldWriteOrganArrayOutput()) {
+		/**
+		 * A static reference to all fruit
+		 */
+		FruitService[] fruitArray;
+
+		PlantBase outputPb = findOutputPlantBase();
+		// Initialize the 'fruitArray' using the selected report plant identity.
+		if (outputPb != null) {
+	    	fruitArray = array((*l:FruitService, (
+	    		l.plantNumber == outputPb.plantNumber &&
+	    		l.fieldInstanceId == outputPb.fieldInstanceId &&
+	    		l.isReportable == outputPb.isReportable
+	    	)*));
+		} else {
+			fruitArray = new FruitService[0];
+		}
+    	//println("fruit array length: " + fruitArray.length); // Print the length of the leaf array
+		// Check if the 'fruitArray' is not null and not empty
+		if (fruitArray != null && fruitArray.length > 0) {
+				// Safely access the first element and print its length
+
+				// Print out fruitArray entirely
+				if (step == 1) {
+					(new SchemaMetadataWriter(PATH_OUTPUT + "fruit.metadata.json", FruitService.class, objectMapper)).writeMetadata();
+				}
+				
+				(new StepwiseCsvWriter(PATH_OUTPUT + "fruitArray_" + outputTable_name + ".csv", csvMapper))
+						.deleteFileIf(step == 1)
+						.writeArray(fruitArray);
+			} else {
+				if (printFlag) { println("fruit array is empty or null."); }
+		}
+		
+		fruitArray = null;
+	} 
+	
+}

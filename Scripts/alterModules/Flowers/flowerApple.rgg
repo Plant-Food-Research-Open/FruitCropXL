@@ -1,0 +1,530 @@
+import org.apache.commons.math3.distribution.*;
+import interfaces.*;
+import static java.lang.Math.*;
+import static main.*;
+import static plantBase.*;
+import static absOrgan.*;
+import static shoot.*;
+import static globalParameters.*;
+import static plantParameters.*;
+import static modelOptions.*;
+import static initialConditions.*;
+import static environment.*;
+import static extraTools.*;
+import static flowerBase.*;
+import static budBase.*;
+import static carbonTransport.*;
+import io.github.fruitcropxl.config.params.groups.*;
+import io.github.fruitcropxl.config.params.structures.*;
+
+// Check whether the file configuration is consistent with the boolean config variables
+public static boolean isFlowerTypeCorrect() {
+	return (species.equals("apple"));	
+}
+
+
+
+
+// flower module
+//age in 1/3 of a day, color random 1,100
+module FlowerApple extends Flower {	
+
+	@Override
+	public void loadParameters() {
+		CategoryStore config_Init = ((DocumentCategoryNameGroup) CONFIG.getGroup(FILE_NAME_INITIAL_CONDITIONS, 
+		DocumentCategoryNameGroup.class)).getCategoryStore();			
+		config_Init.setCategoryContext("leaf");
+		fNSC                   = config_Init.getDouble("fNSC", 0.1);
+		structure_C            = 1- fNSC; 
+		
+		/** Set the context for file name parameters*/
+		CategoryStore config = ((DocumentCategoryNameGroup) CONFIG.getGroup(FILE_NAME_PLANT_PARAMETERS, 
+			DocumentCategoryNameGroup.class)).getCategoryStore();
+		
+		/** Configuration context for carbon-related parameters */
+		config.setCategoryContext("leaf-carbon");
+		//common parameters
+		maintenanceCoff        = config.getDouble("MTNCE");
+		growthCoff             = config.getDouble("GROWTHRQ");
+		C_content              = config.getDouble("C_CONTENT", 0.46);
+		
+		km_pri                 = config.getDouble("KM_PRI");
+		km_sec                 = 0;
+		km_res                 = 0;
+		hydRate                = 0;
+		synRate                = 0;
+		maxRes                 = config.getDouble("RESERVES", 0.2);
+		
+		config.setCategoryContext("flower-general");
+		flowerWeight        = config.getDouble("flowerWeight");
+		floweringTD			= config.getDouble("floweringTD");
+		fruitingTD			= config.getDouble("fruitingTD");	
+		try {
+			fruitingDaysAfterBloom = config.getDouble("fruitingDaysAfterBloom");
+		} catch (Exception e) {
+			// Compatibility fallback for legacy parameter files without this apple conversion threshold.
+			fruitingDaysAfterBloom = 30.0;
+		}
+		tm        			= floweringTD;
+		te        			= floweringTD + fruitingTD;
+		meanfruitletWeight  = config.getDouble("meanfruitletWeight"); 
+		CVFruitWeight 		= config.getDouble("CVFruitWeight");
+		flowerSelfAssimFrac = config.getDouble("flowerSelfAssimFrac", flowerSelfAssimFrac);
+		dropThreshold = config.getDouble("dropThreshold", dropThreshold);
+		stressHoursToDrop = (int) config.getDouble("stressHoursToDrop", stressHoursToDrop);
+		dropWindowStartDaysAfterBloom = config.getDouble("dropWindowStartDaysAfterBloom", dropWindowStartDaysAfterBloom);
+		dropWindowEndDaysAfterBloom = config.getDouble("dropWindowEndDaysAfterBloom", dropWindowEndDaysAfterBloom);
+		maxDailyDropFrac = config.getDouble("maxDailyDropFrac", maxDailyDropFrac);
+		waterContent 		= config.getDouble("WATER_CONTENT");
+		fruit_nor = new NormalDistribution(meanfruitletWeight, meanfruitletWeight * CVFruitWeight);
+		
+		config.setCategoryContext("leaf-water");
+		//paragxl a list of parameters for the sensitivities of hydraulic conductance leaf to transpiration (equation 8 in Tardieu, Simonneau and Parent, Journal of Experimental Botany, 2015), amplitude of water potential (equation 7) and ABA (equation 9).		 
+		growth_a	 = config.getDouble("growth_a", -10);
+		growth_b	 = config.getDouble("growth_b", -0.5);
+		
+		
+	}
+	
+	/**
+	 * Initiates the flower with parameters from a Bud object.
+	 *
+	 * @param b Bud object containing bud information.
+	 */
+	@Override 
+	public void initiate(ApexService a,int color, float rH, float rL) {
+		loadParameters();
+		plantNumber = a.plantNumber;
+		border = a.border;
+		rank = a.rank;		
+		order = a.order;                                                 
+		nodeNumber = a.nodeNumber; 
+		cordonNumber = a.cordonNumber;
+				
+		this.axis2ID = a.axis2ID; 
+		this.axis4ID = a.axis4ID;
+		this.axis5ID = a.axis5ID;
+		this.axis6ID = a.axis6ID;
+		this.cpn = axis2ID + axis3ID + axis4ID + axis5ID + axis6ID + rank;
+		
+		age = plastochron;
+		ageGdd = 0;
+		ageD = 0;
+		length = flowerWeight;
+		this.potLength = length;
+		this.color = color;
+		this.rH = rH;
+		this.rL = rL;
+		
+		//SPECIFIC PARAMETERS, using leaf parameters for the moment as flower is a modified leaf
+		biomass = flowerWeight;
+		
+		maxLength = Math.min(Math.max(fruit_nor.sample(), 200), 800);  //use this as biomass
+		if (printFlag) { println(" fruitlet weight: " + maxLength); }
+		//carbon conversions
+		freshWeight = biomass/(1-waterContent);
+		carbon_total = biomass * C_content;
+		carbon_structure = carbon_total * structure_C;  //mg, amount of structure carbon
+		carbon_nonStructure = carbon_total * fNSC;    //mg, amount of starch carbon
+		fNSCtoSC = carbon_nonStructure/carbon_structure; 
+		
+	};
+	
+	@Override
+	public void initializeCarbonTransport() {
+		this.r = 0;
+		this.xp = 0;
+		this.cpb = this.cpt = SOURCEcp;
+		//float Rs = ( R0 * PhloemResistanceRatio(initial_c0)/(PressureRatio(initial_c0)*R*Tk));   // resistance per unit length (initial case)
+		//this.cpt = SOURCEcp - cpn * length * SOURCEj * Rs;
+		//this.cpb = SOURCEcp - (cpn - 1) * length * SOURCEj * Rs;
+		this.j = j;
+	}
+	
+	@Override
+	public void updateCTRs(double carbonConcentration) {
+		this.r =  0.0;
+		this.xp = 0;//(-Jw * h_internode_rs * initial_c0)/(PressureRatio(initial_c0)*R*Tk);  //need to update this term
+	}	
+	
+	@Override
+	public boolean shouldFlower() {
+		if (hasFlowered) return false;
+		if (bloomControlledByApexBudBurst) {
+			double tt = sourceApexThermalSinceBudBurst;
+			double threshold = floweringTDFromBudBurst;
+			if (Double.isNaN(threshold) || Double.isInfinite(threshold) || threshold <= 0.0) {
+				threshold = floweringTD;
+			}
+			if (Double.isNaN(threshold) || Double.isInfinite(threshold) || threshold <= 0.0) {
+				threshold = 20.0;
+			}
+			if (!Double.isNaN(tt) && !Double.isInfinite(tt) && tt >= threshold) {
+				this.hasFlowered = true;
+				this.ageDAtFlowering = this.ageD;
+				if (this.mixedBudAppearanceDriven && this.mixedBudBloomDebugReporter && printFlag) {
+					println("[mixed-bud][flower-bloom] apex=" + this.sourceApexID
+						+ " rosetteTarget=" + this.sourceRosetteTarget
+						+ " finalRosetteRank=" + this.sourceRosetteAppearanceRank
+						+ " apexBirthAge=" + this.sourceApexBirthAge
+						+ " appearanceApexAge=" + this.sourceApexAppearanceAge
+						+ " thermalSinceBudBurst=" + this.sourceApexThermalSinceBudBurst
+						+ " floweringTDFromBudBurst=" + threshold
+						+ " flowerLocalAge=" + this.age
+						+ " flowerLocalAgeD=" + this.ageD
+						+ " flowerAgeDAtFlowering=" + this.ageDAtFlowering);
+				}
+				return true;
+			}
+			return false;
+		}
+		/* Legacy behavior for non-mixed-bud flowers or grapevine workflows. */
+		if (this.age > tm) {
+			this.hasFlowered = true;
+			this.ageDAtFlowering = this.ageD;
+			return true;
+		}
+		return false;
+	}
+	@Override
+	public boolean shouldProduceFruit() {
+		if (dropped) return false;
+		if (!hasFlowered) return false;
+
+		double daysAfterBloom = this.ageD - this.ageDAtFlowering;
+
+		if (Double.isNaN(daysAfterBloom) || Double.isInfinite(daysAfterBloom)) {
+			return false;
+		}
+
+		return daysAfterBloom >= fruitingDaysAfterBloom;
+	}
+	
+	
+	//** carbon allocation calculations */
+	@Override
+	void calcLeakage(double sugarConcentration_phloem) 
+	{ //leakage only calculates for shoot, leaf is zero
+		leakage = 0;
+	}	
+	
+	@Override
+	void calcPTCTRAM(double cc) {
+		structureDM_SEC_PT = 0;
+		calcLeakage(cc);
+		if (dropped) {
+			deltalength_PT = 0;
+			structureDM_PRI_PT = 0;
+			maintenanceDM_PT = 0;
+			reserveDM_PT = 0;
+			loading_PT = 0;
+			return;
+		}
+		// Ensure primaryGrowthRate is valid
+		deltalength_PT = primaryGrowthRate();
+		carbonDemandPotential = C_content * growthCoff * deltalength_PT;
+		if (Float.isNaN(carbonDemandPotential) || Float.isInfinite(carbonDemandPotential)) {
+			carbonDemandPotential = 0.0f;
+		}
+		flowerSelfAssimC = flowerSelfAssimFrac * carbonDemandPotential;
+		if (flowerSelfAssimC < 0) flowerSelfAssimC = 0;
+		if (flowerSelfAssimC > carbonDemandPotential) flowerSelfAssimC = carbonDemandPotential;
+		structureDM_PRI_PT = carbonDemandPotential - flowerSelfAssimC;
+	
+		maintenanceDM_PT = calcMaintanceRespiration(this.fNSCtoSC);
+		reserveDM_PT = 0;
+		loading_PT = 0;
+	}
+	
+	@Override
+	void calcUnloading(double sugarConcentration_phloem) {
+		if (dropped) {
+			deltalength = 0;
+			structureDM = 0;
+			maintenanceDM = 0;
+			reserveDM = 0;
+			unloading = 0;
+			carbonAllocatedActual = 0;
+			return;
+		}
+		if (this.age < this.te) {
+			float primaryGrowth = primaryGrowthRate();
+			double growthDemand = C_content * growthCoff * primaryGrowth;
+			if (Double.isNaN(growthDemand) || Double.isInfinite(growthDemand)) growthDemand = 0;
+			carbonDemandPotential = growthDemand;
+			flowerSelfAssimC = flowerSelfAssimFrac * growthDemand;
+			if (flowerSelfAssimC < 0) flowerSelfAssimC = 0;
+			if (flowerSelfAssimC > growthDemand) flowerSelfAssimC = growthDemand;
+			double phloemGrowthDemand = growthDemand - flowerSelfAssimC;
+			double growthFrac = sinkUnloading(sugarConcentration_phloem, km_pri);
+			if (Double.isNaN(growthFrac) || Double.isInfinite(growthFrac)) growthFrac = 0.0;
+			if (growthFrac < 0.0) growthFrac = 0.0;
+			if (growthFrac > 1.0) growthFrac = 1.0;
+			if (shouldUsePreT1PotentialGrowth()) {
+				growthFrac = 1.0;
+			}
+			deltalength = primaryGrowth * growthFrac;
+			structureDM = phloemGrowthDemand * growthFrac;
+			carbonAllocatedActual = structureDM;
+			if (Float.isNaN(structureDM) || Float.isInfinite(structureDM)) {
+				structureDM = 0.0f;
+				carbonAllocatedActual = 0;
+			}
+		} else {
+			deltalength = 0;
+			structureDM = 0;
+			carbonAllocatedActual = 0;
+			carbonDemandPotential = 0;
+			flowerSelfAssimC = 0;
+		}
+		maintenanceDM = calcMaintanceRespiration(this.fNSCtoSC) * 
+						sinkUnloading(sugarConcentration_phloem, KM_MTNCE);
+		reserveDM = 0;
+		unloading = structureDM + maintenanceDM + reserveDM;
+		if (Float.isNaN(unloading) || Float.isInfinite(unloading)) {
+			unloading = 0.0f;
+		}
+if (enableCarbonLimitedFruitDrop && hasFlowered && !dropped) {
+
+    double daysAfterBloom = this.ageD - this.ageDAtFlowering;
+
+    if (daysAfterBloom >= dropWindowStartDaysAfterBloom &&
+        daysAfterBloom <= dropWindowEndDaysAfterBloom) {
+
+        /*
+         * Carbon satisfaction of the young fruitlet/flower sink.
+         * flowerSelfAssimFrac reduces the external carbon demand because a small
+         * part of the demand is assumed to be supplied locally.
+         */
+        double effectiveDemand = carbonDemandPotential * Math.max(0.0, 1.0 - flowerSelfAssimFrac);
+        double sat = 1.0;
+
+        if (effectiveDemand > 1e-9) {
+            sat = carbonAllocatedActual / effectiveDemand;
+        }
+
+        /*
+         * Accumulate stress hourly, assuming this update is called once per model hour.
+         * If the update step is not hourly, replace +1 with the actual step length in hours.
+         */
+        if (sat < dropThreshold) {
+            carbonStressHours++;
+        } else {
+            carbonStressHours = Math.max(0, carbonStressHours - 1);
+        }
+
+        /*
+         * Only make the drop decision every phyllochron, rather than every update step.
+         * If phyllochronDay is calendar days based leaf appearance in this file
+         */
+        double dropCheckIntervalDays = Math.max(1.0, phyllochronDay);
+
+        if ((this.ageD - lastCarbonDropCheckAgeD) >= dropCheckIntervalDays) {
+
+            lastCarbonDropCheckAgeD = this.ageD;
+
+            if (carbonStressHours >= stressHoursToDrop) {
+
+                int today = (int)Math.floor(this.ageD);
+                int currentPlantNumber = this.plantNumber;
+
+                int retainedFlowersPlant = 0;
+                int droppedFlowersPlant = 0;
+                int droppedTodayPlant = 0;
+                for (Flower fl : (* Flower *)) {
+                    if (fl.plantNumber == currentPlantNumber) {
+                        if (fl.dropped) {
+                            droppedFlowersPlant++;
+                            if (fl.dropDay == today) droppedTodayPlant++;
+                        } else {
+                            retainedFlowersPlant++;
+                        }
+                    }
+                }
+
+                int totalFlowersPlant = Math.max(1, retainedFlowersPlant + droppedFlowersPlant);
+
+                double allowedToday = Math.max(1.0, maxDailyDropFrac * totalFlowersPlant);
+
+                if (droppedTodayPlant < allowedToday) {
+
+                    dropped = true;
+                    dropDay = today;
+
+                    structureDM = 0;
+                    maintenanceDM = 0;
+                    reserveDM = 0;
+                    unloading = 0;
+                    carbonAllocatedActual = 0;
+                    flowerSelfAssimC = 0;
+                }
+            }
+        }
+    } else {
+        /*
+         * Outside the drop window, do not carry old stress forward.
+         */
+        carbonStressHours = 0;
+    }
+}
+	}
+
+
+	
+	@Override
+	void calcLoading(double sugarConcentration_phloem) {loading =  0;} 
+	
+	
+	@Override
+	public void update()
+	{
+		super.update();
+
+		if(this.plantBaseID <= 0) {
+			this.plantBaseID = first((* p:PlantBase, (p.plantNumber == plantNumber)*)).getId();
+		}
+		
+		if (parentID <= 0) {  // Assuming 0 is an uninitialized ID
+			GrowingOrgan parentOrgan = (GrowingOrgan) first((* this (<--)+ Internode*));
+			if (parentOrgan != null) {
+				storeParentId(parentOrgan);
+				//this is based on the organ type of the current organ
+				parentOrgan.addChildFlowerId(this.getId());
+			}
+		}
+        
+		//	unloading = structureDM + maintenanceDM + reserveDM;
+
+		    // Determine the water potential boundary condition based on the neighboring internode.
+		if (parentID > 0) {
+			this.waterPotential = getParent().waterPotential; // Use water potential from neighboring internode if available.
+		} else {
+			this.waterPotential = inputWaterPotential; // Otherwise, use an input water potential.
+		}
+		
+		
+		this.potLength = this.maxLength * betaGrowthFunction(this.age, this.tm, this.te);
+		
+		if(organGrowthMethod.equals("TempLimited")) {
+			this.length = this.potLength;
+		} else if(organGrowthMethod.equals("TempWaterLimited")) {
+			//the calculation of PT includes water potential response already
+			this.length = length + deltalength_PT;
+		} else if(organGrowthMethod.equals("TempWaterCarbonLimited")){
+			this.length = length + deltalength;
+		} else {
+			this.length = length + deltalength;
+		}
+		
+		biomass_pre = biomass; 
+		delta_str = (structureDM + flowerSelfAssimC) - growthCost; 
+		delta_NSC = maintenanceDM + reserveDM + leakage 
+						   - loading - carbonMobilizationCost - maintenanceDM_PT;
+		
+		carbon_structure = carbon_structure + delta_str;
+		carbon_nonStructure = carbon_nonStructure + delta_NSC; //-NuptakeCost
+		
+		carbon_total = carbon_structure + carbon_nonStructure;
+		biomass = carbon_total/C_content;
+		
+		freshWeight = biomass/(1 - waterContent);
+		fNSCtoSC = carbon_nonStructure/carbon_structure;
+		
+	}
+	
+static double rosetteLeafLen = 0.05;   // 5 cm
+static double targetFlowerDiam = rosetteLeafLen * 0.65;   // ~3.25 cm
+
+static double petalLenOpen  = 0.017;   // 1.7 cm
+static double petalWidOpen  = 0.008;   // 0.8 cm
+
+static double petalLenBudMax = 0.010;  // 1.0 cm
+static double petalWidBudMax = 0.006;  // 0.6 cm
+
+static double pedicelLen = 0.018;      // 1.8 cm
+static double pedicelDia = 0.0012;     // 1.2 mm
+
+
+} 
+==> 
+RH(rH) RL(rL)
+if (age > 0 && age <= floweringTD + 1) 
+(
+    // pedicel / flower stalk
+    RL(25) Cylinder(age < 3 ? age * (pedicelLen / 3.0) : pedicelLen,
+                    age < 3 ? age * (pedicelDia / 3.0) : pedicelDia).(setShader(Peto1))
+
+    RL(-15) Cylinder(age < 3 ? age * (pedicelLen / 3.0) : pedicelLen,
+                     age < 3 ? age * (pedicelDia / 3.0) : pedicelDia).(setShader(Peto1))
+
+    // petals
+    if (age < 3) 
+    (
+        // flower bud
+        for (int i = 0; i < 5; i++) 
+        (
+            [
+                RL(15)
+                Parallelogram((petalWidBudMax / 3.0) * age, (petalLenBudMax / 3.0) * age).(setShader(Pet1D))
+                M(-0.00005 * age)
+                RL(-25)
+                Parallelogram((petalWidBudMax / 3.0) * age, (petalLenBudMax / 3.0) * age).(setShader(Pet1T))
+            ]
+            RH(72)
+        )
+    )
+    else 
+    (
+        // open flower
+        for (int i = 0; i < 5; i++) 
+        (
+            [
+                RL(age < floweringTD ? (age - 20 / 3.0) * 12 : 65)
+                Parallelogram(petalWidOpen, petalLenOpen).
+                (setShader(age < floweringTD ? Pet1D : color % (i + 1) == 0 ? Pet2D : Pet3D))
+
+                M(-0.0008)
+                RL(-10)
+                Parallelogram(petalWidOpen, petalLenOpen).
+                (setShader(age < floweringTD ? Pet1T : color % (i + 1) == 0 ? Pet2T : Pet3T))
+            ]
+            RH(72)
+        )
+    )
+
+    // stamens
+    [Scale(age < 4 ? age * 0.2 : 1) Stamen(1)]
+)
+else if (age > 0 && age > floweringTD + 1) 
+(
+    RL(25) Cylinder((0.02 + 0.01 / 300) / 2, 0.001).(setShader(Peto1))
+    RL(-15) Cylinder((0.02 + 0.01 / 300) / 2, 0.001).(setShader(Peto1))
+
+    [RL(90) Sphere(0.004).(setShader(age < floweringTD + 5 ? Pom1 : Pom3))]
+    [Sepale(4e-3)] [Stamen(2)]
+)
+;
+
+ 
+ /**
+ * Represents the stamen part of a flower.
+ *
+ * @param type The type of the stamen. Determines the shader to be used.
+ *             Type 1 applies the Eta1 shader (young flower), and any other value applies the Eta2 shader (on fruit).
+ * @return Constructs a set of stamens for the flower.
+ */
+module Stamen(int type) 
+==> 
+for(int i = 0; i < 3; i++)
+(
+    [RL(10) Parallelogram(0.01,0.009).(setShader(type == 1 ? Eta1 : Eta2)) ] RH(120)
+);
+
+
+module Sepale(float diam)
+==> 
+for(int i=0; i<5; i++) 
+	(
+	[RL(90) M(diam) RL(90) RL(200) Parallelogram(0.0025,0.001).(setShader(Sep))] RH(72) 
+	)
+	;

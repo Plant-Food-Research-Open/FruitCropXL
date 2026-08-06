@@ -1,0 +1,959 @@
+// ##############################################//
+// 	Imports
+// ##############################################//
+
+// File
+import java.io.File;
+import java.io.BufferedReader;
+import java.io.FileReader;
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
+import java.lang.reflect.Field;
+import java.util.HashSet;
+
+import com.fasterxml.jackson.annotation.JsonProperty;
+
+// JUnit
+import org.junit.internal.TextListener;
+import org.junit.runner.JUnitCore;
+import org.junit.runner.Result;
+import org.junit.Test;
+import org.junit.Before;
+import org.junit.After;
+import org.junit.runner.Description;
+import org.junit.runner.notification.Failure;
+import org.junit.runner.notification.RunListener;
+
+// Assertions
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.*;
+
+// Ant 
+import barrypitman.junitXmlFormatter.AntXmlRunListener;
+
+// ##############################################//
+// 	Internal Imports
+// ##############################################//
+
+// Modules
+import static globalParameters.*;
+import static modelOptions.*;
+import static lightInterception.*;
+import static initialConditions.*;
+
+import static fieldBase.*;
+import static main.*;
+import static initiationBase.*;
+import static absOrgan.*;
+import static leaf.*;
+import static shoot.*;
+import static plantBase.*;
+import static fruitBase.*;
+import static outputTables.*;
+import static diagnosticTables.*;
+import static carbonTransport.*;
+// ##############################################//
+// 	Properties
+// ##############################################//
+
+
+// ##############################################//
+/**
+	mainInstance: This is a singleton object of the main class, which seems to be used in the test cases.
+	TestRunner Class
+	addListeners(String xmlOut): This function adds a listener to JUnitCore. It outputs test results to a given XML file. File output is set using FileOutputStream.
+	
+	runTests(String xmlOut): This function initializes the JUnitCore with listeners and runs tests defined in FileUnitTest.class and ModelUnitTest.class.
+	
+	resultReport(Result result): Prints the summary of test results, including failure count, ignore count, run count, and time taken.
+	
+	FileUnitTest Class
+	assertMainPathSet(): Checks if MAINPATH is not null.
+	
+	assertPhenologyParamsFileExists(): Checks if a file related to Phenology Parameters exists.
+	
+	assertParamsFileExists(): Checks if a parameter file exists.
+	
+	assertInputDataFileExists(): Checks if an input data file exists.
+	
+	ModelUnitTest Class
+	setup(): Initializes and resets the graph before each test run.
+	
+	assertStartingStepTest(): Checks if the starting step is 0.
+	
+	assertTenStepTest(): Runs mainInstance.run() 10 times and checks if the step becomes 10.
+	
+	assertPlantBaseCount(): Checks if the number of PlantBase objects is equal to nrRows * nrPlants.
+	*/
+
+// ##############################################//
+
+public class TestRunner {
+    protected static JUnitCore addListeners(String xmlOut) {
+        JUnitCore junit = new JUnitCore();
+        
+        AntXmlRunListener runListener = new AntXmlRunListener();
+        try {
+            runListener.setOutputStream(new FileOutputStream(
+                new File(xmlOut)));
+        } catch (FileNotFoundException e) {
+            e.printStackTrace();
+        }
+        junit.addListener(runListener);
+
+        return junit;
+    }
+
+	public static void runTests (String xmlOut) {
+		JUnitCore junit = addListeners(xmlOut);
+		
+			Result result = junit.run(
+	            FileUnitTest.class,
+				ModelUnitTest.class,
+				LightInterceptionModeUnitTest.class,
+				PlantOutputSchemaUnitTest.class,
+				ReserveTurnoverUnitTest.class,
+				PlantBaseCarbonBoundaryUnitTest.class
+			);
+		resultReport(result);
+	}
+	
+protected static void resultReport(Result result) {
+	println("========== Test Report Summary ==========");
+	println("Total tests run   : " + result.getRunCount());
+	println("Total failures    : " + result.getFailureCount());
+	println("Total ignored     : " + result.getIgnoreCount());
+	println("Total passed      : " + (result.getRunCount() - result.getFailureCount() - result.getIgnoreCount()));
+	println("Execution time    : " + result.getRunTime() + " ms");
+	
+	if (!result.wasSuccessful()) {
+		println("\n---------- Failure Details ----------");
+		for (Failure failure : result.getFailures()) {
+			println("✖ Test Failed: " + failure.getDescription().getDisplayName());
+			println("  Class      : " + failure.getDescription().getClassName());
+			println("  Message    : " + failure.getMessage());
+			println("  Trace      : ");
+			println(failure.getTrace());
+			println("-------------------------------------");
+		}
+	} else {
+		println("✅ All tests passed successfully.");
+	}
+
+	println("========================================\n");
+}
+
+}
+
+// ##############################################//
+//	Test Classes
+// ##############################################//
+
+public class FileUnitTest {
+    @Test
+    public void assertMainPathSet() {
+    	assertNotNull(MAINPATH);
+    }
+
+    @Test
+    public void assertInputDataFileExists() {
+        File f = new File(PATH_SCENARIOS + FILE_NAME_MODEL_OPTIONS);
+        boolean exists = f.exists();
+        assertTrue(exists);
+    }
+}
+
+public class LightInterceptionModeUnitTest {
+	private static Leaf laiLeaf(double z, double area, int fieldInstance,
+			boolean reportable, boolean borderLeaf) {
+		Leaf fixture = new Leaf();
+		fixture.z = z;
+		fixture.area = area;
+		fixture.fieldInstanceId = fieldInstance;
+		fixture.isReportable = reportable;
+		fixture.border = borderLeaf;
+		return fixture;
+	}
+
+	@Test
+	public void canonicalModesAreCaseInsensitive() {
+		assertEquals("cpu", normalizeLightInterceptionMode("CPU"));
+		assertEquals("gpu", normalizeLightInterceptionMode("Gpu"));
+		assertEquals("empiricalRegression", normalizeLightInterceptionMode("EMPIRICALREGRESSION"));
+		assertEquals("surrogateModel", normalizeLightInterceptionMode("surrogatemodel"));
+		assertEquals("directInput", normalizeLightInterceptionMode("DirectInput"));
+	}
+
+	@Test
+	public void legacyBooleanMapsToRayBackend() {
+		assertEquals("cpu", resolveConfiguredLightInterceptionMode(null, Boolean.FALSE, false, true));
+		assertEquals("gpu", resolveConfiguredLightInterceptionMode(null, Boolean.TRUE, false, true));
+		assertEquals("cpu", resolveConfiguredLightInterceptionMode(null, null, false, false));
+	}
+
+	@Test
+	public void canonicalModeWinsConflict() {
+		assertEquals("directInput",
+			resolveConfiguredLightInterceptionMode("directInput", Boolean.TRUE, true, true));
+	}
+
+	@Test
+	public void invalidAndEmptyModesFail() {
+		boolean invalidFailed = false;
+		boolean emptyFailed = false;
+		try {
+			normalizeLightInterceptionMode("cpux");
+		} catch (IllegalArgumentException e) {
+			invalidFailed = true;
+		}
+		try {
+			normalizeLightInterceptionMode("  ");
+		} catch (IllegalArgumentException e) {
+			emptyFailed = true;
+		}
+		assertTrue("Unknown light mode must fail", invalidFailed);
+		assertTrue("Empty light mode must fail", emptyFailed);
+	}
+
+	@Test
+	public void zeroLightInterceptionResultHasOnlyZeroRadiationValues() {
+		LightInterceptionResult result = LightInterceptionResult.zero();
+		assertNotNull(result);
+		assertEquals(0.0, result.incPARm2, 0.0);
+		assertEquals(0.0, result.absPAR, 0.0);
+		assertEquals(0.0, result.absFarRed, 0.0);
+		assertEquals(0.0, result.abs, 0.0);
+		assertEquals(0.0, result.absm2, 0.0);
+		assertEquals(0.0, result.absPARm2, 0.0);
+		assertEquals(0.0, result.fpar, 0.0);
+		assertEquals(0.0, result.fabs, 0.0);
+	}
+
+	@Test
+	public void leafGasExchangeScenariosShareLightButNotHydraulicBypass() {
+		String previousScenario = special_scenario;
+		try {
+			special_scenario = "photosynthesisTest";
+			assertTrue(isLeafGasExchangeTestScenario());
+			assertTrue(isLeafHydraulicBypassTestScenario());
+			special_scenario = "singleLeaf";
+			assertTrue(isLeafGasExchangeTestScenario());
+			assertFalse(isLeafHydraulicBypassTestScenario());
+			special_scenario = "default";
+			assertFalse(isLeafGasExchangeTestScenario());
+		} finally {
+			special_scenario = previousScenario;
+		}
+	}
+
+	@Test
+	public void beerLambertLaiAboveUsesStrictGroupedFieldProfile() {
+		Leaf topA = laiLeaf(3.0, 0.4, 1, true, false);
+		Leaf topB = laiLeaf(3.0, 0.6, 1, true, false);
+		Leaf middle = laiLeaf(2.0, 1.0, 1, true, false);
+		Leaf bottom = laiLeaf(1.0, 1.0, 1, true, false);
+		Leaf borderAbove = laiLeaf(4.0, 20.0, 1, true, true);
+		Leaf otherField = laiLeaf(4.0, 20.0, 2, true, false);
+		Leaf[] leaves = {topA, topB, middle, bottom, borderAbove, otherField};
+
+		updateCumulativeLaiAboveForLeaves(leaves, 2.0);
+
+		assertEquals(0.0, borderAbove.cumulativeLaiAbove, 1e-12);
+		assertEquals(0.0, topA.cumulativeLaiAbove, 1e-12);
+		assertEquals(topA.cumulativeLaiAbove, topB.cumulativeLaiAbove, 1e-12);
+		assertEquals(0.5, middle.cumulativeLaiAbove, 1e-12);
+		assertEquals(1.0, bottom.cumulativeLaiAbove, 1e-12);
+		assertEquals(0.0, otherField.cumulativeLaiAbove, 1e-12);
+	}
+}
+
+public class PlantOutputSchemaUnitTest {
+	private static String[] indexedPropertyNames(Class dtoClass, int expectedCount) {
+		String[] namesByIndex = new String[expectedCount];
+		HashSet names = new HashSet();
+		HashSet indices = new HashSet();
+		int propertyCount = 0;
+
+		Field[] fields = dtoClass.getDeclaredFields();
+		for (Field field : fields) {
+			JsonProperty property = (JsonProperty) field.getAnnotation(JsonProperty.class);
+			if (property == null) continue;
+			int index = property.index();
+			String name = property.value();
+			assertEquals(dtoClass.getSimpleName() + " declaration/index order",
+				propertyCount, index);
+			assertTrue(dtoClass.getSimpleName() + " has an out-of-range index " + index,
+				index >= 0 && index < expectedCount);
+			assertTrue(dtoClass.getSimpleName() + " has duplicate index " + index,
+				indices.add(Integer.valueOf(index)));
+			assertTrue(dtoClass.getSimpleName() + " has duplicate property " + name,
+				names.add(name));
+			namesByIndex[index] = name;
+			propertyCount++;
+		}
+
+		assertEquals(dtoClass.getSimpleName() + " indexed property count",
+			expectedCount, propertyCount);
+		for (int index = 0; index < expectedCount; index++) {
+			assertNotNull(dtoClass.getSimpleName() + " missing index " + index,
+				namesByIndex[index]);
+		}
+		return namesByIndex;
+	}
+
+	private static void assertPropertyBlock(String[] actual, int start, String[] expected) {
+		for (int offset = 0; offset < expected.length; offset++) {
+			assertEquals("Unexpected property at index " + (start + offset),
+				expected[offset], actual[start + offset]);
+		}
+	}
+
+	private static int csvColumnCount(String line) {
+		if (line == null || line.length() == 0) return 0;
+		int columns = 1;
+		boolean quoted = false;
+		for (int i = 0; i < line.length(); i++) {
+			char current = line.charAt(i);
+			if (current == '"') {
+				if (quoted && i + 1 < line.length() && line.charAt(i + 1) == '"') {
+					i++;
+				} else {
+					quoted = !quoted;
+				}
+			} else if (current == ',' && !quoted) {
+				columns++;
+			}
+		}
+		return columns;
+	}
+
+	private static String readText(File file) throws Exception {
+		StringBuilder text = new StringBuilder();
+		BufferedReader reader = new BufferedReader(new FileReader(file));
+		try {
+			String line;
+			while ((line = reader.readLine()) != null) {
+				text.append(line).append('\n');
+			}
+		} finally {
+			reader.close();
+		}
+		return text.toString();
+	}
+
+	private static void deleteTree(File file) {
+		if (file == null || !file.exists()) return;
+		if (file.isDirectory()) {
+			File[] children = file.listFiles();
+			if (children != null) {
+				for (int i = 0; i < children.length; i++) deleteTree(children[i]);
+			}
+		}
+		file.delete();
+	}
+
+	private static Leaf leafFixture(double z, double anet, double waterPotential, float gs) {
+		Leaf fixture = new Leaf();
+		fixture.z = z;
+		fixture.AlimActual = anet;
+		fixture.waterPotential = waterPotential;
+		fixture.gs = gs;
+		return fixture;
+	}
+
+	@Test
+	public void plantAndSolverDebugDtoSchemasAreStable() {
+		String[] plantNames = indexedPropertyNames(PlantLevelOutputData.class, 160);
+		String[] fieldNames = indexedPropertyNames(FieldLevelOutputData.class, 33);
+		String[] fruitNames = indexedPropertyNames(MeanFruitOutputData.class, 92);
+		assertEquals("timestamp", fieldNames[0]);
+		assertEquals("simuuid", fieldNames[32]);
+		assertEquals("timestamp", fruitNames[0]);
+		assertEquals("mSyn", fruitNames[91]);
+		String[] carbonFields = {
+			"previousDailyNetCarbonBalance", "cordonStructureDM_SEC",
+			"trunkStructureDM_SEC", "perennielWoodStructureDM_SEC",
+			"structuralRootStructureDM_SEC", "cordonMaintenanceDM",
+			"trunkMaintenanceDM", "perennielWoodMaintenanceDM",
+			"structuralRootMaintenanceDM", "cordonReserveDM", "trunkReserveDM",
+			"perennielWoodReserveDM", "structuralRootReserveDM"
+		};
+		assertPropertyBlock(plantNames, 84, carbonFields);
+
+		String[] canopyFields = {
+			"intWaterPotential_1", "intWaterPotential_2", "intWaterPotential_3", "intWaterPotential_4",
+			"meanAnet_1", "meanAnet_2", "meanAnet_3", "meanAnet_4",
+			"meanLeafWaterPotential_1", "meanLeafWaterPotential_2",
+			"meanLeafWaterPotential_3", "meanLeafWaterPotential_4",
+			"meanGs_1", "meanGs_2", "meanGs_3", "meanGs_4",
+			"sugarConcentration_1", "sugarConcentration_2",
+			"sugarConcentration_3", "sugarConcentration_4"
+		};
+		assertPropertyBlock(plantNames, 118, canopyFields);
+
+		String[] solverFields = {
+			"waterFluxSolverResidual", "waterFluxSolverFallbackUsed",
+			"waterFluxSolverAccepted", "meanLeafWaterPotential_solver",
+			"minLeafWaterPotential_solver", "maxLeafWaterPotential_solver",
+			"meanPLC_leaf_solver", "meanGs_solver"
+		};
+		HashSet plantNameSet = new HashSet();
+		for (int i = 0; i < plantNames.length; i++) plantNameSet.add(plantNames[i]);
+		for (int i = 0; i < solverFields.length; i++) {
+			assertFalse("Solver-only field remains in the plant DTO: " + solverFields[i],
+				plantNameSet.contains(solverFields[i]));
+		}
+
+		String[] debugNames = indexedPropertyNames(PlantWaterFluxSolverDebugOutputData.class, 21);
+		String[] debugFields = {
+			"timestamp", "year", "dayOfYear", "hourOfDay", "scenario", "simuuid",
+			"plantNumber", "fieldInstanceId", "waterFluxSolverResidual",
+			"waterFluxSolverFallbackUsed", "waterFluxSolverAccepted",
+			"meanLeafWaterPotential_solver", "minLeafWaterPotential_solver",
+			"maxLeafWaterPotential_solver", "meanPLC_leaf_solver", "meanGs_solver",
+			"waterFluxSolverLowerBound", "waterFluxSolverUpperBound",
+			"waterFluxSolverLeafSum", "waterFluxSolverRepeatedResidualDelta",
+			"waterFluxSolverEvalCount"
+		};
+		assertPropertyBlock(debugNames, 0, debugFields);
+		HashSet debugNameSet = new HashSet();
+		for (int i = 0; i < debugNames.length; i++) debugNameSet.add(debugNames[i]);
+		for (int i = 0; i < solverFields.length; i++) {
+			assertTrue("Solver field missing from debug DTO: " + solverFields[i],
+				debugNameSet.contains(solverFields[i]));
+		}
+	}
+
+	@Test
+	public void diagnosticDtoSchemasHaveContiguousIndexedProperties() {
+		Class[] dtoClasses = {
+			LeafExpansionDiagnosticOutputData.class,
+			ActualLeafSummaryDiagnosticOutputData.class,
+			CarbonTransportMassBalanceDiagnosticOutputData.class,
+			AppleFlowerTimingDiagnosticOutputData.class,
+			AppleSpurBourseDiagnosticOutputData.class,
+			AppleFlowerToFruitDiagnosticOutputData.class,
+			AppleLeafAxisDiagnosticOutputData.class
+		};
+		int[] expectedCounts = {60, 29, 29, 29, 23, 27, 19};
+		String[] commonIdentifiers = {
+			"timestamp", "step", "year", "dayOfYear", "hourOfDay",
+			"scenario", "simuuid", "plantNumber", "fieldInstanceId"
+		};
+		for (int i = 0; i < dtoClasses.length; i++) {
+			String[] names = indexedPropertyNames(dtoClasses[i], expectedCounts[i]);
+			assertPropertyBlock(names, 0, commonIdentifiers);
+		}
+		String[] carbonNames = indexedPropertyNames(
+			CarbonTransportMassBalanceDiagnosticOutputData.class, 29);
+		String[] plantBaseFields = {
+			"ctPlantBaseFallbackUsed", "ctPlantBaseFallbackReason",
+			"ctPlantBaseFallbackCount", "ctPlantBaseResidual",
+			"ctPlantBaseDenominator"
+		};
+		assertPropertyBlock(carbonNames, 24, plantBaseFields);
+	}
+
+	@Test
+	public void diagnosticCoordinatorControlsFilesMetadataAndEventRows() throws Exception {
+		File testRoot = new File(PATH_OUTPUT,
+			"diagnostic-table-unit-" + System.currentTimeMillis());
+		File disabledCsv = new File(testRoot,
+			"diagnostics/apple_leaf_axis_debug.csv");
+		File disabledMetadata = new File(testRoot,
+			"diagnostics/apple_leaf_axis_debug.metadata.json");
+		try {
+			assertTrue(disabledCsv.getParentFile().mkdirs());
+			assertTrue(disabledCsv.createNewFile());
+			assertTrue(disabledMetadata.createNewFile());
+			DiagnosticTableCoordinator.initialize(
+				testRoot.getPath() + File.separator, "unit",
+				false, false, false, false);
+			assertFalse("Disabled diagnostics must remove a stale CSV", disabledCsv.exists());
+			assertFalse("Disabled diagnostics must remove stale metadata", disabledMetadata.exists());
+
+			DiagnosticTableCoordinator.initialize(
+				testRoot.getPath() + File.separator, "unit",
+				false, true, false, true);
+			String csvPath = DiagnosticTableCoordinator.getCsvPath(
+				DiagnosticTableCoordinator.TABLE_APPLE_LEAF_AXIS);
+			String metadataPath = DiagnosticTableCoordinator.getMetadataPath(
+				DiagnosticTableCoordinator.TABLE_APPLE_LEAF_AXIS);
+			String leafMetadataPath = DiagnosticTableCoordinator.getMetadataPath(
+				DiagnosticTableCoordinator.TABLE_LEAF_EXPANSION);
+			assertNotNull(csvPath);
+			assertNotNull(metadataPath);
+			assertNotNull(leafMetadataPath);
+			assertTrue(new File(metadataPath).isFile());
+			assertTrue(new File(leafMetadataPath).isFile());
+
+			AppleLeafAxisDiagnosticOutputData firstRow =
+				new AppleLeafAxisDiagnosticOutputData();
+			firstRow.timestamp = "2001-01-01T00:00:00";
+			firstRow.step = 1;
+			firstRow.year = 2001;
+			firstRow.dayOfYear = 1;
+			firstRow.hourOfDay = 0;
+			firstRow.scenario = 1;
+			firstRow.simuuid = "unit-run";
+			firstRow.plantNumber = 1;
+			firstRow.fieldInstanceId = 0;
+			firstRow.event = "created, \"quoted\"";
+			DiagnosticTableCoordinator.writeAppleLeafAxis(firstRow);
+
+			AppleLeafAxisDiagnosticOutputData secondRow =
+				new AppleLeafAxisDiagnosticOutputData();
+			secondRow.timestamp = firstRow.timestamp;
+			secondRow.step = 1;
+			secondRow.year = 2001;
+			secondRow.dayOfYear = 1;
+			secondRow.hourOfDay = 0;
+			secondRow.scenario = 1;
+			secondRow.simuuid = "unit-run";
+			secondRow.plantNumber = 1;
+			secondRow.fieldInstanceId = 0;
+			secondRow.event = "second event";
+			DiagnosticTableCoordinator.writeAppleLeafAxis(secondRow);
+
+			assertEquals(2L, DiagnosticTableCoordinator.getRowCount(
+				DiagnosticTableCoordinator.TABLE_APPLE_LEAF_AXIS));
+			BufferedReader reader = new BufferedReader(new FileReader(new File(csvPath)));
+			String header;
+			String firstValue;
+			String secondValue;
+			try {
+				header = reader.readLine();
+				firstValue = reader.readLine();
+				secondValue = reader.readLine();
+				assertNull("Only two event rows should be written", reader.readLine());
+			} finally {
+				reader.close();
+			}
+			assertEquals(19, csvColumnCount(header));
+			assertEquals(csvColumnCount(header), csvColumnCount(firstValue));
+			assertEquals(csvColumnCount(header), csvColumnCount(secondValue));
+			assertTrue(firstValue.indexOf("\"created, \"\"quoted\"\"\"") >= 0);
+
+			String metadataText = readText(new File(metadataPath));
+			assertTrue(metadataText.indexOf("description") >= 0);
+			assertTrue(metadataText.indexOf("tags") >= 0);
+			String leafMetadataText = readText(new File(leafMetadataPath));
+			assertTrue(leafMetadataText.indexOf("unit") >= 0);
+		} finally {
+			DiagnosticTableCoordinator.initialize(
+				PATH_OUTPUT, outputTable_name,
+				outputWaterFluxSolverDebug,
+				outputLeafGrowthDiagnostics,
+				outputCarbonTransportDiagnostics,
+				outputAppleDevelopmentDiagnostics);
+			deleteTree(testRoot);
+		}
+	}
+
+	@Test
+	public void canopyZonePhysiologyUsesDeterministicHalfOpenZonesAndFiniteMeans() {
+		double[] heights = {0.9, 1.4, 2.0, 3.0};
+		Leaf[] leaves = {
+			leafFixture(1.0, 10.0, -0.5, 0.1f),
+			leafFixture(1.2, Double.NaN, -0.7, 0.3f),
+			leafFixture(1.4, 20.0, Double.NaN, 0.4f),
+			leafFixture(2.0, 40.0, -1.5, Float.NaN),
+			leafFixture(3.0, 80.0, -2.0, 0.8f),
+			leafFixture(0.8, 1000.0, -4.0, 1.0f)
+		};
+
+		double[][] result = calculateCanopyZonePhysiology(leaves, heights);
+		assertEquals(10.0, result[CANOPY_ZONE_MEAN_ANET][0], 1.0e-12);
+		assertEquals(-0.6, result[CANOPY_ZONE_MEAN_WATER_POTENTIAL][0], 1.0e-12);
+		assertEquals(0.2, result[CANOPY_ZONE_MEAN_GS][0], 1.0e-7);
+		assertEquals(20.0, result[CANOPY_ZONE_MEAN_ANET][1], 1.0e-12);
+		assertEquals(0.0, result[CANOPY_ZONE_MEAN_WATER_POTENTIAL][1], 0.0);
+		assertEquals(0.4, result[CANOPY_ZONE_MEAN_GS][1], 1.0e-7);
+		assertEquals(40.0, result[CANOPY_ZONE_MEAN_ANET][2], 1.0e-12);
+		assertEquals(-1.5, result[CANOPY_ZONE_MEAN_WATER_POTENTIAL][2], 1.0e-12);
+		assertEquals(0.0, result[CANOPY_ZONE_MEAN_GS][2], 0.0);
+		assertEquals(80.0, result[CANOPY_ZONE_MEAN_ANET][3], 1.0e-12);
+		assertEquals(-2.0, result[CANOPY_ZONE_MEAN_WATER_POTENTIAL][3], 1.0e-12);
+		assertEquals(0.8, result[CANOPY_ZONE_MEAN_GS][3], 1.0e-7);
+		assertEquals(1.0, result[CANOPY_ZONE_COUNT_ANET][0], 0.0);
+		assertEquals(2.0, result[CANOPY_ZONE_COUNT_WATER_POTENTIAL][0], 0.0);
+		assertEquals(2.0, result[CANOPY_ZONE_COUNT_GS][0], 0.0);
+		assertEquals(0.0, result[CANOPY_ZONE_COUNT_WATER_POTENTIAL][1], 0.0);
+		assertEquals(0.0, result[CANOPY_ZONE_COUNT_GS][2], 0.0);
+
+		double[][] emptyZoneResult = calculateCanopyZonePhysiology(
+			new Leaf[] {leafFixture(1.0, 5.0, -0.25, 0.05f)}, heights);
+		assertEquals(0.0, emptyZoneResult[CANOPY_ZONE_MEAN_ANET][1], 0.0);
+		assertEquals(0.0, emptyZoneResult[CANOPY_ZONE_MEAN_WATER_POTENTIAL][2], 0.0);
+		assertEquals(0.0, emptyZoneResult[CANOPY_ZONE_MEAN_GS][3], 0.0);
+
+		assertEquals(1, findOutputHeightZone(1.4, heights));
+		assertEquals(2, findOutputHeightZone(2.0, heights));
+		assertEquals(3, findOutputHeightZone(3.0, heights));
+		assertEquals(-1, findOutputHeightZone(0.8, heights));
+	}
+}
+
+public class ReserveTurnoverUnitTest {
+	private static GrowingOrgan reserveFixture(double reserveCarbon) {
+		GrowingOrgan fixture = new GrowingOrgan();
+		fixture.biomass = 100.0;
+		fixture.maxRes = 0.4;
+		fixture.synRate = 0.1;
+		fixture.hydRate = 0.05;
+		fixture.carbon_nonStructure = reserveCarbon;
+		return fixture;
+	}
+
+	@Test
+	public void reserveSynthesisStopsAtCapacityWithoutDisablingHydrolysis() {
+		float previousTa = Ta;
+		int previousDaysSinceWinterSolstice = daysSinceWinterSolstice;
+		try {
+			Ta = 20.0f;
+			daysSinceWinterSolstice = 0;
+			double reserveCapacity = 100.0 * 0.4 * CARBON_FRACTION_SUCROSE;
+
+			GrowingOrgan belowCapacity = reserveFixture(0.5 * reserveCapacity);
+			assertTrue("Reserve below capacity must have positive synthesis",
+				belowCapacity.reserveSynthesis() > 0.0);
+
+			GrowingOrgan atCapacity = reserveFixture(reserveCapacity);
+			assertEquals("Reserve at capacity must have zero synthesis",
+				0.0, atCapacity.reserveSynthesis(), 0.0);
+
+			GrowingOrgan aboveCapacity = reserveFixture(1.1 * reserveCapacity);
+			assertEquals("Reserve above capacity must have zero synthesis",
+				0.0, aboveCapacity.reserveSynthesis(), 0.0);
+			assertTrue("Hydrolysis must remain independently available above capacity",
+				aboveCapacity.reserveHydrolysis() > 0.0);
+		} finally {
+			Ta = previousTa;
+			daysSinceWinterSolstice = previousDaysSinceWinterSolstice;
+		}
+	}
+}
+
+public class PlantBaseCarbonBoundaryUnitTest {
+	private String previousSpecies;
+
+	@Before
+	public void useStableSugarConversion() {
+		previousSpecies = species;
+		species = "grapevine";
+	}
+
+	@After
+	public void restoreSpecies() {
+		species = previousSpecies;
+	}
+
+	private static PlantBase boundaryFixture(double branchA, double branchB,
+			double previousPotential) {
+		PlantBase fixture = new PlantBase();
+		fixture.branch_flux_a = branchA;
+		fixture.branch_flux_b = branchB;
+		fixture.cpb = previousPotential;
+		fixture.cpt = previousPotential;
+		return fixture;
+	}
+
+	private static PlantBase applyBoundary(double branchA, double branchB,
+			double previousPotential) {
+		PlantBase fixture = boundaryFixture(branchA, branchB, previousPotential);
+		applyGuardedPlantBaseCarbonBoundary(fixture);
+		assertTrue(isFiniteCarbonValue(fixture.cpt));
+		assertTrue(fixture.cpt >= CT_PHI_FLOOR);
+		assertTrue(isFiniteCarbonValue(fixture.sugarConcentration_phloem));
+		assertTrue(fixture.sugarConcentration_phloem >= 0.0);
+		return fixture;
+	}
+
+	@Test
+	public void normalFiniteBoundaryAcceptsDirectSolution() {
+		double branchA = -2.0e-4;
+		double branchB = 0.4;
+		double expected = -branchA / branchB;
+		PlantBase fixture = applyBoundary(branchA, branchB, 0.001);
+		assertEquals(expected, fixture.cpt, 0.0);
+		assertEquals(0, fixture.ctPlantBaseFallbackUsed);
+		assertEquals(0, fixture.ctPlantBaseFallbackReason);
+		assertEquals(0, fixture.ctPlantBaseFallbackCount);
+		assertEquals(branchB, fixture.ctPlantBaseDenominator, 0.0);
+		assertEquals(branchA + branchB * fixture.cpt,
+			fixture.ctPlantBaseResidual, 0.0);
+	}
+
+	@Test
+	public void zeroDenominatorRetainsPreviousPotential() {
+		PlantBase fixture = applyBoundary(-1.0e-4, 0.0, 0.002);
+		assertEquals(0.002, fixture.cpt, 0.0);
+		assertEquals(1, fixture.ctPlantBaseFallbackUsed);
+		assertEquals(2, fixture.ctPlantBaseFallbackReason);
+		assertEquals(1, fixture.ctPlantBaseFallbackCount);
+		assertEquals(-1.0e-4, fixture.ctPlantBaseResidual, 0.0);
+	}
+
+	@Test
+	public void eitherNearZeroDenominatorSignRetainsPreviousPotential() {
+		PlantBase positive = applyBoundary(-1.0e-4,
+			0.5 * CT_PB_B_ABS_MIN, 0.002);
+		PlantBase negative = applyBoundary(-1.0e-4,
+			-0.5 * CT_PB_B_ABS_MIN, 0.002);
+		assertEquals(0.002, positive.cpt, 0.0);
+		assertEquals(0.002, negative.cpt, 0.0);
+		assertEquals(2, positive.ctPlantBaseFallbackReason);
+		assertEquals(2, negative.ctPlantBaseFallbackReason);
+	}
+
+	@Test
+	public void nonFiniteCoefficientsRetainPreviousPotential() {
+		PlantBase invalidA = applyBoundary(Double.NaN, 0.5, 0.002);
+		PlantBase invalidB = applyBoundary(-1.0e-4,
+			Double.POSITIVE_INFINITY, 0.002);
+		assertEquals(0.002, invalidA.cpt, 0.0);
+		assertEquals(0.002, invalidB.cpt, 0.0);
+		assertEquals(1, invalidA.ctPlantBaseFallbackReason);
+		assertEquals(1, invalidB.ctPlantBaseFallbackReason);
+	}
+
+	@Test
+	public void negativeSubfloorOrInfiniteCandidateRetainsPreviousPotential() {
+		PlantBase negative = applyBoundary(1.0e-4, 0.5, 0.002);
+		PlantBase subfloor = applyBoundary(-1.0e-16, 0.5, 0.002);
+		PlantBase infinite = applyBoundary(-Double.MAX_VALUE, 0.5, 0.002);
+		assertEquals(0.002, negative.cpt, 0.0);
+		assertEquals(0.002, subfloor.cpt, 0.0);
+		assertEquals(0.002, infinite.cpt, 0.0);
+		assertEquals(3, negative.ctPlantBaseFallbackReason);
+		assertEquals(3, subfloor.ctPlantBaseFallbackReason);
+		assertEquals(3, infinite.ctPlantBaseFallbackReason);
+	}
+
+	@Test
+	public void invalidPreviousPotentialUsesPositiveFloor() {
+		PlantBase nanPrevious = applyBoundary(-1.0e-4, 0.0, Double.NaN);
+		PlantBase negativePrevious = applyBoundary(-1.0e-4, 0.0, -0.5);
+		assertEquals(CT_PHI_FLOOR, nanPrevious.cpt, 0.0);
+		assertEquals(CT_PHI_FLOOR, negativePrevious.cpt, 0.0);
+	}
+
+	@Test
+	public void invalidTransformedSugarRetainsPreviousPotential() {
+		PlantBase fixture = applyBoundary(-Double.MAX_VALUE, 1.0, 0.002);
+		assertEquals(0.002, fixture.cpt, 0.0);
+		assertEquals(1, fixture.ctPlantBaseFallbackUsed);
+		assertEquals(4, fixture.ctPlantBaseFallbackReason);
+	}
+
+	@Test
+	public void fallbackCountAccumulatesAndAcceptedSolveClearsCurrentFlag() {
+		PlantBase fixture = boundaryFixture(-1.0e-4, 0.0, 0.002);
+		applyGuardedPlantBaseCarbonBoundary(fixture);
+		applyGuardedPlantBaseCarbonBoundary(fixture);
+		assertEquals(2, fixture.ctPlantBaseFallbackCount);
+
+		fixture.branch_flux_a = -2.0e-4;
+		fixture.branch_flux_b = 0.4;
+		applyGuardedPlantBaseCarbonBoundary(fixture);
+		assertEquals(0, fixture.ctPlantBaseFallbackUsed);
+		assertEquals(0, fixture.ctPlantBaseFallbackReason);
+		assertEquals(2, fixture.ctPlantBaseFallbackCount);
+	}
+
+	@Test
+	public void generalPotentialGuardRejectsNonFiniteAndSubfloorValues() {
+		assertEquals(CT_PHI_FLOOR, safePhi(Double.POSITIVE_INFINITY), 0.0);
+		assertEquals(CT_PHI_FLOOR, safePhi(Double.NaN), 0.0);
+		assertEquals(CT_PHI_FLOOR, safePhi(0.0), 0.0);
+		assertEquals(0.002, safePhi(0.002), 0.0);
+	}
+}
+
+public class ModelUnitTest {
+	@Before
+	public void setup() {
+		mainInstance.resetGraph();	
+		mainInstance.init();	
+        derive();
+	}
+
+	    @Test
+	    public void assertStartingStepTest() {
+    	int expected = 0;
+        int actual = step;
+    	assertEquals(expected, actual);
+	    }
+
+	@Test
+	public void waterFluxSolverDebugOutputIsConditionalAndReadOnly() throws Exception {
+		PlantBase pb = findOutputPlantBase();
+		assertNotNull(pb);
+		Leaf focalLeaf = first((* l:Leaf, (
+			l.plantNumber == pb.plantNumber &&
+			l.fieldInstanceId == pb.fieldInstanceId &&
+			l.isReportable == pb.isReportable
+		) *));
+		if (focalLeaf == null) {
+			mainInstance.run();
+			pb = findOutputPlantBase();
+			assertNotNull(pb);
+			focalLeaf = first((* l:Leaf, (
+				l.plantNumber == pb.plantNumber &&
+				l.fieldInstanceId == pb.fieldInstanceId &&
+				l.isReportable == pb.isReportable
+			) *));
+		}
+		assertNotNull(focalLeaf);
+
+		double meanAnetBefore = pb.meanAnet;
+		double carbonAssimilationBefore = pb.carbonAssimilation;
+		double waterFluxBefore = pb.waterFlux_optimized;
+		double xylemPotentialBefore = pb.xylemWaterPotential;
+		double biomassBefore = pb.biomass;
+		double unloadingBefore = pb.totalUnloading;
+		double reserveDemandBefore = pb.cordonReserveDM;
+		double absorbedParBefore = pb.leafPAR;
+		double leafAnetBefore = focalLeaf.AlimActual;
+		double leafPotentialBefore = focalLeaf.waterPotential;
+		double leafGsBefore = focalLeaf.gs;
+		double leafIncidentParBefore = focalLeaf.incPARm2;
+
+		File debugCsv = new File(waterFluxSolverDebugOutputFilePath);
+		File debugMetadata = new File(waterFluxSolverDebugMetadataFilePath);
+		debugCsv.delete();
+		debugMetadata.delete();
+		boolean previousDebugSetting = outputWaterFluxSolverDebug;
+		try {
+			outputWaterFluxSolverDebug = false;
+			DiagnosticTableCoordinator.initialize(
+				PATH_OUTPUT, outputTable_name, false, false, false, false);
+			writeWaterFluxSolverDebug(pb);
+			assertFalse("Disabled solver debug output must not create a CSV", debugCsv.exists());
+			assertFalse("Disabled solver debug output must not create metadata", debugMetadata.exists());
+
+			outputWaterFluxSolverDebug = true;
+			DiagnosticTableCoordinator.initialize(
+				PATH_OUTPUT, outputTable_name, true, false, false, false);
+			writeWaterFluxSolverDebug(pb);
+			assertTrue("Enabled solver debug output must create a CSV", debugCsv.isFile());
+			assertTrue("Enabled solver debug output must create metadata", debugMetadata.isFile());
+
+			BufferedReader reader = new BufferedReader(new FileReader(debugCsv));
+			String headerLine;
+			String valueLine;
+			try {
+				headerLine = reader.readLine();
+				valueLine = reader.readLine();
+			} finally {
+				reader.close();
+			}
+			assertNotNull(headerLine);
+			assertNotNull(valueLine);
+			String[] headers = headerLine.split(",", -1);
+			String[] values = valueLine.split(",", -1);
+			assertEquals(21, headers.length);
+			assertEquals(headers.length, values.length);
+			assertEquals("waterFluxSolverResidual", headers[8]);
+			assertEquals(pb.waterFluxSolverResidual, Double.parseDouble(values[8]), 0.0);
+			assertEquals(pb.waterFluxSolverFallbackUsed, Integer.parseInt(values[9]));
+			assertEquals(pb.waterFluxSolverAccepted, Integer.parseInt(values[10]));
+			assertEquals(pb.meanLeafWaterPotential_solver, Double.parseDouble(values[11]), 0.0);
+			assertEquals(pb.minLeafWaterPotential_solver, Double.parseDouble(values[12]), 0.0);
+			assertEquals(pb.maxLeafWaterPotential_solver, Double.parseDouble(values[13]), 0.0);
+			assertEquals(pb.meanPLC_leaf_solver, Double.parseDouble(values[14]), 0.0);
+			assertEquals(pb.meanGs_solver, Double.parseDouble(values[15]), 0.0);
+			assertEquals(pb.waterFluxSolverLowerBound, Double.parseDouble(values[16]), 0.0);
+			assertEquals(pb.waterFluxSolverUpperBound, Double.parseDouble(values[17]), 0.0);
+			assertEquals(pb.waterFluxSolverLeafSum, Double.parseDouble(values[18]), 0.0);
+			assertEquals(pb.waterFluxSolverRepeatedResidualDelta, Double.parseDouble(values[19]), 0.0);
+			assertEquals("waterFluxSolverEvalCount", headers[20]);
+			assertEquals(pb.waterFluxSolverEvalCount, Integer.parseInt(values[20]));
+
+			assertEquals(meanAnetBefore, pb.meanAnet, 0.0);
+			assertEquals(carbonAssimilationBefore, pb.carbonAssimilation, 0.0);
+			assertEquals(waterFluxBefore, pb.waterFlux_optimized, 0.0);
+			assertEquals(xylemPotentialBefore, pb.xylemWaterPotential, 0.0);
+			assertEquals(biomassBefore, pb.biomass, 0.0);
+			assertEquals(unloadingBefore, pb.totalUnloading, 0.0);
+			assertEquals(reserveDemandBefore, pb.cordonReserveDM, 0.0);
+			assertEquals(absorbedParBefore, pb.leafPAR, 0.0);
+			assertEquals(leafAnetBefore, focalLeaf.AlimActual, 0.0);
+			assertEquals(leafPotentialBefore, focalLeaf.waterPotential, 0.0);
+			assertEquals(leafGsBefore, focalLeaf.gs, 0.0);
+			assertEquals(leafIncidentParBefore, focalLeaf.incPARm2, 0.0);
+		} finally {
+			outputWaterFluxSolverDebug = previousDebugSetting;
+			DiagnosticTableCoordinator.initialize(
+				PATH_OUTPUT, outputTable_name,
+				outputWaterFluxSolverDebug,
+				outputLeafGrowthDiagnostics,
+				outputCarbonTransportDiagnostics,
+				outputAppleDevelopmentDiagnostics);
+			debugCsv.delete();
+			debugMetadata.delete();
+		}
+	}
+
+    
+    @Test
+    public void assertTenStepTest() {
+    	int expected = 10;    	
+    	for(int i = 0; i < expected; i++) {
+    		mainInstance.run();
+    	}
+    	
+        int actual = step;
+    	assertEquals("Step should be equal to 10", expected, actual);
+    	assert continueRunning;
+    	
+    	
+    	PlantBase pb = null;
+		try {
+			pb = first((* p:PlantBase, (p.plantNumber == INDI_ID_A) *));
+		} catch (Exception e) {
+			println("Error locating PlantBase: " + e.getMessage());
+		} 
+	 	
+	 	 if(pb != null) { 	 
+			assertFalse("waterFlux_optimized should not be NaN", Double.isNaN(pb.waterFlux_optimized));
+			assertFalse("sugarConcentration_phloem should not be NaN", Double.isNaN(pb.sugarConcentration_phloem));
+			assertFalse("totalLoading should not be NaN", Double.isNaN(pb.totalLoading));
+			assertFalse("totalUnloading should not be NaN", Double.isNaN(pb.totalUnloading));
+		 }
+    }
+       
+    
+	  @Test
+		public void assertNodeCount() {
+			mainInstance.run();
+			int expected = nrRows * nrPlants;
+			int actual = (int) count((*pb:PlantBase*));
+			assertEquals("Mismatch in PlantBase count: expected " + expected + ", but got " + actual, expected, actual);
+	
+			int leafCount = array((*l:Leaf, (l.plantNumber == INDI_ID_A)*)).length;
+			int internodeCount = array((*l:Internode, (l.plantNumber == INDI_ID_A)*)).length;
+			int fruitCount = array((*l:FruitService, (l.plantNumber == INDI_ID_A)*)).length;
+	
+			assertEquals("Leaf array length mismatch: expected 16, got " + leafCount, 14, leafCount);
+			assertEquals("Internode array length mismatch: expected 16, got " + internodeCount, 16, internodeCount);
+			assertEquals("FruitService array length mismatch: expected 3, got " + fruitCount, 3, fruitCount);
+	
+			boolean soilValid = InitArch.validateSoilParams();
+			boolean rootValid = InitArch.validateRootProportions();
+	
+			assertTrue("Soil parameter validation failed", soilValid);
+			assertTrue("Root proportion validation failed", rootValid);
+		} 
+}
+
+
+
+
+
+
+
+
+

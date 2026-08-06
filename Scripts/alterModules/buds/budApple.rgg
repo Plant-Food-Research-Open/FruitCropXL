@@ -1,0 +1,2529 @@
+import java.io.Serializable;
+import java.util.Arrays;
+import java.util.Random;
+import static java.lang.Math.*;
+import static plantBase.*;
+import static absOrgan.*;
+import static globalParameters.*;
+import static plantParameters.*;
+import static modelOptions.*;
+import static initialConditions.*;
+import static environment.*;
+import static extraTools.*;
+import static soil.*;
+import static berryYield.*;
+import static shoot.*;
+import static interfaces.*;
+import static phenology.*;
+import static budBase.*;
+import org.apache.commons.math3.distribution.*;
+import io.github.fruitcropxl.config.params.groups.*;
+import io.github.fruitcropxl.config.params.structures.*;
+
+/**
+ * Apple bud-state and shoot-plan lifecycle.
+ *
+ * <p>This file owns the <em>pre-growth</em> half of the apple dynamic-growth pipeline:
+ * it creates bud-local shoot plans, stores mixed-bud spur/bourse plans, transfers
+ * those plans into a new apex at bud burst, and exposes the identity helpers used
+ * by develop-stage topology rules. The actual topology rewrite happens in
+ * {@code developApple.rgg}; this file prepares the state that those rewrite rules
+ * consume.</p>
+ *
+ * <h2>Dynamic-growth responsibilities</h2>
+ * <ul>
+ *   <li>Build bud-local shoot plans from stochastic node counts and branch spacing.</li>
+ *   <li>Represent mixed buds as a two-layer plan: rosette axis plus planned bourse shoots.</li>
+ *   <li>Transfer bud identity, axis identity, rank/order, and shoot plan state into a new apex.</li>
+ *   <li>Reserve bud-burst / phytomer-emission claims so same-step re-entry does not create duplicates.</li>
+ *   <li>Provide the axis-label helpers used by planner and develop code when a new child axis is attached.</li>
+ * </ul>
+ *
+ * <h2>Planner-to-runtime chain</h2>
+ * <ol>
+ *   <li>{@link #sampleAndAllocate_Gamma()} samples a shoot plan and stores it on the bud.</li>
+ *   <li>{@link BudAppleService#shouldBreak()} gates bud burst and reserves the step-local claim.</li>
+ *   <li>{@link apex.ApexApple#initiate(BudService)} copies the bud plan into a new apex.</li>
+ *   <li>{@code developApple.rgg} consumes {@link apex.ApexApple#popPlannedBranchLenAtCurrentNode()} and
+ *       {@link apex.ApexApple#popPlannedBoursePlanIndexAtRosetteRank(int)} while rewriting topology.</li>
+ * </ol>
+ *
+ * <h2>Identity fields documented here</h2>
+ * <ul>
+ *   <li>{@code budType}, {@code shootType}, {@code flowerNumber}</li>
+ *   <li>{@code order}, {@code rank}, {@code syllepticOrder}</li>
+ *   <li>{@code axis2ID..axis9ID}, {@code cpn}</li>
+ *   <li>{@code sourceBudID}, {@code parentAxisApexID}</li>
+ *   <li>branch-plan fields: {@code totalNodes}, {@code nodeAllocation}, {@code branchPlan},
+ *       {@code nBranches}, {@code mainNodesPlanned}, {@code potentialLength}</li>
+ * </ul>
+ *
+ * @see #sampleAndAllocate_Gamma()
+ * @see #normalizeForAttachmentCapacity(int[], int)
+ * @see #placeBranchesEvenish(int[], int)
+ * @see apex.ApexApple#initiate(budBase.BudService)
+ * @see apex.ApexApple#popPlannedBranchLenAtCurrentNode()
+ * @see #initiatePreplanned(Internode, int)
+ * @Author Junqi Zhu Francisco Rojo
+ * The idea of using node distribution for each bud at the start of the growth was
+ * originated from Francisco Rojo in the shoot generator.
+ */
+
+public class AppleShootPlan implements Serializable {
+	private static final long serialVersionUID = 1L;
+
+	public int totalNodes = 0;
+	public boolean isSpur = false;
+	public int[] nodeAllocation = new int[0];
+	public int[][] branchPlan = new int[0][0];
+	public int nBranches = 0;
+	public int mainNodesPlanned = 1;
+	public double potentialLength = Double.NaN;
+
+	/**
+	 * Create a deep copy of this shoot plan.
+	 *
+	 * <p>The returned object is safe to hand to an apex because it does not share
+	 * mutable arrays with the bud-side source plan.</p>
+	 *
+	 * @return independent copy of this plan
+	 */
+	public AppleShootPlan copy() {
+		AppleShootPlan cp = new AppleShootPlan();
+		cp.totalNodes = this.totalNodes;
+		cp.isSpur = this.isSpur;
+		cp.nodeAllocation = copyIntArray(this.nodeAllocation);
+		cp.branchPlan = copyPlanMatrix(this.branchPlan);
+		cp.nBranches = this.nBranches;
+		cp.mainNodesPlanned = this.mainNodesPlanned;
+		cp.potentialLength = this.potentialLength;
+		return cp;
+	}
+
+	/**
+	 * Deep-copy an integer vector used for node allocations.
+	 *
+	 * @param src source array, may be {@code null}
+	 * @return copied array, or an empty array when {@code src} is {@code null}
+	 */
+	public static int[] copyIntArray(int[] src) {
+		if (src == null) return new int[0];
+		int[] out = new int[src.length];
+		for (int i = 0; i < src.length; i++) out[i] = src[i];
+		return out;
+	}
+
+	/**
+	 * Deep-copy a 2D plan matrix used for branch or spur attachment plans.
+	 *
+	 * @param src source matrix, may be {@code null}
+	 * @return copied matrix, or an empty matrix when {@code src} is {@code null}
+	 */
+	public static int[][] copyPlanMatrix(int[][] src) {
+		if (src == null) return new int[0][0];
+		int[][] out = new int[src.length][];
+		for (int i = 0; i < src.length; i++) {
+			if (src[i] == null) {
+				out[i] = new int[0];
+			} else {
+				out[i] = new int[src[i].length];
+				for (int j = 0; j < src[i].length; j++) out[i][j] = src[i][j];
+			}
+		}
+		return out;
+	}
+
+	/**
+	 * Deep-copy the array of child shoot plans used by mixed buds.
+	 *
+	 * @param src source plan array, may be {@code null}
+	 * @return copied array with each non-null plan cloned
+	 */
+	public static AppleShootPlan[] copyShootPlans(AppleShootPlan[] src) {
+		if (src == null) return new AppleShootPlan[0];
+		AppleShootPlan[] out = new AppleShootPlan[src.length];
+		for (int i = 0; i < src.length; i++) {
+			out[i] = (src[i] != null) ? src[i].copy() : null;
+		}
+		return out;
+	}
+
+	/**
+	 * Format a node-allocation vector for debug output.
+	 *
+	 * @param src allocation array
+	 * @return compact string representation for logs
+	 */
+	public static String formatIntArray(int[] src) {
+		return (src == null) ? "[]" : Arrays.toString(src);
+	}
+
+	/**
+	 * Format a branch or spur plan matrix for debug output.
+	 *
+	 * @param src matrix to format
+	 * @return compact string representation for logs
+	 */
+	public static String formatPlanMatrix(int[][] src) {
+		if (src == null || src.length == 0) return "[]";
+		String out = "[";
+		for (int i = 0; i < src.length; i++) {
+			if (i > 0) out += ", ";
+			if (src[i] == null || src[i].length == 0) out += "[]";
+			else out += Arrays.toString(src[i]);
+		}
+		out += "]";
+		return out;
+	}
+
+	/**
+	 * Summarize the shoot plan in one line for debug logging.
+	 *
+	 * @return human-readable field summary
+	 */
+	public String summary() {
+		return "totalNodes=" + totalNodes
+			+ " mainNodesPlanned=" + mainNodesPlanned
+			+ " nodeAllocation=" + formatIntArray(nodeAllocation)
+			+ " branchPlan=" + formatPlanMatrix(branchPlan)
+			+ " nBranches=" + nBranches
+			+ " potentialLength_m=" + potentialLength
+			+ " isSpur=" + isSpur;
+	}
+}
+
+/**
+ * Sample the number of flowers assigned to a floral bud.
+ *
+ * <p>The draw is intentionally bounded so mixed-bud and floral-bud paths remain
+ * compatible with older scenario files that only specify a single flowers-per-floral
+ * setting.</p>
+ *
+ * @param configuredFlowers configured flowers per floral bud from the model options
+ * @return sampled flower count in {@code [1, configuredFlowers]}
+ */
+public static int sampleFlowerNumberPerFloral(int configuredFlowers) {
+	int maxFlowers = Math.max(1, configuredFlowers);
+	int minFlowers = Math.min(3, maxFlowers);
+	if (maxFlowers <= minFlowers) return maxFlowers;
+	return irandom(minFlowers, maxFlowers);
+}
+
+/**
+ * Resolve the parent internode of a bud through the graph topology.
+ *
+ * <p>This is the canonical internode-site lookup used by bud-site deduplication,
+ * planner placement, and debug logging. If the topology query fails, the caller
+ * receives {@code null} and should fall back to a conservative path.</p>
+ *
+ * @param bud bud to resolve
+ * @return parent internode, or {@code null} when the bud is detached or the query fails
+ */
+public static Internode parentInternodeForBud(BudService bud) {
+	if (bud == null) return null;
+	Internode site = null;
+	try {
+		site = first((* bud (<--)+ i:Internode *));
+	} catch (Throwable t) {
+		site = null;
+	}
+	return site;
+}
+
+/**
+ * Choose the canonical bud attached to one internode site.
+ *
+ * <p>If multiple buds are present on the same site, the lowest-ID bud is treated as
+ * canonical so the rest of the code has a deterministic ownership rule.</p>
+ *
+ * @param site internode attachment site
+ * @return canonical bud on the site, or {@code null} if no bud is present
+ */
+public static BudService canonicalBudOnInternodeSite(Internode site) {
+	if (site == null) return null;
+	BudService keep = null;
+	for (BudService siteBud : (* site (-->)+ budOnSite:BudService *)) {
+		if (siteBud == null) continue;
+		Internode parentSite = parentInternodeForBud(siteBud);
+		if (parentSite == null || parentSite != site) continue;
+		if (keep == null || siteBud.getId() < keep.getId()) {
+			keep = siteBud;
+		}
+	}
+	return keep;
+}
+
+/**
+ * Return the canonical bud for a site.
+ *
+ * @param site internode attachment site
+ * @return canonical bud on that site, or {@code null}
+ */
+public static BudService firstBudOnInternodeSite(Internode site) {
+	return canonicalBudOnInternodeSite(site);
+}
+
+/**
+ * Count buds attached to one internode site.
+ *
+ * @param site internode attachment site
+ * @return number of buds that resolve back to the site
+ */
+public static int countBudsOnInternodeSite(Internode site) {
+	if (site == null) return 0;
+	int budCount = 0;
+	for (BudService siteBud : (* site (-->)+ budOnSite:BudService *)) {
+		if (siteBud == null) continue;
+		Internode parentSite = parentInternodeForBud(siteBud);
+		if (parentSite == null || parentSite != site) continue;
+		budCount++;
+	}
+	return budCount;
+}
+
+/**
+ * Test whether an internode already owns a bud.
+ *
+ * @param site internode attachment site
+ * @return {@code true} when at least one bud is attached
+ */
+public static boolean hasBudOnInternodeSite(Internode site) {
+	return firstBudOnInternodeSite(site) != null;
+}
+
+/**
+ * Test whether a bud is non-canonical among buds attached to the same site.
+ *
+ * @param bud bud to test
+ * @return {@code true} when another bud on the same site has a lower ID
+ */
+public static boolean isDuplicateBudOnInternodeSite(BudService bud) {
+	if (bud == null) return false;
+	Internode site = parentInternodeForBud(bud);
+	if (site == null) return false;
+	BudService keep = canonicalBudOnInternodeSite(site);
+	if (keep == null) return false;
+	return keep.getId() != bud.getId();
+}
+
+/**
+ * Count internode sites that currently host more than one bud.
+ *
+ * @return number of duplicate-bud sites in the scene
+ */
+public static int countDuplicateBudSites() {
+	int duplicateSites = 0;
+	for (Internode siteNode : (* q:Internode *)) {
+		if (countBudsOnInternodeSite(siteNode) > 1) duplicateSites++;
+	}
+	return duplicateSites;
+}
+
+/**
+ * Print a short diagnostic summary of duplicate bud sites.
+ *
+ * @param maxReportedSites limit on per-site lines to print before falling back to summary only
+ */
+public static void reportDuplicateBudSites(int maxReportedSites) {
+	int duplicateSites = 0;
+	int reportedSites = 0;
+	for (Internode siteNode : (* q:Internode *)) {
+		int budCount = countBudsOnInternodeSite(siteNode);
+		if (budCount <= 1) continue;
+		duplicateSites++;
+		if (reportedSites < maxReportedSites) {
+			BudService existingBud = firstBudOnInternodeSite(siteNode);
+			long budId = (existingBud != null) ? existingBud.getId() : 0L;
+			println("[dup-bud-site] step=" + step
+				+ " site=" + siteNode.getId()
+				+ " budCount=" + budCount
+				+ " firstBudId=" + budId);
+			reportedSites++;
+		}
+	}
+	if (duplicateSites > 0 || debug) {
+		println("[dup-bud-site-summary] step=" + step
+			+ " duplicateSites=" + duplicateSites
+			+ " totalBuds=" + count((* BudService *)));
+	}
+}
+
+static int budBurstClaimStep = Integer.MIN_VALUE;
+static java.util.Set claimedBudBurstIds = new java.util.HashSet();
+static int phytomerEmissionClaimStep = Integer.MIN_VALUE;
+static java.util.Set claimedPhytomerEmissionKeys = new java.util.HashSet();
+static int appleIdemStatsStep = Integer.MIN_VALUE;
+static int budBurstClaimsGranted = 0;
+static int budBurstClaimsBlocked = 0;
+static int budBurstExistingApexBlocks = 0;
+static int phytomerClaimsGranted = 0;
+static int phytomerClaimsBlocked = 0;
+static int phytomerBirthStepBlocks = 0;
+
+/**
+ * Reset step-local idempotency counters.
+ *
+ * <p>The counters are diagnostic only. They track how many bud-burst and phytomer
+ * claims were granted or blocked in the current simulation step but do not change
+ * the gating logic themselves.</p>
+ */
+static void resetAppleIdempotencyStatsIfNeeded() {
+	if (appleIdemStatsStep == step) return;
+	appleIdemStatsStep = step;
+	budBurstClaimsGranted = 0;
+	budBurstClaimsBlocked = 0;
+	budBurstExistingApexBlocks = 0;
+	phytomerClaimsGranted = 0;
+	phytomerClaimsBlocked = 0;
+	phytomerBirthStepBlocks = 0;
+}
+
+/**
+ * Print concise step-level idempotency counters.
+ *
+ * <p>Used only in debug mode to show how often bud-burst and phytomer claims are
+ * reserved or blocked within the current step.</p>
+ */
+public static void reportAppleIdempotencyStatsIfDebug() {
+	if (!debug) return;
+	resetAppleIdempotencyStatsIfNeeded();
+	println("[apple-idem] step=" + step
+		+ " budClaimed=" + budBurstClaimsGranted
+		+ " budBlocked=" + budBurstClaimsBlocked
+		+ " budExistingApexBlocked=" + budBurstExistingApexBlocks
+		+ " phyClaimed=" + phytomerClaimsGranted
+		+ " phyBlocked=" + phytomerClaimsBlocked
+		+ " birthStepBlocked=" + phytomerBirthStepBlocks);
+}
+
+/**
+ * Reset the bud-burst claim cache at step boundaries.
+ */
+public static void resetBudBurstClaimCacheIfNeeded() {
+	resetAppleIdempotencyStatsIfNeeded();
+	if (budBurstClaimStep == step) return;
+	budBurstClaimStep = step;
+	claimedBudBurstIds = new java.util.HashSet();
+}
+
+/**
+ * Query whether this bud has already reserved bud burst in the current step.
+ *
+ * @param bud bud to test
+ * @return {@code true} when the bud already holds the step-local claim
+ */
+public static boolean isBudBurstClaimedThisStep(BudService bud) {
+	if (bud == null) return false;
+	resetBudBurstClaimCacheIfNeeded();
+	Long budKey = Long.valueOf(bud.getId());
+	return claimedBudBurstIds.contains(budKey);
+}
+
+/**
+ * Reserve a bud-burst claim for the current step.
+ *
+ * <p>This guard blocks same-step re-entry before the XL rewrite creates a second apex
+ * from the same bud.</p>
+ *
+ * @param bud bud to reserve
+ * @return {@code true} when the reservation succeeded; {@code false} when it was already claimed
+ */
+public static boolean reserveBudBurstThisStep(BudService bud) {
+	if (bud == null) return false;
+	resetBudBurstClaimCacheIfNeeded();
+	Long budKey = Long.valueOf(bud.getId());
+	if (claimedBudBurstIds.contains(budKey)) {
+		budBurstClaimsBlocked++;
+		return false;
+	}
+	claimedBudBurstIds.add(budKey);
+	budBurstClaimsGranted++;
+	return true;
+}
+
+public static float resolveBudBurstDelayMeanByType(int budType) {
+	float meanDelay = budBurstDelay_mean;
+	if (budType == 1) {
+		// Provisional small vegetative lag; calibrate against data before finalizing.
+		meanDelay += vegBudBurstLag;
+	}
+	return meanDelay;
+}
+
+public static float sampleBudBurstDelay(float meanDelay) {
+	return meanDelay + budBurst_sd * meanDelay * (float) rng.nextGaussian();
+}
+
+/**
+ * Reset the phytomer-emission claim cache at step boundaries.
+ */
+public static void resetPhytomerEmissionClaimCacheIfNeeded() {
+	resetAppleIdempotencyStatsIfNeeded();
+	if (phytomerEmissionClaimStep == step) return;
+	phytomerEmissionClaimStep = step;
+	claimedPhytomerEmissionKeys = new java.util.HashSet();
+}
+
+/**
+ * Build the step-local claim key for one apex/rank pair.
+ *
+ * @param apex apex to encode
+ * @return key of the form {@code apexId:rank}
+ */
+public static String phytomerEmissionKey(ApexService apex) {
+	if (apex == null) return "";
+	return apex.getId() + ":" + apex.rank;
+}
+
+/**
+ * Query whether this apex/rank already reserved phytomer emission in the current step.
+ *
+ * @param apex apex to test
+ * @return {@code true} when the current step already owns the emission claim
+ */
+public static boolean isPhytomerEmissionClaimedThisStep(ApexService apex) {
+	if (apex == null) return false;
+	resetPhytomerEmissionClaimCacheIfNeeded();
+	return claimedPhytomerEmissionKeys.contains(phytomerEmissionKey(apex));
+}
+
+/**
+ * Reserve phytomer emission for the current step.
+ *
+ * <p>The apex-side develop rule uses this guard before creating a new phytomer so
+ * same-step recursive derive calls cannot emit twice from the same apex/rank.</p>
+ *
+ * @param apex apex to reserve
+ * @return {@code true} when the reservation succeeded; {@code false} when already claimed
+ */
+public static boolean reservePhytomerEmissionThisStep(ApexService apex) {
+	if (apex == null) return false;
+	resetPhytomerEmissionClaimCacheIfNeeded();
+	String key = phytomerEmissionKey(apex);
+	if (claimedPhytomerEmissionKeys.contains(key)) {
+		phytomerClaimsBlocked++;
+		return false;
+	}
+	claimedPhytomerEmissionKeys.add(key);
+	phytomerClaimsGranted++;
+	return true;
+}
+
+/**
+ * Find an existing apex created from the same source bud.
+ *
+ * @param sourceBud bud to resolve
+ * @return matching apex when one already exists, otherwise {@code null}
+ */
+public static ApexApple findExistingApexForSourceBud(BudService sourceBud) {
+	if (sourceBud == null) return null;
+	long sourceBudId = sourceBud.getId();
+	for (ApexApple apexNode : (* q:ApexApple *)) {
+		if (apexNode != null && apexNode.getSourceBudId() == sourceBudId) {
+			return apexNode;
+		}
+	}
+	return null;
+}
+
+
+/**
+ * Read the source-bud lineage ID from an apex in a null-safe way.
+ *
+ * @param apex apex to inspect
+ * @return source bud ID, or {@code 0} when the apex does not expose apple lineage
+ */
+public static long sourceBudIdForApex(ApexService apex) {
+	if (apex == null) return 0L;
+	if (apex instanceof ApexApple) {
+		return ((ApexApple) apex).getSourceBudId();
+	}
+	return 0L;
+}
+
+/**
+ * Read the parent-axis apex lineage ID from an apex in a null-safe way.
+ *
+ * @param apex apex to inspect
+ * @return parent axis apex ID, or {@code 0} when unavailable
+ */
+public static long parentAxisApexIdForApex(ApexService apex) {
+	if (apex == null) return 0L;
+	if (apex instanceof ApexApple) {
+		return ((ApexApple) apex).getParentAxisApexId();
+	}
+	return 0L;
+}
+
+/**
+ * Test whether two apexes share an explicit apple lineage hint.
+ *
+ * <p>The check compares either source-bud IDs or parent-axis apex IDs, whichever
+ * lineage field is available on both apexes.</p>
+ *
+ * @param a first apex
+ * @param b second apex
+ * @return {@code true} when both apexes refer to the same lineage hint
+ */
+public static boolean sharesAppleApexLineageHint(ApexService a, ApexService b) {
+	if (a == null || b == null) return false;
+	long srcA = sourceBudIdForApex(a);
+	long srcB = sourceBudIdForApex(b);
+	if (srcA > 0L && srcB > 0L) return srcA == srcB;
+	long paxA = parentAxisApexIdForApex(a);
+	long paxB = parentAxisApexIdForApex(b);
+	if (paxA > 0L && paxB > 0L) return paxA == paxB;
+	return false;
+}
+
+/**
+ * Resolve a safe attach rank for a child axis.
+ *
+ * <p>The attach rank is used when writing axis identity fields onto a new lateral
+ * or bourse shoot. When the caller has no explicit attach rank, the method falls
+ * back to the child rank, then the parent rank, then {@code 1}.</p>
+ *
+ * @param parent parent organ that owns the attachment site
+ * @param child child organ whose axis identity is being written
+ * @param attachRank preferred attach rank
+ * @return non-zero rank suitable for axis identity propagation
+ */
+public static int resolveSafeAttachRankForChildAxis(Organ parent, Organ child, int attachRank) {
+	int safeAttachRank = attachRank;
+	if (safeAttachRank <= 0 && child != null && child.rank > 0) safeAttachRank = child.rank;
+	if (safeAttachRank <= 0 && parent != null && parent.rank > 0) safeAttachRank = parent.rank;
+	if (safeAttachRank <= 0) safeAttachRank = 1;
+	return safeAttachRank;
+}
+
+/**
+ * Copy axis identity from a parent organ to a child organ and write the child slot.
+ *
+ * <p>This helper keeps {@code axis2ID..axis9ID} aligned with the parent lineage and
+ * then writes the child-order slot ({@code axis3ID} for order 3, {@code axis4ID} for
+ * order 4, etc.) to the chosen attach rank. It also recomputes {@code cpn} so the new
+ * child axis has deterministic identity immediately after initiation.</p>
+ *
+ * @param parent parent organ
+ * @param child child organ receiving the propagated IDs
+ * @param childOrder order of the child axis
+ * @param attachRank rank at which the child axis is attached
+ */
+public static void assignChildAxisIdsFromParent(Organ parent, Organ child, int childOrder, int attachRank) {
+	if (child == null || parent == null) return;
+
+	child.axis2ID = parent.axis2ID;
+	child.axis3ID = parent.axis3ID;
+	child.axis4ID = parent.axis4ID;
+	child.axis5ID = parent.axis5ID;
+	child.axis6ID = parent.axis6ID;
+	child.axis7ID = parent.axis7ID;
+	child.axis8ID = parent.axis8ID;
+	child.axis9ID = parent.axis9ID;
+
+	int safeAttachRank = resolveSafeAttachRankForChildAxis(parent, child, attachRank);
+	int axisOrder = childOrder;
+	if (axisOrder < 3) axisOrder = 3;
+
+	if (axisOrder == 3) {
+		child.axis3ID = safeAttachRank;
+	} else if (axisOrder == 4) {
+		child.axis4ID = safeAttachRank;
+	} else if (axisOrder == 5) {
+		child.axis5ID = safeAttachRank;
+	} else if (axisOrder == 6) {
+		child.axis6ID = safeAttachRank;
+	} else if (axisOrder == 7) {
+		child.axis7ID = safeAttachRank;
+	} else if (axisOrder == 8) {
+		child.axis8ID = safeAttachRank;
+	} else {
+		child.axis9ID = safeAttachRank;
+	}
+
+	int childRank = child.rank;
+	if (childRank < 0) childRank = 0;
+	child.cpn = child.axis2ID + child.axis3ID + child.axis4ID + child.axis5ID + child.axis6ID + child.axis7ID + child.axis8ID + child.axis9ID + childRank;
+}
+
+
+/**
+ * Apple bud state carried from planning into bud burst.
+ *
+ * <p>The module stores both ordinary shoot plans and mixed-bud spur/bourse plans.
+ * It is intentionally conservative: it does not create topology itself, but it
+ * records the identity and plan state that later XL rules consume when the bud
+ * becomes an apex.</p>
+ */
+public module BudAppleService extends BudService implements IBud {
+	/**
+	 * Keep deserialization compatible with saved GroIMP project graphs so shader/object links survive
+	 * branch-planning field additions on apple buds.
+	 */
+	private static final long serialVersionUID = -2246118833442250384L;
+
+	/** Planned rosette leaf count for mixed buds (-). */
+	public int rosetteLeafTarget = 0;
+	/** Planned number of bourse shoots for mixed buds (-). */
+	public int nBourseTarget = 0;
+	/** Planned node counts of each bourse shoot (nodes). */
+	public int[] bourseNodes = new int[0];
+	/** Spur-level plan rows {attachRankOnSpur, childPlanIndex}. */
+	public int[][] spurAttachPlan = new int[0][0];
+	/** Full vegetative-style child plan for each planned bourse shoot. */
+	public AppleShootPlan[] bourseShootPlans = new AppleShootPlan[0];
+	/** Parent apex of the supporting main axis for lateral-outgrowth gating. */
+	public long parentAxisApexID = 0L;
+
+
+
+
+
+
+
+
+
+// ============================================================
+// ---- helpers ----
+int clampInt(int x, int lo, int hi){ return (x<lo)?lo:((x>hi)?hi:x); }
+
+/**
+ * Draws total node count for a shoot from a Gamma(shape, scale) distribution.
+ *
+ * <h3>Output semantics</h3>
+ * Returns an integer node count clamped to [1, MAX_TOTAL].
+ *
+ * <h3>Notes</h3>
+ * - Uses Commons Math {@code GammaDistribution}.
+ * - This is the *raw* total for the shoot. For floral buds (budType==2), rosette leaves
+ *   may be subtracted later in {@link #sampleAndAllocate_Gamma()}.
+ *
+ * @param shape  Gamma shape (k)
+ * @param scale  Gamma scale (θ)
+ * @return total node count ≥ 1
+ */
+int sampleTotalNodes_Gamma(double shape, double scale) {
+    GammaDistribution gd = new GammaDistribution(shape, scale);
+    int k = (int)Math.round(gd.sample());
+    return clampInt(k, 1, MAX_TOTAL);
+}
+
+/**
+ * Partition a shoot's total node count into a main axis and several branch axes.
+ *
+ * <h3>Index conventions</h3>
+ * <ul>
+ *   <li>{@code alloc[0]} = {@code mainCap}: number of nodes planned for the main axis.</li>
+ *   <li>{@code alloc[1..]} = lengths (in nodes) of each branch axis.</li>
+ * </ul>
+ *
+ * <h3>Behavior</h3>
+ * <ul>
+ *   <li>For spurs ({@code N < SPUR_LIMIT}): returns a 1-element array {@code [N]} (no branches).</li>
+ *   <li>For short apple shoots ({@code N <= NodeThreshold_branching}): keeps all nodes on the main axis (no branches).</li>
+ *   <li>Main capacity is scaled from {@code MAIN_BASE} with slope {@code MAIN_SLOPE}, and capped by {@code N}.</li>
+ *   <li>Each branch is capped by {@code branchCap = max(mainCap - SPUR_LIMIT, 1)}.</li>
+ *   <li>All nodes are allocated: {@code alloc[0] + sum(alloc[1..]) == N}.</li>
+ *   <li>Each branch length is strictly less than {@code mainCap} (guarded).</li>
+ * </ul>
+ *
+ * <h3>Guarantees</h3>
+ * - {@code alloc.length >= 1}.  
+ * - For shoots with {@code N > NodeThreshold_branching}, {@code alloc.length == nBranches + 1} with {@code nBranches >= 1}.
+ *
+ * @param totalNodes total nodes for this shoot (will be clamped to [1, MAX_TOTAL])
+ * @return array where index 0 is the main axis nodes and 1..k are branch node counts
+ */
+
+int[] allocateNodesScaled(int totalNodes) {
+    int N = clampInt(totalNodes, 1, MAX_TOTAL);
+    int branchingThreshold = Math.max(SPUR_LIMIT - 1, NodeThreshold_branching);
+    if (N <= branchingThreshold) { int[] a = new int[1]; a[0]=N; return a; }
+
+    int mainCap = SPUR_LIMIT + (int)Math.round(MAIN_SLOPE * Math.max(0, N -SPUR_LIMIT));
+    if (mainCap > N) mainCap = N;
+    int branchCap = Math.max(mainCap - SPUR_LIMIT, 1);
+
+    int remaining = N - mainCap;
+    int nBranches = (remaining<=0)?0:(int)Math.ceil(remaining / (double)branchCap);
+
+    int[] alloc = new int[nBranches+1];
+    alloc[0] = mainCap;
+    for (int b=1; b<=nBranches; b++){
+        if (remaining<=0){ alloc[b]=0; continue; }
+        int take = Math.min(branchCap, remaining);
+        if (take >= mainCap) take = Math.max(mainCap-1, 1); // enforce branch < main
+        alloc[b]=take; remaining -= take;
+    }
+    return alloc;
+}
+
+/**
+ * Keep a tiny positive planned shoot length once organ-size profiles take over.
+ *
+ * @param nodes node count (unused; retained for compatibility with existing planner calls)
+ * @return fallback shoot length in cm
+ */
+double shootLengthFromNodes(int nodes){
+    return 0.5;
+}
+
+/**
+ * Remove zero-valued branch entries from an allocation vector.
+ *
+ * @param allocIn allocation vector
+ * @return compacted allocation with the same total node count
+ */
+int[] compactAllocation(int[] allocIn) {
+    if (allocIn == null || allocIn.length == 0) return new int[0];
+    int keep = 1;
+    for (int i = 1; i < allocIn.length; i++) {
+        if (allocIn[i] > 0) keep++;
+    }
+    int[] out = new int[keep];
+    out[0] = allocIn[0];
+    int k = 1;
+    for (int i = 1; i < allocIn.length; i++) {
+        if (allocIn[i] > 0) out[k++] = allocIn[i];
+    }
+    return out;
+}
+
+/**
+ * Compute the number of branch attachment slots in a bounded main-axis window.
+ *
+ * @param left leftmost attach rank
+ * @param right rightmost attach rank
+ * @param minGap minimum spacing between attachments
+ * @return attachment capacity for the window
+ */
+static int attachCapacityForWindow(int left, int right, int minGap) {
+    if (minGap < 1) minGap = 1;
+    if (right < left) return 0;
+    int usable = right - left + 1;
+    if (usable <= 0) return 0;
+    return (usable + (minGap - 1)) / minGap;
+}
+
+/**
+ * Place branches evenly within a bounded attach window.
+ *
+ * @param alloc allocation vector with the main axis at index 0
+ * @param minGap minimum spacing between attachments
+ * @param left leftmost attach rank in the window
+ * @param right rightmost attach rank in the window
+ * @return branch plan rows {@code {attachRank, branchLen}}
+ */
+static int[][] placeBranchesEvenishInWindow(int[] alloc, int minGap, int left, int right) {
+    int nBranches = alloc.length - 1;
+    if (nBranches <= 0) return new int[0][0];
+    if (minGap < 1) minGap = 1;
+    if (left < 1) left = 1;
+    if (right < left) right = left;
+
+    int usable = right - left + 1;
+    if (usable <= 0) return new int[0][0];
+
+    int[][] out = new int[nBranches][2];
+
+    for (int i = 0; i < nBranches; i++) {
+        double t = (i + 1) / (double)(nBranches + 1);
+        int pos = left + (int)Math.round(t * (right - left));
+        if (pos < left) pos = left;
+        if (pos > right) pos = right;
+        out[i][0] = pos;
+        out[i][1] = alloc[i + 1];
+    }
+
+    for (int i = 1; i < nBranches; i++) {
+        int keyPos = out[i][0], keyLen = out[i][1], j = i - 1;
+        while (j >= 0 && out[j][0] > keyPos) { out[j+1][0]=out[j][0]; out[j+1][1]=out[j][1]; j--; }
+        out[j+1][0] = keyPos; out[j+1][1] = keyLen;
+    }
+
+    for (int i = 1; i < nBranches; i++) {
+        int need = out[i-1][0] + minGap;
+        if (out[i][0] < need) out[i][0] = need;
+    }
+    for (int i = nBranches - 2; i >= 0; i--) {
+        int need = out[i+1][0] - minGap;
+        if (out[i][0] > need) out[i][0] = need;
+    }
+    for (int i = 0; i < nBranches; i++) {
+        if (out[i][0] < left) out[i][0] = left;
+        if (out[i][0] > right) out[i][0] = right;
+    }
+
+    return out;
+}
+
+/**
+ * Ensure the main axis keeps enough nodes to host later branches.
+ *
+ * @param allocIn allocation vector
+ * @param startNode first usable attach rank
+ * @return adjusted allocation with sufficient main-axis capacity
+ */
+int[] reserveMainNodesBeforeBranching(int[] allocIn, int startNode) {
+    if (allocIn == null || allocIn.length <= 1) return allocIn;
+
+    int[] alloc = compactAllocation(allocIn);
+    int minMainCap = Math.max(1, startNode + 1);
+    if (alloc[0] >= minMainCap) return alloc;
+
+    while (alloc.length > 1 && alloc[0] < minMainCap) {
+        int deficit = minMainCap - alloc[0];
+        int minIdx = -1;
+        int minVal = Integer.MAX_VALUE;
+        for (int i = 1; i < alloc.length; i++) {
+            if (alloc[i] <= 0) continue;
+            if (alloc[i] < minVal) {
+                minVal = alloc[i];
+                minIdx = i;
+            }
+        }
+        if (minIdx <= 0) break;
+
+        int give = Math.min(deficit, alloc[minIdx]);
+        alloc[0] += give;
+        alloc[minIdx] -= give;
+        alloc = compactAllocation(alloc);
+    }
+    return alloc;
+}
+
+	/**
+	 * Compute the first attach rank that can host a new branch.
+	 *
+	 * @return minimum attach rank for planned child axes
+	 */
+	int branchAttachStartNode() {
+		return Math.max(1, ATTACH_START_NODE);;
+	}
+
+	/**
+	 * Build a full shoot plan from a sampled node count.
+	 *
+	 * @param totalNodes sampled total node count
+	 * @param startNode first usable branch-attach rank
+	 * @return fully populated shoot plan
+	 */
+AppleShootPlan buildShootPlanFromTotalNodes(int totalNodes, int startNode) {
+	int safeStartNode = Math.max(1, startNode);
+	int shootNodes = clampInt(totalNodes, 1, MAX_TOTAL);
+	AppleShootPlan plan = new AppleShootPlan();
+	plan.totalNodes = shootNodes;
+	plan.isSpur = (shootNodes < SPUR_LIMIT);
+	int[] alloc = allocateNodesScaled(shootNodes);
+	alloc = reserveMainNodesBeforeBranching(alloc, safeStartNode);
+	plan.nodeAllocation = normalizeForAttachmentCapacity(alloc, MIN_BRANCH_GAP, safeStartNode);
+	if (plan.nodeAllocation == null || plan.nodeAllocation.length == 0) {
+		plan.nodeAllocation = new int[]{ shootNodes };
+	}
+	plan.mainNodesPlanned = Math.max(1, plan.nodeAllocation[0]);
+	plan.branchPlan = placeBranchesEvenish(plan.nodeAllocation, MIN_BRANCH_GAP, safeStartNode);
+	plan.nBranches = (plan.branchPlan != null) ? plan.branchPlan.length : 0;
+	double length_cm = shootLengthFromNodes(shootNodes);
+	plan.potentialLength = Math.max(0.005, length_cm / 100.0);
+	return plan;
+}
+
+	/**
+	 * Copy a prepared shoot plan into this bud.
+	 *
+	 * @param plan prepared plan to copy
+	 */
+void applyShootPlan(AppleShootPlan plan) {
+	AppleShootPlan safePlan = (plan != null) ? plan : buildShootPlanFromTotalNodes(1, Math.max(1, ATTACH_START_NODE));
+	this.totalNodes = safePlan.totalNodes;
+	this.isSpur = safePlan.isSpur;
+	this.nodeAllocation = AppleShootPlan.copyIntArray(safePlan.nodeAllocation);
+	this.branchPlan = AppleShootPlan.copyPlanMatrix(safePlan.branchPlan);
+	this.nBranches = safePlan.nBranches;
+	this.potentialLength = safePlan.potentialLength;
+}
+
+
+/**
+ * Convenience entry point that:
+ * <ol>
+ *   <li>Samples a total node count from Gamma, adjusting for bud type (rosette leaves for floral buds).</li>
+ *   <li>Calls {@link #allocateNodesScaled(int)} to partition nodes into main + branches.</li>
+ *   <li>Normalizes the partition by attach capacity (see below).</li>
+ *   <li>Builds a branch placement plan along the main axis via {@link #placeBranchesEvenish(int[], int)}.</li>
+ * </ol>
+ *
+ * <h3>Fields set</h3>
+ * <ul>
+ *   <li>{@code this.totalNodes} – nodes for the shoot (after rosette subtraction for floral buds).</li>
+ *   <li>{@code this.isSpur} – spur flag ({@code totalNodes < SPUR_LIMIT}).</li>
+ *   <li>{@code this.nodeAllocation} – as produced by {@code allocateNodesScaled} and then normalized.</li>
+ *   <li>{@code this.branchPlan} – 2D array (see below) mapping main-axis nodes to branch lengths.</li>
+ *   <li>{@code this.nBranches} – {@code branchPlan.length}.</li>
+ * </ul>
+ *
+ * <h3>Branch plan structure</h3>
+ * {@code branchPlan} is {@code int[nBranches][2]} where:
+ * <ul>
+ *   <li>{@code branchPlan[k][0]} = attach node on main axis (1-based), valid in {@code [1 .. mainCap-1]}.</li>
+ *   <li>{@code branchPlan[k][1]} = branch length in nodes (from {@code nodeAllocation[1..]}).</li>
+ * </ul>
+ *
+ * <h3>Normalization</h3>
+ * Uses {@link #normalizeForAttachmentCapacity(int[], int)} to ensure the number of branches does not exceed
+ * the number of attachable main nodes subject to {@code minGap} spacing:
+ * {@code capacity = ceil((mainCap - 1) / minGap)}.
+ 
+ * If needed, the smallest branches are folded back into the main axis and the array is compacted.
+ 
+ * Example: N=30 stays as alloc=[30] on the main shoot. N=36 can branch:
+ * Example: N=36, MAIN_BASE=5, MAIN_SLOPE=0.8, SPUR_LIMIT=5
+ * mainCap ≈ 5 + round(0.8*(36-5)) = 5 + 24 = 29
+ * branchCap = max(29-5,1)=24
+ * remaining = 36-29 = 7 → nBranches = ceil(7/24) = 1
+ * alloc ≈ [29, 7]   // sum = 36 before attachment-capacity normalization
+ */
+
+void sampleAndAllocate_Gamma() {
+	this.spurAttachPlan = new int[0][0];
+	this.bourseShootPlans = new AppleShootPlan[0];
+    if (this.budType == 2) {
+        int minLeaf = mixedBudRosetteLeafMin;
+        int maxLeaf = mixedBudRosetteLeafMax;
+        if (maxLeaf < minLeaf) maxLeaf = minLeaf;
+        this.rosetteLeafTarget = irandom(minLeaf, maxLeaf);
+
+        double u = random(0, 1);
+        if (u < mixedBudBourseP0) this.nBourseTarget = 0;
+        else if (u < mixedBudBourseP0 + mixedBudBourseP1) this.nBourseTarget = 1;
+        else this.nBourseTarget = 2;
+
+        this.bourseNodes = new int[this.nBourseTarget];
+        this.bourseShootPlans = new AppleShootPlan[this.nBourseTarget];
+        this.nodeAllocation = new int[1];
+        this.nodeAllocation[0] = this.rosetteLeafTarget;
+
+        for (int i = 0; i < this.nBourseTarget; i++) {
+            int bn = sampleTotalNodes_Gamma(GAMMA_SHAPE, GAMMA_SCALE);
+            AppleShootPlan childShootPlan = buildShootPlanFromTotalNodes(bn, branchAttachStartNode());
+            this.bourseShootPlans[i] = childShootPlan.copy();
+            this.bourseNodes[i] = childShootPlan.totalNodes;
+            if (printFlag) {
+                println("[mixed-bud][child-plan] bud=" + this.getId()
+                    + " childIdx=" + i + " " + childShootPlan.summary());
+            }
+        }
+
+        int left = mixedBudBourseAttachRankMin;
+        int right = mixedBudBourseAttachRankMax;
+        if (left < 1) left = 1;
+        int terminalProtected = Math.max(1, this.rosetteLeafTarget - 1);
+        if (right > terminalProtected) right = terminalProtected;
+        if (right < left) right = left;
+
+        int maxBourseByWindow = attachCapacityForWindow(left, right, MIN_BRANCH_GAP);
+        if (this.nBourseTarget > maxBourseByWindow) {
+            int dropCount = this.nBourseTarget - maxBourseByWindow;
+            while (dropCount > 0) {
+                int minIdx = -1;
+                int minNodes = Integer.MAX_VALUE;
+                for (int i = 0; i < this.nBourseTarget; i++) {
+                    AppleShootPlan cp = this.bourseShootPlans[i];
+                    if (cp == null) continue;
+                    int childNodes = cp.totalNodes;
+                    if (childNodes < minNodes) {
+                        minNodes = childNodes;
+                        minIdx = i;
+                    }
+                }
+                if (minIdx < 0) break;
+                this.bourseShootPlans[minIdx] = null;
+                this.bourseNodes[minIdx] = 0;
+                dropCount--;
+            }
+
+            int kept = 0;
+            int i;
+            for (i = 0; i < this.nBourseTarget; i++) {
+                if (this.bourseShootPlans[i] != null) kept++;
+            }
+            AppleShootPlan[] keptPlans = new AppleShootPlan[kept];
+            int[] keptNodes = new int[kept];
+            int k = 0;
+            for (i = 0; i < this.nBourseTarget; i++) {
+                if (this.bourseShootPlans[i] == null) continue;
+                keptPlans[k] = this.bourseShootPlans[i];
+                keptNodes[k] = this.bourseNodes[i];
+                k++;
+            }
+            if (printFlag) {
+                println("[mixed-bud][plan] bud=" + this.getId()
+                    + " rosetteNodes=" + this.rosetteLeafTarget
+                    + " attachRange=" + left + "-" + right
+                    + " minGap=" + MIN_BRANCH_GAP
+                    + " requestedBourse=" + this.nBourseTarget
+                    + " cappedBourse=" + kept);
+            }
+            this.bourseShootPlans = keptPlans;
+            this.bourseNodes = keptNodes;
+            this.nBourseTarget = kept;
+        }
+
+        int[] spurAllocator = new int[1 + this.nBourseTarget];
+        spurAllocator[0] = this.rosetteLeafTarget;
+        int sumNodes = this.rosetteLeafTarget;
+        for (int i = 0; i < this.nBourseTarget; i++) {
+            int childNodes = this.bourseNodes[i];
+            if (childNodes <= 0 && this.bourseShootPlans[i] != null) childNodes = this.bourseShootPlans[i].totalNodes;
+            if (childNodes <= 0) childNodes = 1;
+            spurAllocator[i + 1] = childNodes;
+            sumNodes += childNodes;
+        }
+
+        int[][] rawSpurAttachPlan = placeBranchesEvenishInWindow(spurAllocator, MIN_BRANCH_GAP, left, right);
+        this.spurAttachPlan = new int[rawSpurAttachPlan.length][2];
+        for (int i = 0; i < rawSpurAttachPlan.length; i++) {
+            int attachRank = rawSpurAttachPlan[i][0];
+            this.spurAttachPlan[i][0] = attachRank;
+            this.spurAttachPlan[i][1] = i;
+        }
+
+        this.totalNodes = sumNodes;
+        this.isSpur = true;
+        this.branchPlan = new int[0][0];
+        this.nBranches = 0;
+        if (printFlag) {
+            String plannedRanks = "";
+            int p;
+            for (p = 0; p < this.spurAttachPlan.length; p++) {
+                if (p > 0) plannedRanks += "|";
+                int childIdx = this.spurAttachPlan[p][1];
+                int childNodes = (childIdx >= 0 && childIdx < this.bourseShootPlans.length && this.bourseShootPlans[childIdx] != null)
+                    ? this.bourseShootPlans[childIdx].totalNodes : 0;
+                plannedRanks += this.spurAttachPlan[p][0] + "->child" + childIdx + "(N=" + childNodes + ")";
+            }
+            println("[mixed-bud][plan] bud=" + this.getId()
+                + " rosetteNodes=" + this.rosetteLeafTarget
+                + " bourseTargets=" + this.nBourseTarget
+                + " attachRange=" + left + "-" + right
+                + " planned=" + plannedRanks);
+        }
+        return;
+    }
+
+    int shootNodes = (int) sampleTotalNodes_Gamma(GAMMA_SHAPE, GAMMA_SCALE);
+    AppleShootPlan shootPlan = buildShootPlanFromTotalNodes(shootNodes, branchAttachStartNode());
+    applyShootPlan(shootPlan);
+}
+
+
+
+/**
+ * Compute attachment nodes for branches along the main axis with even-ish spacing.
+ *
+ * <h3>Inputs</h3>
+ * <ul>
+ *   <li>{@code alloc[0]} = mainCap (nodes on main axis)</li>
+ *   <li>{@code alloc[1..]} = branch lengths (nodes)</li>
+ *   <li>{@code minGap} = minimum spacing (in main-axis nodes) between attachments; if &lt;1, treated as 1</li>
+ * </ul>
+ *
+ * <h3>Output</h3>
+ * Returns {@code int[nBranches][2]}:
+ * <ul>
+ *   <li>Column 0: {@code attachNodeIndex} ∈ {@code [1 .. mainCap-1]} (1-based). The terminal main node is excluded.</li>
+ *   <li>Column 1: {@code branchLenNodes} copied from {@code alloc[1..]}.</li>
+ * </ul>
+ *
+ * <h3>Properties</h3>
+ * <ul>
+ *   <li>Target positions are distributed over {@code [1, mainCap-1]} and gap-corrected to respect {@code minGap}.</li>
+ *   <li>Result is sorted by {@code attachNodeIndex} ascending.</li>
+ *   <li>If {@code nBranches == 0} returns {@code new int[0][0]}.</li>
+ * </ul>
+ *
+ * @param alloc  allocation array (see {@link #allocateNodesScaled(int)})
+ * @param minGap minimum spacing between attachments in main-axis nodes (≥1 recommended)
+ * @return {@code [nBranches x 2]} matrix: {attachNodeIndex, branchLenNodes}
+ */
+
+// --- spread branches along the main axis; returns rows: {attachNodeIndex (1..main-1), branchLenNodes} ---
+// Place branches only on [startNode .. mainCap-1], 1-based; respect minGap.
+static int[][] placeBranchesEvenish(int[] alloc, int minGap, int startNode) {
+    int mainCap = alloc[0];
+    int nBranches = alloc.length - 1;
+    if (nBranches <= 0) return new int[0][0];
+    if (minGap < 1) minGap = 1;
+    if (startNode < 1) startNode = 1;
+
+    int left = startNode;
+    int right = Math.max(left, mainCap - 1);
+    int usable = right - left + 1;
+    if (usable <= 0) return new int[0][0];
+
+    int[][] out = new int[nBranches][2];
+
+    // initial targets spread over [left, right]
+    for (int i = 0; i < nBranches; i++) {
+        double t = (i + 1) / (double)(nBranches + 1);
+        int pos = left + (int)Math.round(t * (right - left));
+        if (pos < left) pos = left;
+        if (pos > right) pos = right;
+        out[i][0] = pos;
+        out[i][1] = alloc[i + 1];
+    }
+
+    // sort by position
+    for (int i = 1; i < nBranches; i++) {
+        int keyPos = out[i][0], keyLen = out[i][1], j = i - 1;
+        while (j >= 0 && out[j][0] > keyPos) { out[j+1][0]=out[j][0]; out[j+1][1]=out[j][1]; j--; }
+        out[j+1][0] = keyPos; out[j+1][1] = keyLen;
+    }
+
+    // enforce minGap forward and backward
+    for (int i = 1; i < nBranches; i++) {
+        int need = out[i-1][0] + minGap;
+        if (out[i][0] < need) out[i][0] = need;
+    }
+    for (int i = nBranches - 2; i >= 0; i--) {
+        int need = out[i+1][0] - minGap;
+        if (out[i][0] > need) out[i][0] = need;
+    }
+    // clamp to [left, right]
+    for (int i = 0; i < nBranches; i++) {
+        if (out[i][0] < left) out[i][0] = left;
+        if (out[i][0] > right) out[i][0] = right;
+    }
+    return out;
+}
+
+/**
+ * Ensure the main axis has enough distinct attachment sites for planned branches,
+ * given a minimum spacing on the main axis.
+ *
+ * <h3>Inputs</h3>
+ * <ul>
+ *   <li>{@code allocIn[0]} = mainCap (nodes on main axis)</li>
+ *   <li>{@code allocIn[1..]} = branch lengths (nodes)</li>
+ *   <li>{@code minGap} = minimum spacing (nodes) between attachments; if &lt;1, treated as 1</li>
+ * </ul>
+ *
+ * <h3>Behavior</h3>
+ * <ul>
+ *   <li>Computes {@code capacity = ceil((mainCap - 1)/minGap)}.</li>
+ *   <li>If {@code nBranches <= capacity}: returns a copy of {@code allocIn} unchanged.</li>
+ *   <li>If over capacity: repeatedly removes the smallest branch (ties broken by first found),
+ *       adds its nodes back to {@code mainCap}, and compacts the array
+ *       until {@code nBranches == capacity}.</li>
+ *   <li>If {@code mainCap < 2}: moves one node at a time from branches to main until {@code mainCap >= 2}
+ *       or branches are exhausted, then returns.</li>
+ * </ul>
+ *
+ * <h3>Output</h3>
+ * Returns a possibly shorter array {@code alloc} with:
+ * <ul>
+ *   <li>{@code alloc[0]} = adjusted {@code mainCap}</li>
+ *   <li>{@code alloc[1..]} = remaining branch lengths (no zeros; compacted)</li>
+ * </ul>
+ *
+ * <h3>Guarantees</h3>
+ * <ul>
+ *   <li>Total nodes are conserved: {@code alloc[0] + sum(alloc[1..]) == allocIn[0] + sum(allocIn[1..])}.</li>
+ *   <li>{@code nBranches} after normalization ≤ {@code capacity}.</li>
+ * </ul>
+ *
+ * @param allocIn original allocation (not modified)
+ * @param minGap  minimum spacing between branch attachments on the main axis
+ * @return normalized allocation; may have fewer branches and a larger main
+ */
+// Capacity with an offset: only nodes [startNode .. mainCap-1] can host a branch.
+int[] normalizeForAttachmentCapacity(int[] allocIn, int minGap, int startNode) {
+    if (allocIn == null || allocIn.length == 0) return allocIn;
+    if (minGap < 1) minGap = 1;
+    if (startNode < 1) startNode = 1;
+
+    int len = allocIn.length;
+    int[] alloc = new int[len];
+    for (int i = 0; i < len; i++) alloc[i] = allocIn[i];
+    alloc = compactAllocation(alloc);
+
+    while (true) {
+        len = alloc.length;
+        int mainCap = alloc[0];
+        int nBranches = len - 1;
+        if (nBranches <= 0) return alloc;
+
+        // usable attach sites exclude the tip AND everything before startNode
+        int attachable = Math.max(0, (mainCap - 1) - (startNode - 1)); // = mainCap - startNode
+        if (attachable <= 0) {
+            for (int i = 1; i < len; i++) mainCap += alloc[i];
+            return new int[]{ mainCap };
+        }
+
+        int capacity = (attachable + (minGap - 1)) / minGap; // ceil(attachable / minGap)
+        if (nBranches <= capacity) return alloc;
+
+        int minIdx = -1, minVal = Integer.MAX_VALUE;
+        for (int i = 1; i < len; i++) {
+            if (alloc[i] < minVal) { minVal = alloc[i]; minIdx = i; }
+        }
+        if (minIdx <= 0) return alloc;
+
+        alloc[0] = mainCap + alloc[minIdx];
+        alloc[minIdx] = 0;
+        alloc = compactAllocation(alloc);
+    }
+}
+
+     /**********************************************/
+	 /** Parameters for apple bud */
+	 /**********************************************/
+	 
+	/**
+	 * Load apple-bud parameters from the configured category context.
+	 *
+	 * <p>The method currently resolves the dormancy stage while preserving the
+	 * legacy parameter-loading pattern used elsewhere in the model.</p>
+	 */
+	public void loadParameters() {
+		/** Set the context for file name parameters*/
+		CategoryStore config = ((DocumentCategoryNameGroup) CONFIG.getGroup(FILE_NAME_PLANT_PARAMETERS, 
+			DocumentCategoryNameGroup.class)).getCategoryStore();
+		
+		/** Configuration context for carbon-related parameters */
+		config.setCategoryContext("bud-general");
+		//common parameters
+		
+		stDormancyStage      = config.getInteger("stDormancyStage", 4);
+	}
+	 
+   
+   /**
+	 * Initialize a bud directly from a plant identifier.
+	 *
+	 * <p>This is the initial-scene entry point. It samples a bud type, assigns a
+	 * shoot type, creates the bud-local shoot plan, and leaves the bud dormant
+	 * until the develop-stage bud-burst rule turns it into an apex.</p>
+	 *
+	 * @param pi plant identifier containing the owning plant
+	 * @param budShootType optional shoot-type hint used to bias the bud type
+	 * @return initialized bud
+	 */
+   public BudService initiate_pi(PlantIdentifier pi, String budShootType)
+   { 
+	   loadParameters();
+   	   plantNumber = pi.plantNumber;
+	   border = pi.border;
+	   age = plastochron;
+	   dormant = true;
+	   length = 1e-4;
+			   
+	   String[] splitValues = budShootType.split("[_\\.]");
+	   
+	   
+		if (splitValues.length > 2 && splitValues[2] != null && !splitValues[2].isEmpty()) {
+			shootType = splitValues[2];
+		
+			if (shootType.contains("V")) {
+				budType = 1;  // vegetative
+				flowerNumber = 0; 
+			} else if (shootType.contains("F")) {
+				budType = 2;  // floral
+				flowerNumber = sampleFlowerNumberPerFloral(FLOWERS_PER_FLORAL); 
+			} else {
+				// fallback: probabilistic draw
+				this.budType = budTypeDraw(FBUD_FLORAL);
+			}
+		
+		} else {
+			// if shootType is missing or null → decide probabilistically
+			this.budType = budTypeDraw(FBUD_FLORAL);
+		}
+		if (this.budType == 2 && this.flowerNumber <= 0) this.flowerNumber = sampleFlowerNumberPerFloral(FLOWERS_PER_FLORAL);
+		if (this.budType == 1) this.flowerNumber = 0;
+	    this.declinationAngleDeg = random(40, 70);   // 30–60°
+		// base means
+		float bbMean = resolveBudBurstDelayMeanByType(this.budType);
+		// Planned lateral timing is handled apex-side; ordinary buds do not carry
+		// an extra shoot-growth delay anymore.
+		float sgMean = 0f;
+	
+		this.budBurstDelay = sampleBudBurstDelay(bbMean);
+		this.shootGrowthDelay = sgMean + budBurst_sd * Math.abs(sgMean) * (float) rng.nextGaussian();
+		if (printFlag || debug) {
+			println("[apple][bud-burst-delay] step=" + step
+				+ " budId=" + this.getId()
+				+ " budType=" + this.budType
+				+ " baseMean=" + budBurstDelay_mean
+				+ " vegLag=" + vegBudBurstLag
+				+ " finalMean=" + bbMean
+				+ " sampledDelay=" + this.budBurstDelay);
+		}
+		
+	   // 1) sample total nodes + allocation
+		 sampleAndAllocate_Gamma();
+	   
+		double length_cm = shootLengthFromNodes(totalNodes);
+		this.potentialLength = Math.max(0.005, length_cm / 100.0);
+		
+		// 3) assign planned branches
+		this.nBranches = (this.branchPlan != null) ? this.branchPlan.length : 0;
+		
+	   //set the current syllepticOrder to zero, 
+	   //as syllepticOrder consider the annual shoot grwoth and branching
+	    syllepticOrder = 0;
+	   
+	   //phenology
+	   // 1 = pre endodormancy, 2 = endodormancy, 3 = ecodormancy, 4 = post ecodormancy
+	   dormancyStage = stDormancyStage;
+	   accumulatedChill = 0;
+	   accumulatedHeat = 0;
+	   heatTarget = Double.POSITIVE_INFINITY;
+	   
+	   return this;
+   }
+   
+   
+   /**
+	 * Initialize a bud from an internode attachment site.
+	 *
+	 * <p>This is the dynamic-growth path used by planner-added buds and lateral
+	 * bud emission. It inherits axis identity from the parent internode, assigns
+	 * a bud type, samples the shoot plan, and records whether the site is terminal
+	 * or lateral so the later bud-burst decision can reuse that context.</p>
+	 *
+	 * @param itn parent internode that owns the attachment site
+	 * @param FBUD_FLORAL floral-bud probability used by the draw logic
+	 */
+   
+ public void initiate(Internode itn, float FBUD_FLORAL)
+   { 
+	   loadParameters();
+	   this.parentAxisApexID = 0L;
+	   //general identifers
+	   plantNumber = itn.plantNumber;
+	   cordonNumber = itn.cordonNumber;
+	   nodeNumber = itn.nodeNumber;
+	   this.ID = itn.ID * 10;
+	   this.order = itn.order + 1; 
+	   this.rank = 0;
+	   this.axis2ID = itn.axis2ID; 
+	   this.axis3ID = itn.axis3ID;
+	   this.axis4ID = itn.axis4ID;
+	   this.axis5ID = itn.axis5ID;
+	   this.axis6ID = itn.axis6ID;
+	   this.axis7ID = itn.axis7ID;
+	   this.axis8ID = itn.axis8ID;
+	   this.axis9ID = itn.axis9ID;
+	   this.cpn = axis2ID + axis3ID + axis4ID + axis5ID + axis6ID + axis7ID + axis8ID + axis9ID + itn.rank;	
+	   
+	   if(itn.rank == 0 || itn instanceof Cordon) { 
+		   this.syllepticOrder = 0; 
+	   } else { 
+		   this.syllepticOrder = itn.syllepticOrder + 1;
+	   }
+	   
+	   
+		
+	   age = plastochron;
+	   dormant = true;
+	   length = 1e-4;
+			   
+	   //used in phenology module
+	   dormancyStage = stDormancyStage;
+	   accumulatedChill = 0;
+	   accumulatedHeat = 0;
+	   heatTarget = Double.POSITIVE_INFINITY;
+		
+	    //draw bud type
+		this.budType = budTypeDraw(FBUD_FLORAL);
+
+	   
+	   if(budType == 1) {
+			flowerNumber = 0; //Integer.parseInt(splitValues[3]);
+			this.shootType = "VB";
+	   } else if (budType == 2) {
+		   flowerNumber = sampleFlowerNumberPerFloral(FLOWERS_PER_FLORAL); //Integer.parseInt(splitValues[3]);
+		   this.shootType = "FB";
+	   } 
+		// base means
+		float bbMean = resolveBudBurstDelayMeanByType(this.budType);
+		// Planned lateral timing is handled apex-side; ordinary buds do not carry
+		// an extra shoot-growth delay anymore.
+		float sgMean = 0f;
+		
+		this.budBurstDelay = sampleBudBurstDelay(bbMean);
+		this.shootGrowthDelay = sgMean + budBurst_sd * Math.abs(sgMean) * (float) rng.nextGaussian();
+		if (printFlag || debug) {
+			println("[apple][bud-burst-delay] step=" + step
+				+ " budId=" + this.getId()
+				+ " budType=" + this.budType
+				+ " baseMean=" + budBurstDelay_mean
+				+ " vegLag=" + vegBudBurstLag
+				+ " finalMean=" + bbMean
+				+ " sampledDelay=" + this.budBurstDelay);
+		}
+		
+		
+	    // 1) sample total nodes + allocation
+	    // assign planned branches
+		sampleAndAllocate_Gamma();
+		
+		double length_cm = shootLengthFromNodes(totalNodes);
+		this.potentialLength = Math.max(0.005, length_cm / 100.0);
+		
+		boolean terminalBud = isTerminalBudByGraph(itn);
+		if (!terminalBud && this.syllepticOrder > 0) {
+			assignChildAxisIdsFromParent(itn, this, this.order, itn.rank);
+		}
+
+		//set a branch declination used when the bud bursts.
+		// BudAppleService.initiate(Internode itn, ...)
+		if (terminalBud) {
+			// apical: follow parent internode direction → 0° around parent axis
+			this.declinationAngleDeg = 0f;
+		} else {
+			// axillary: draw 30–60°
+			this.declinationAngleDeg = (float) random(APEX_DECL_AXIL_MIN_DEG, APEX_DECL_AXIL_MAX_DEG);
+		}
+		if (printFlag || debug) {
+			println("[apple][bud-init] step=" + step
+				+ " budId=" + this.getId()
+				+ " parentInternodeId=" + ((itn != null) ? itn.getId() : 0L)
+				+ " order=" + this.order
+				+ " rank=" + this.rank
+				+ " shootType=" + this.shootType
+				+ " syllepticOrder=" + this.syllepticOrder
+				+ " axis2=" + this.axis2ID
+				+ " axis3=" + this.axis3ID
+				+ " axis4=" + this.axis4ID
+				+ " axis5=" + this.axis5ID
+				+ " axis6=" + this.axis6ID
+				+ " axis7=" + this.axis7ID
+				+ " axis8=" + this.axis8ID
+				+ " axis9=" + this.axis9ID
+				+ " cpn=" + this.cpn
+				+ " attachRank=" + itn.rank
+				+ " terminal=" + terminalBud);
+		}
+
+
+   }
+   
+   /**
+	 * Test whether the attachment site is terminal in the graph.
+	 *
+	 * @param itn parent internode
+	 * @return {@code true} when no forward child internode exists
+	 */
+	boolean isTerminalBudByGraph(Internode itn) {
+		if (itn == null) {
+			return false;
+		} else {
+			return(itn.getChildInternodeCount() == 0);
+		}
+	}
+
+	/**
+	 * Store the parent-axis apex ID used by lateral-outgrowth gating.
+	 *
+	 * @param id parent apex ID
+	 */
+	public void setParentAxisApexId(long id) {
+		this.parentAxisApexID = id;
+	}
+
+	/**
+	 * Resolve the parent apex referenced by {@link #parentAxisApexID}.
+	 *
+	 * @return parent apex if the stored ID resolves, otherwise {@code null}
+	 */
+	ApexService getParentAxisApexForLateralOutgrowth() {
+		if (this.parentAxisApexID <= 0L) return null;
+		Organ parentAxisOrgan = getOrgan(this.parentAxisApexID);
+		return (parentAxisOrgan instanceof ApexService) ? (ApexService) parentAxisOrgan : null;
+	}
+		
+	/**
+	 * Initialize a lateral bud from a parent internode without resampling node counts.
+	 *
+	 * <p>This preplanned path is used by the develop-stage branch-emission rule when
+	 * the parent apex already decided the child shoot length. It keeps the child bud
+	 * vegetative, copies the attachment identity, and stores a one-level plan only.</p>
+	 *
+	 * @param itn parent internode
+	 * @param plannedNodes node count already selected by the parent plan
+	 */
+public void initiatePreplanned(Internode itn, int plannedNodes) {
+    loadParameters();
+    this.parentAxisApexID = 0L;
+    plantNumber = itn.plantNumber;
+    cordonNumber = itn.cordonNumber;
+    nodeNumber = itn.nodeNumber;
+    this.ID = itn.ID * 10 + 1;       // avoid exact duplicate of parent’s ID
+    this.order = itn.order + 1;
+    this.rank = 0;
+
+    this.axis2ID = itn.axis2ID; 
+    this.axis3ID = itn.axis3ID;
+    this.axis4ID = itn.axis4ID;
+    this.axis5ID = itn.axis5ID;
+    this.axis6ID = itn.axis6ID;
+    this.axis7ID = itn.axis7ID;
+    this.axis8ID = itn.axis8ID;
+    this.axis9ID = itn.axis9ID;
+    this.cpn = axis2ID + axis3ID + axis4ID + axis5ID + axis6ID + axis7ID + axis8ID + axis9ID + itn.rank;
+
+    if (itn.rank == 0 || itn instanceof Cordon) {
+        this.syllepticOrder = 0;
+    } else {
+        this.syllepticOrder = itn.syllepticOrder + 1;
+    }
+
+    age = plastochron;
+    dormant = true;
+    length = 1e-4;
+
+    dormancyStage = stDormancyStage;
+    accumulatedChill = 0;
+    accumulatedHeat = 0;
+    heatTarget = Double.POSITIVE_INFINITY;
+
+    // lateral default: vegetative
+    this.budType = 1;
+    this.shootType = "VB";
+    this.flowerNumber = 0;
+    double bb_mean = (budBurstDelay_mean+LATERAL_BASE_DELAY_MEAN);
+    this.budBurstDelay = bb_mean + LATERAL_BASE_DELAY_SD * bb_mean * (float) rng.nextGaussian();
+    this.shootGrowthDelay = 0;
+
+    // set planned nodes directly; no sampling; no secondary branches here
+    if (plannedNodes < 1) plannedNodes = 1;
+    this.totalNodes = plannedNodes;
+    this.nodeAllocation = new int[1];
+    this.nodeAllocation[0] = plannedNodes;
+    this.nBranches = 0;
+    this.isSpur = (plannedNodes < SPUR_LIMIT);
+
+	    double length_cm = shootLengthFromNodes(plannedNodes);
+	    this.potentialLength = Math.max(0.005, length_cm / 100.0);
+    this.branchPlan = new int[0][0]; // none at this stage
+	assignChildAxisIdsFromParent(itn, this, this.order, itn.rank);
+    
+    // NEW: initialize lateral gating if this is a lateral bud
+    if(this.syllepticOrder >= 1) initLateralGate();
+	if (printFlag || debug) {
+		println("[apple][bud-preplanned] step=" + step
+			+ " budId=" + this.getId()
+			+ " parentInternodeId=" + ((itn != null) ? itn.getId() : 0L)
+			+ " order=" + this.order
+			+ " rank=" + this.rank
+			+ " shootType=" + this.shootType
+			+ " syllepticOrder=" + this.syllepticOrder
+			+ " axis2=" + this.axis2ID
+			+ " axis3=" + this.axis3ID
+			+ " axis4=" + this.axis4ID
+			+ " axis5=" + this.axis5ID
+			+ " axis6=" + this.axis6ID
+			+ " axis7=" + this.axis7ID
+			+ " axis8=" + this.axis8ID
+			+ " axis9=" + this.axis9ID
+			+ " cpn=" + this.cpn
+			+ " attachRank=" + itn.rank
+			+ " plannedNodes=" + plannedNodes);
+	}
+}
+
+   
+	/**
+	 * Determine whether this bud should burst into an apex in the current step.
+	 *
+	 * <p>The decision combines phenology, duplicate-apex protection, step-local
+	 * claim reservation, and lateral gating. This method only authorizes bud burst;
+	 * topology creation happens in {@code developApple.rgg}.</p>
+	 *
+	 * @return {@code true} when the bud may burst this step
+	 */
+	// BudAppleService
+	// ====== PRIMARY buds’ shouldBreak (unchanged logic), LATERALS use gate ======
+	    @Override
+	    public boolean shouldBreak() {
+	        // Phenology gate shared by all buds
+	        if (!(this.dormant && this.dormancyStage == phenology.POST_ECODORMANCY)) return false;
+	        ApexApple existingApex = findExistingApexForSourceBud(this);
+	        if (existingApex != null) {
+	        	resetAppleIdempotencyStatsIfNeeded();
+	        	budBurstExistingApexBlocks++;
+	        	this.dormant = false;
+	        	if (printFlag || debug) {
+	        		println("[bud-burst-block-existing-apex] step=" + step
+	        			+ " budId=" + this.getId()
+	        			+ " budType=" + this.budType
+	        			+ " shootType=" + this.shootType
+	        			+ " existingApexId=" + existingApex.getId());
+	        	}
+	        	return false;
+	        }
+
+	        // LATERAL buds: phyllochron-gated probability window
+	        if (this.syllepticOrder > 0) {
+	            // evaluate at most once per phyllochron; gate already owns the timing window
+	            updateLateralGateIfDue_Int();
+
+	            // if gate passed, then use the same time rule (but no extra shootGrowthDelay)
+	            if (latGatePassed) {
+	                if (this.age > this.budBurstDelay) {
+	                	if (!reserveBudBurstThisStep(this)) {
+	                		if (printFlag || debug) {
+	                			println("[bud-burst-block-reentry] step=" + step
+	                				+ " budId=" + this.getId()
+	                				+ " budType=" + this.budType
+	                				+ " shootType=" + this.shootType
+	                				+ " reason=budAlreadyClaimedThisStep");
+	                		}
+	                		return false;
+	                	}
+                    this.dormant = false;
+                    if (printFlag) println("lateral bud burst (gate passed): age=" + age);
+                    return true;
+                }
+            }
+            return false;
+        }
+
+		// PRIMARY buds (order==0 or syllepticOrder==0): original rule with delay
+		if (this.syllepticOrder == 0) {
+			if (useStaticArc == false && this.age > this.budBurstDelay) {
+				if (!reserveBudBurstThisStep(this)) {
+					if (printFlag || debug) {
+						println("[bud-burst-block-reentry] step=" + step
+							+ " budId=" + this.getId()
+							+ " budType=" + this.budType
+							+ " shootType=" + this.shootType
+							+ " reason=budAlreadyClaimedThisStep");
+					}
+					return false;
+				}
+				this.dormant = false;
+				if (printFlag) println("primary bud burst: age=" + age);
+				return true;
+			}
+	
+			return false;
+		}
+		//ensure a final return false; at the end for completeness (defensive).
+		return false;
+    }
+
+	/**
+	 * Create the apex object that will replace this bud during bud burst.
+	 *
+	 * @return new apple apex instance
+	 */
+	public ApexService createApex() {
+		return new ApexApple();   // <-- remove ax.initiate(this);
+	}
+	
+	
+	
+} ==> if(budType == 1) (
+   Sphere(this.length).(setShader(GREEN))
+) else if(budType == 2) (
+   Sphere(this.length).(setShader(RED))
+   //for (int j=1; j<=5; j++) ([RU(j*360/5) RL(20) Cylinder(1e-2, 0.1e-2) Parallelogram(10e-2,5e-2).(setColor(0xFF00FF))])
+);
+//} ==> Sphere(this.length).(setShader(GREEN));
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/**
+ * Apple apex state used during dynamic growth.
+ *
+ * <p>This module is the runtime consumer of the bud-side plan. It receives a bud,
+ * copies the bud identity and shoot plan into a growing apex, then exposes the
+ * rank-based emission logic that {@code developApple.rgg} queries when it decides
+ * whether to create a new internode, a lateral bud, a rosette leaf, a flower, or
+ * a bourse-shoot child.</p>
+ *
+ * <p>In other words: {@code budApple.rgg} prepares plan state, this module keeps
+ * the active growth cursor, and {@code developApple.rgg} performs the actual XL
+ * topology rewrites.</p>
+ */
+module ApexApple extends ApexService
+{
+	/**
+	 * Preserve the serial UID from the last stable saved graph so GroIMP can reopen
+	 * existing projects without resetting shader/object links after mixed-bud planner changes.
+	 */
+	private static final long serialVersionUID = 3237166342247603854L;
+
+	boolean isSpur;
+	/** Planned rosette leaf count for a mixed floral bud (-). */
+	public int floralRosetteLeafCount = 0;
+	/** Planned number of bourse shoots to spawn from the mixed bud (-). */
+	public int bourseShootCountTarget = 0;
+	/** Number of bourse shoots already spawned from the mixed bud (-). */
+	public int bourseShootCountSpawned = 0;
+	/** Spur-level plan rows {rosetteAttachRank, childPlanIndex}. */
+	public int[][] spurAttachPlan = new int[0][0];
+	/** Full child shoot plans consumed by mixed-bud bourse spawning. */
+	public AppleShootPlan[] bourseShootPlans = new AppleShootPlan[0];
+	/** Cursor into {@code spurAttachPlan} during rosette development. */
+	public int nextSpurAttachIdx = 0;
+	/** True once the mixed-bud flower cluster becomes visible on the finished rosette. */
+	public boolean mixedBudFlowerAppeared = false;
+	/** Spur rank of the rosette event that created the visible flower cluster (-). */
+	public int mixedBudFlowerAppearanceRank = 0;
+	/** Apex thermal age at flower appearance (same unit as Apex.age). */
+	public double mixedBudFlowerAppearanceAge = Double.NaN;
+	/** Apex day age at flower appearance (d). */
+	public double mixedBudFlowerAppearanceAgeD = Double.NaN;
+	/** Apex GDD age at flower appearance (degree-days). */
+	public double mixedBudFlowerAppearanceAgeGdd = Double.NaN;
+	/** Legacy/debug bloom threshold after flower appearance; now stores the bud-burst threshold for mixed buds. */
+	public double mixedBudBloomDelayAfterAppearance = Double.NaN;
+	/** Apex age at birth; normally 0 for newly burst dynamic apices, but explicit for diagnostics. */
+	public double birthAge = 0.0;
+	/** Apex day age at birth, d. */
+	public double birthAgeD = 0.0;
+	/** Apex GDD age at birth, degree-days. */
+	public double birthAgeGdd = 0.0;
+	/** Absolute model thermal-time marker at apex birth if available; fallback is birthAge. */
+	public double budBurstThermalTime = 0.0;
+	/** Absolute model day marker at apex birth if available; fallback is birthAgeD. */
+	public double budBurstDay = 0.0;
+	/** Absolute model GDD marker at apex birth if available; fallback is birthAgeGdd. */
+	public double budBurstGdd = 0.0;
+	/** Parent-axis apex ID for axis-aware debug on lateral and bourse child axes. */
+	public long parentAxisApexID = 0L;
+	/** Last external simulation step that emitted a phytomer from this apex (-). */
+	public int lastPhytomerEmissionStep = -1;
+	/** External simulation step when this apex instance was created from a bud or parent apex. */
+	public int birthStep = -1;
+	
+	
+
+	float deltaHeight; //the height difference with the tip of the upright
+
+	
+		/**
+		 * Load apple-apex parameters from the configured category context.
+		 *
+		 * <p>The apex currently only resolves the shared bud-general context, but the
+		 * helper is kept separate so this module mirrors the legacy GroIMP loading
+		 * pattern used by related organ classes.</p>
+		 */
+		public void loadParameters() {
+			
+		/** Set the context for file name parameters*/
+		CategoryStore config = ((DocumentCategoryNameGroup) CONFIG.getGroup(FILE_NAME_PLANT_PARAMETERS, 
+			DocumentCategoryNameGroup.class)).getCategoryStore();
+		
+		/** Configuration context for carbon-related parameters */
+		config.setCategoryContext("bud-general");
+		
+
+	}
+
+	/** Record this apex birth / bud-burst timing using the current apex clocks. */
+	private void markApexBirth() {
+		this.birthStep = step;
+		this.birthAge = this.age;
+		this.birthAgeD = this.ageD;
+		this.birthAgeGdd = this.ageGdd;
+		/*
+		 * If a reliable absolute model thermal-time clock becomes available, store it here.
+		 * For dynamic mixed-bud control, the apex-local age marker is sufficient and unit-explicit.
+		 */
+		this.budBurstThermalTime = this.age;
+		this.budBurstDay = this.ageD;
+		this.budBurstGdd = this.ageGdd;
+	}
+
+	/** Thermal time elapsed since bud burst / apex creation, in the same unit as Apex.age. */
+	public double thermalTimeSinceBudBurst() {
+		double dt = this.age - this.birthAge;
+		if (Double.isNaN(dt) || Double.isInfinite(dt)) return 0.0;
+		return Math.max(0.0, dt);
+	}
+
+	/** Calendar days elapsed since bud burst / apex creation, d. */
+	public double daysSinceBudBurst() {
+		double dt = this.ageD - this.birthAgeD;
+		if (Double.isNaN(dt) || Double.isInfinite(dt)) return 0.0;
+		return Math.max(0.0, dt);
+	}
+
+	/** Growing degree-days elapsed since bud burst / apex creation, degree-days. */
+	public double gddSinceBudBurst() {
+		double dt = this.ageGdd - this.birthAgeGdd;
+		if (Double.isNaN(dt) || Double.isInfinite(dt)) return 0.0;
+		return Math.max(0.0, dt);
+	}
+
+	/**
+	 * Bloom threshold for mixed-bud flowers, counted from bud burst / apex creation.
+	 * Unit is the same thermal-development unit as Apex.age.
+	 */
+	public double getMixedBudFloweringTDFromBudBurst() {
+		double td = mixedBudFloweringTDFromBudBurst;
+		if (Double.isNaN(td) || Double.isInfinite(td) || td <= 0.0) {
+			td = 20.0;
+		}
+		return td;
+	}
+
+	/** Compatibility alias for old call sites; now returns the bud-burst bloom threshold. */
+	public double getMixedBudBloomDelayThermal() {
+		return getMixedBudFloweringTDFromBudBurst();
+	}
+
+	/**
+	 * Test whether the mixed bud should expose its flower cluster at this rosette rank.
+	 *
+	 * @param rosetteRank1 current 1-based rosette rank
+	 * @return {@code true} when the final rosette leaf should also trigger flower appearance
+	 */
+	public boolean shouldCreateFlowerAtCurrentRosetteRank(int rosetteRank1) {
+		return this.shouldProduceFlower
+			&& !this.mixedBudFlowerAppeared
+			&& this.floralRosetteLeafCount > 0
+			&& rosetteRank1 == this.floralRosetteLeafCount;
+	}
+
+	/**
+	 * Record the first visible flower-cluster appearance on a mixed bud.
+	 *
+	 * @param rosetteRank1 rosette rank at which the flower appears
+	 */
+	public void markMixedBudFlowerAppearance(int rosetteRank1) {
+		this.mixedBudFlowerAppeared = true;
+		this.mixedBudFlowerAppearanceRank = rosetteRank1;
+		this.mixedBudFlowerAppearanceAge = this.age;
+		this.mixedBudFlowerAppearanceAgeD = this.ageD;
+		this.mixedBudFlowerAppearanceAgeGdd = this.ageGdd;
+		this.mixedBudBloomDelayAfterAppearance = this.getMixedBudFloweringTDFromBudBurst();
+		if (printFlag) {
+			println("[mixed-bud][flower-appearance] apex=" + this.getId()
+				+ " rosetteTarget=" + this.floralRosetteLeafCount
+				+ " finalRosetteRank=" + rosetteRank1
+				+ " birthAge=" + this.birthAge
+				+ " appearanceAge=" + this.mixedBudFlowerAppearanceAge
+				+ " appearanceAgeD=" + this.mixedBudFlowerAppearanceAgeD
+				+ " appearanceAgeGdd=" + this.mixedBudFlowerAppearanceAgeGdd
+				+ " thermalSinceBudBurstAtAppearance=" + this.thermalTimeSinceBudBurst()
+				+ " floweringTDFromBudBurst=" + this.getMixedBudFloweringTDFromBudBurst());
+		}
+	}
+	
+	
+	/** Assign the source bud by ID (preferred). */
+    public void setSourceBudId(long id) {
+        this.sourceBudID = id;
+    }
+
+    /** Convenience: set from an actual bud once, but only keep its ID. */
+    public void setSourceBud(BudService b) {
+        this.sourceBudID = (b != null) ? b.getId() : 0L;
+    }
+
+    /** ID-based resolver (null-safe, type-safe). */
+	    public BudAppleService getSourceBud() {
+        if (this.sourceBudID <= 0) return null;
+        Organ o = getOrgan(this.sourceBudID); // you already have getOrgan(long)
+        return (o instanceof BudAppleService) ? (BudAppleService) o : null;
+    }
+
+	/**
+	 * Read the bud ID that created this apex.
+	 *
+	 * @return source bud ID, or {@code 0} when none is recorded
+	 */
+	public long getSourceBudId() {
+		return this.sourceBudID;
+	}
+
+	/**
+	 * Read the parent-axis apex ID recorded for lateral and bourse child axes.
+	 *
+	 * @return parent axis apex ID, or {@code 0} when unavailable
+	 */
+	public long getParentAxisApexId() {
+		return this.parentAxisApexID;
+	}
+
+	/**
+	 * Test whether this apex can emit another phytomer in the current step.
+	 *
+	 * @return {@code true} when no step-local claim or prior emission blocks it
+	 */
+	public boolean canEmitPhytomerThisStep() {
+		return this.lastPhytomerEmissionStep != step && !isPhytomerEmissionClaimedThisStep(this);
+	}
+
+	/**
+	 * Mark this apex as having emitted a phytomer in the current step.
+	 */
+	public void markPhytomerProducedThisStep() {
+		this.lastPhytomerEmissionStep = step;
+	}
+    
+	
+    /**
+     * Record that a new main-axis internode has formed.
+     *
+     * <p>This hook is bookkeeping only. The develop-stage rule consumes the branch
+     * plan directly from {@link #popPlannedBranchLenAtCurrentNode()}, so this method
+     * does not create topology or advance the branch cursor itself.</p>
+     *
+     * @param itn newly created internode on the main axis
+     */
+    public void onNodeFormed(Internode itn) {
+        int nodeRank = (itn != null && itn.rank > 0) ? itn.rank : (this.formedNodes + 1);
+        if (nodeRank < 1) nodeRank = 1;
+        this.formedNodes = Math.max(this.formedNodes, nodeRank);
+
+        // Canonical branch spawning happens in developApple.rgg via popPlannedBranchLenAtCurrentNode().
+        // Keep this hook bookkeeping-only so branchPlan/nextBranchIdx have a single consumer.
+        if ((printFlag || debug) && this.branchPlan != null && this.nextBranchIdx < this.nBranches) {
+            int legacyHits = 0;
+            int firstPlannedLen = 0;
+            int scanIdx = this.nextBranchIdx;
+            while (scanIdx < this.nBranches && this.branchPlan[scanIdx][0] == nodeRank) {
+                if (legacyHits == 0) firstPlannedLen = this.branchPlan[scanIdx][1];
+                legacyHits++;
+                scanIdx++;
+            }
+            if (legacyHits > 0) {
+                println("[onNodeFormed-legacy-hit] step=" + step
+                    + " apexId=" + this.getId()
+                    + " nodeRank=" + nodeRank
+                    + " internodeId=" + ((itn != null) ? itn.getId() : 0L)
+                    + " plannedLen=" + firstPlannedLen
+                    + " pendingHits=" + legacyHits
+                    + " note=branchPlanNotConsumedHere");
+            }
+        }
+    }
+    
+    
+	/**
+	 * Initiate an apex from a bud.
+	 *
+	 * <p>This is the bud-burst handoff path. The apex inherits bud identity,
+	 * shoot type, flower state, axis IDs, and the bud-local shoot plan so the
+	 * develop-stage rewrite can continue from the same biological line.</p>
+	 *
+	 * @param b bud being converted to an apex
+	 */
+	public void initiate(BudService b)
+	{ 
+		loadParameters();
+		plantNumber = b.plantNumber;
+		border = b.border;
+		//when initiating from bud, a new apex appears. 
+		//by default i use rank as the rank counting from the shoot it is growing
+		rank = 1;		
+		order = b.order;                                                 
+		nodeNumber = b.nodeNumber; 
+		cordonNumber = b.cordonNumber;
+		syllepticOrder = b.syllepticOrder;
+		
+		this.axis2ID = b.axis2ID; 
+		this.axis3ID = b.axis3ID;
+		this.axis4ID = b.axis4ID;
+		this.axis5ID = b.axis5ID;
+		this.axis6ID = b.axis6ID;
+		this.axis7ID = b.axis7ID;
+		this.axis8ID = b.axis8ID;
+		this.axis9ID = b.axis9ID;
+		this.cpn = axis2ID + axis3ID + axis4ID + axis5ID + axis6ID + axis7ID + axis8ID + axis9ID + b.rank;
+		
+		age = plastochron;
+		ageGdd = 0;
+		length = 1e-4;
+		 	
+		budType = b.budType;
+		shootType = b.shootType;
+		flowerNumber = b.flowerNumber;
+		
+		
+		
+		
+		shouldProduceFlower = b.budType == 2 ? true : false;
+		if (shouldProduceFlower && (b instanceof BudAppleService)) {
+			BudAppleService bb = (BudAppleService) b;
+			this.floralRosetteLeafCount = bb.rosetteLeafTarget;
+			this.bourseShootCountTarget = bb.nBourseTarget;
+			this.spurAttachPlan = AppleShootPlan.copyPlanMatrix(bb.spurAttachPlan);
+			this.bourseShootPlans = AppleShootPlan.copyShootPlans(bb.bourseShootPlans);
+		} else {
+			this.floralRosetteLeafCount = 0;
+			this.bourseShootCountTarget = 0;
+			this.spurAttachPlan = new int[0][0];
+			this.bourseShootPlans = new AppleShootPlan[0];
+		}
+		this.nextSpurAttachIdx = 0;
+		this.bourseShootCountSpawned = 0;
+		this.mixedBudFlowerAppeared = false;
+		this.mixedBudFlowerAppearanceRank = 0;
+		this.mixedBudFlowerAppearanceAge = Double.NaN;
+		this.mixedBudFlowerAppearanceAgeD = Double.NaN;
+		this.mixedBudFlowerAppearanceAgeGdd = Double.NaN;
+		this.mixedBudBloomDelayAfterAppearance = Double.NaN;
+		this.parentAxisApexID = (b instanceof BudAppleService) ? ((BudAppleService) b).parentAxisApexID : 0L;
+		this.lastPhytomerEmissionStep = -1;
+		
+		if (printFlag) { 
+			println("shootType " + shootType + " shouldProduceFlower " + shouldProduceFlower);
+			println("phytomerNumber " + phytomerNumber);
+		}
+		
+		
+			// Keep only the ID (robust across GC/serialization)
+        this.setSourceBud(b);
+        // ApexApple.initiate(BudService b)  (add the line shown)
+        
+        this.shootGrowthDelay = b.shootGrowthDelay;
+		this.totalNodes = b.totalNodes;
+
+		if (this.shouldProduceFlower) {
+			this.phytomerNumber = Math.max(1, this.floralRosetteLeafCount);
+			this.mainNodesPlanned = this.phytomerNumber;
+			this.formedNodes = 0;
+			this.branchPlan = new int[0][0];
+			this.nBranches = 0;
+			this.nextBranchIdx = 0;
+			this.nodeAllocation = new int[1];
+			this.nodeAllocation[0] = this.phytomerNumber;
+			this.isSpur = true;
+			this.mixedBudBloomDelayAfterAppearance = this.getMixedBudBloomDelayThermal();
+		} else {
+			this.nodeAllocation = AppleShootPlan.copyIntArray(b.nodeAllocation);
+			this.phytomerNumber = (this.nodeAllocation != null && this.nodeAllocation.length > 0) ? this.nodeAllocation[0] : 1;
+			this.phytomerNumber = Math.max(1, this.phytomerNumber);
+			this.mainNodesPlanned = this.phytomerNumber;
+			this.formedNodes = 0;
+			this.branchPlan = AppleShootPlan.copyPlanMatrix(b.branchPlan);
+			this.nBranches = this.branchPlan.length;
+			this.nextBranchIdx = 0;
+			this.isSpur = b.isSpur;
+		}
+		this.minBranchGap = MIN_BRANCH_GAP;
+		this.potentialLength = b.potentialLength;
+		this.markApexBirth();
+		
+		if (printFlag) {
+			println("Apex from Bud#" + b.getId()
+				+ " mainNodesPlanned=" + mainNodesPlanned
+				+ " nBranches=" + nBranches
+				+ " minGap=" + minBranchGap);
+			if (this.shouldProduceFlower) {
+				println("[mixed-bud][plan] apex=" + this.getId()
+					+ " rosetteNodes=" + this.floralRosetteLeafCount
+					+ " spurAttachPlan=" + AppleShootPlan.formatPlanMatrix(this.spurAttachPlan)
+					+ " bourseShootPlans=" + this.bourseShootPlans.length);
+			}
+		}
+		if (printFlag || debug) {
+			println("[apple][apex-from-bud] step=" + step
+				+ " apexId=" + this.getId()
+				+ " sourceBudId=" + b.getId()
+				+ " parentAxisApexId=" + this.parentAxisApexID
+				+ " order=" + this.order
+				+ " rank=" + this.rank
+				+ " shootType=" + this.shootType
+				+ " syllepticOrder=" + this.syllepticOrder
+				+ " axis2=" + this.axis2ID
+				+ " axis3=" + this.axis3ID
+				+ " axis4=" + this.axis4ID
+				+ " axis5=" + this.axis5ID
+				+ " axis6=" + this.axis6ID
+				+ " axis7=" + this.axis7ID
+				+ " axis8=" + this.axis8ID
+				+ " axis9=" + this.axis9ID
+				+ " cpn=" + this.cpn);
+		}
+
+		
+	}
+	
+	
+	/**
+	 * Initiate a bourse-shoot apex from a parent apex.
+	 *
+	 * <p>This is the mixed-bud child-axis path. It creates a one-level fallback child
+	 * plan when needed and forwards to {@link #initiateBourseFromParent(ApexService, AppleShootPlan, int, int)}.
+	 *
+	 * @param a parent apex
+	 */
+	public void initiate(ApexService a)
+	{ 
+		int plannedNodes = (this.phytomerNumber > 0) ? this.phytomerNumber : a.phytomerNumber;
+		AppleShootPlan fallbackPlan = new AppleShootPlan();
+		fallbackPlan.totalNodes = Math.max(1, plannedNodes);
+		fallbackPlan.isSpur = (fallbackPlan.totalNodes < SPUR_LIMIT);
+		fallbackPlan.nodeAllocation = new int[]{ fallbackPlan.totalNodes };
+		fallbackPlan.branchPlan = new int[0][0];
+		fallbackPlan.nBranches = 0;
+		fallbackPlan.mainNodesPlanned = fallbackPlan.totalNodes;
+		
+		fallbackPlan.potentialLength = 0.005;
+		this.initiateBourseFromParent(a, fallbackPlan, -1, a.rank);
+		this.markApexBirth();
+	}
+
+	/**
+	 * Initialize a bourse-shoot apex from a parent apex using a full preplanned child shoot plan.
+	 *
+	 * <p>The parent mixed-bud apex supplies the child shoot plan and the attach rank.
+	 * This method copies that plan, propagates child-axis identity, and records the
+	 * parent apex ID so the develop-stage rules can keep the child axis tied to the
+	 * correct spur.</p>
+	 *
+	 * @param a parent apex
+	 * @param childShootPlan preplanned child shoot
+	 * @param childPlanIndex index of the child plan within the mixed-bud plan set
+	 * @param attachRank attach rank on the parent rosette/spur
+	 */
+	public void initiateBourseFromParent(ApexService a, AppleShootPlan childShootPlan, int childPlanIndex, int attachRank)
+	{
+		AppleShootPlan safeChildPlan = (childShootPlan != null) ? childShootPlan.copy() : null;
+		if (safeChildPlan == null) {
+			safeChildPlan = new AppleShootPlan();
+			safeChildPlan.totalNodes = 1;
+			safeChildPlan.isSpur = true;
+			safeChildPlan.nodeAllocation = new int[]{ 1 };
+			safeChildPlan.branchPlan = new int[0][0];
+			safeChildPlan.nBranches = 0;
+			safeChildPlan.mainNodesPlanned = 1;
+			safeChildPlan.potentialLength = 0.005;
+		}
+		if (safeChildPlan.mainNodesPlanned < 1) safeChildPlan.mainNodesPlanned = 1;
+		if (safeChildPlan.totalNodes < safeChildPlan.mainNodesPlanned) safeChildPlan.totalNodes = safeChildPlan.mainNodesPlanned;
+		if (safeChildPlan.nodeAllocation == null || safeChildPlan.nodeAllocation.length == 0) {
+			safeChildPlan.nodeAllocation = new int[]{ safeChildPlan.mainNodesPlanned };
+		}
+		loadParameters();
+		plantNumber = a.plantNumber;
+		border = a.border;
+		//when initiating from bud, a new apex appears. 
+		//by default i use rank as the rank counting from the shoot it is growing
+		//reset to 1 as I want the bourse shoot leaf to count from 1 to maxPhytomer
+		rank = 1;		
+		order = a.order+1;                                                 
+		nodeNumber = a.nodeNumber; 
+		cordonNumber = a.cordonNumber;
+		syllepticOrder = a.syllepticOrder + 1;
+		assignChildAxisIdsFromParent(a, this, this.order, attachRank);
+		
+		age = plastochron;
+		ageGdd = 0;
+		length = 1e-4;
+		 	
+		budType = a.budType;
+		shootType = "bourseShoot";
+		flowerNumber = a.flowerNumber;
+		this.shouldProduceFlower = false;
+		this.floralRosetteLeafCount = 0;
+		this.bourseShootCountTarget = 0;
+		this.bourseShootCountSpawned = 0;
+		this.spurAttachPlan = new int[0][0];
+		this.bourseShootPlans = new AppleShootPlan[0];
+		this.nextSpurAttachIdx = 0;
+		this.mixedBudFlowerAppeared = false;
+		this.mixedBudFlowerAppearanceRank = 0;
+		this.mixedBudFlowerAppearanceAge = Double.NaN;
+		this.mixedBudFlowerAppearanceAgeD = Double.NaN;
+		this.mixedBudFlowerAppearanceAgeGdd = Double.NaN;
+		this.mixedBudBloomDelayAfterAppearance = Double.NaN;
+		this.parentAxisApexID = a.getId();
+		this.lastPhytomerEmissionStep = -1;
+		this.totalNodes = safeChildPlan.totalNodes;
+		this.phytomerNumber = Math.max(1, safeChildPlan.mainNodesPlanned);
+		this.mainNodesPlanned = this.phytomerNumber;
+		this.formedNodes = 0;
+		this.branchPlan = AppleShootPlan.copyPlanMatrix(safeChildPlan.branchPlan);
+		this.nBranches = (this.branchPlan != null) ? this.branchPlan.length : 0;
+		this.nextBranchIdx = 0;
+		this.minBranchGap = MIN_BRANCH_GAP;
+		this.nodeAllocation = AppleShootPlan.copyIntArray(safeChildPlan.nodeAllocation);
+		this.isSpur = safeChildPlan.isSpur;
+		this.potentialLength = safeChildPlan.potentialLength;
+		if (printFlag || debug) {
+			println("[mixed-bud][bourse] parentApex=" + a.getId()
+				+ " attachRank=" + attachRank
+				+ " childPlanIdx=" + childPlanIndex
+				+ " childApex=" + this.getId()
+				+ " " + safeChildPlan.summary()
+				+ " order=" + this.order
+				+ " shootType=" + this.shootType
+				+ " syllepticOrder=" + this.syllepticOrder
+				+ " axis2=" + this.axis2ID
+				+ " axis3=" + this.axis3ID
+				+ " axis4=" + this.axis4ID
+				+ " axis5=" + this.axis5ID
+				+ " axis6=" + this.axis6ID
+				+ " axis7=" + this.axis7ID
+				+ " axis8=" + this.axis8ID
+				+ " axis9=" + this.axis9ID
+				+ " cpn=" + this.cpn);
+		}
+		                  
+		// Apply shoot-growth delay only to the bourse shoot growing out of a floral spur.
+		float sgMean = shootGrowthDelay_mean;
+		this.shootGrowthDelay = sgMean + budBurst_sd * Math.abs(sgMean) * (float) rng.nextGaussian(); 
+		this.markApexBirth();
+		
+		
+	}
+	
+	/**
+	 * Legacy apex-initialization path from a plant base.
+	 *
+	 * <p>This path is retained for compatibility but is not used in the current apple
+	 * dynamic-growth flow.</p>
+	 *
+	 * @param pb plant base
+	 * @param i rank index
+	 * @param k node number
+	 * @param l cordon number
+	 */
+	
+	public void initiate_pb(PlantBase pb, int i, int k, int l)
+	{ 
+		plantNumber = pb.plantNumber;
+		border = pb.border;
+		rank = i+1;
+		nodeNumber = k; 
+		cordonNumber = l;
+		cpn = rank;
+		order = 0;	
+		age = this.rank * plastochron;
+		length = 1e-4;
+		this.markApexBirth();
+	
+	}
+	
+
+	/**
+	 * Decide whether this apex should produce the next phytomer now.
+	 *
+	 * <p>The decision is rank-based and shoot-class-specific: floral rosette leaves,
+	 * early vegetative leaves, and bourse shoots use different cadence values, but
+	 * all paths respect the same same-step re-entry guards and planned-node cap.</p>
+	 *
+	 * @return {@code true} when the next phytomer should be produced now
+	 */
+	boolean shouldProducePhytomer() {
+		final int floralRosetteLeafCount = (this.floralRosetteLeafCount > 0) ? this.floralRosetteLeafCount : 5;
+
+		// 1) cap by planned nodes.
+		// For floral apexes (mixed buds), reuse the same rank scheduler to emit the
+		// rosette leaves before the flower cluster is created, without changing the
+		// inherited bourse-shoot node plan (phytomerNumber).
+		int effectivePhytomerCap = this.phytomerNumber;
+		if (this.shouldProduceFlower == true) {
+			effectivePhytomerCap = Math.max(effectivePhytomerCap, floralRosetteLeafCount);
+		}
+		if (this.rank > effectivePhytomerCap) {
+			return false;
+		}
+		boolean freshAxisThisStep = (this.birthStep == step)
+			&& this.rank <= 1
+			&& (this.sourceBudID > 0L || this.parentAxisApexID > 0L);
+		if (freshAxisThisStep) {
+			resetAppleIdempotencyStatsIfNeeded();
+			phytomerBirthStepBlocks++;
+			if (printFlag || debug) {
+				println("[phytomer-birth-step-block] step=" + step
+					+ " apexId=" + this.getId()
+					+ " shootType=" + this.shootType
+					+ " rank=" + this.rank
+					+ " sourceBudId=" + this.sourceBudID
+					+ " parentAxisApexId=" + this.parentAxisApexID);
+			}
+			return false;
+		}
+		if (!this.canEmitPhytomerThisStep()) {
+			resetAppleIdempotencyStatsIfNeeded();
+			phytomerClaimsBlocked++;
+			if (printFlag || debug) {
+				println("[phytomer-reentry-block] step=" + step
+					+ " apexId=" + this.getId()
+					+ " shootType=" + this.shootType
+					+ " rank=" + this.rank
+					+ " lastEmissionStep=" + this.lastPhytomerEmissionStep);
+			}
+			return false;
+		}
+	
+		// 2) timing check (single rule, all ranks)
+		float delay = (Float.isNaN(this.shootGrowthDelay) || this.shootGrowthDelay < 0f)
+					  ? 0f : this.shootGrowthDelay;
+
+		double nodeCadence = plastochron;
+		boolean isBourseShoot = "bourseShoot".equals(this.shootType);
+		boolean isFloralRosette = this.shouldProduceFlower == true;
+		if (isFloralRosette) {
+			double rosetteCadence = rosettePhyllochronFactor * phyllochron;
+			if (!(Double.isNaN(rosetteCadence) || Double.isInfinite(rosetteCadence) || rosetteCadence <= 0.0)) {
+				nodeCadence = rosetteCadence;
+			}
+		} else if (!isBourseShoot && this.rank <= earlyVegetativeLeafCount) {
+			double fastCadence = rosettePhyllochronFactor * phyllochron;
+			if (!(Double.isNaN(fastCadence) || Double.isInfinite(fastCadence) || fastCadence <= 0.0)) {
+				nodeCadence = fastCadence;
+			}
+		}
+		nodeCadence = Math.max(0.05, nodeCadence);
+
+		boolean due = (this.age - delay) >= (this.rank * nodeCadence);
+		if (!due) return false;
+		if (!reservePhytomerEmissionThisStep(this)) {
+			if (printFlag || debug) {
+				println("[phytomer-reentry-block] step=" + step
+					+ " apexId=" + this.getId()
+					+ " shootType=" + this.shootType
+					+ " rank=" + this.rank
+					+ " lastEmissionStep=" + this.lastPhytomerEmissionStep
+					+ " reason=alreadyClaimedThisStep");
+			}
+			return false;
+		}
+	
+		if (printFlag) println("new shoot phytomer");
+		return true;
+	}
+
+	
+	/**
+	 * Pop the planned branch length for the just-created main node.
+	 *
+	 * <p>The develop-stage vegetative rule calls this after creating the internode
+	 * but before incrementing the apex rank. That keeps the branch cursor aligned
+	 * with the 1-based rank of the node that was just formed.</p>
+	 *
+	 * @return planned branch length for the current node, or {@code 0} when none is scheduled
+	 */
+	public int popPlannedBranchLenAtCurrentNode() {
+		if (this.branchPlan == null) return 0;
+		if (this.nextBranchIdx >= this.nBranches) return 0;
+	
+		int nodeIdx = this.rank;
+	
+		// Advance past any stale entries (shouldn’t happen, but safe)
+		while (this.nextBranchIdx < this.nBranches &&
+			   this.branchPlan[this.nextBranchIdx][0] < nodeIdx) {
+			this.nextBranchIdx++;
+		}
+	
+		// If the next planned attachment matches this node, consume it
+		if (this.nextBranchIdx < this.nBranches &&
+			this.branchPlan[this.nextBranchIdx][0] == nodeIdx) {
+			int len = this.branchPlan[this.nextBranchIdx][1];
+			if (len < 1) len = 1; // guard
+			this.nextBranchIdx++; // consume the plan entry
+			return len;
+		}
+	
+		return 0;
+	}
+
+	/**
+	 * Pop the next planned mixed-bud bourse child index when the rosette rank matches.
+	 *
+	 * @param rosetteRank1 current 1-based rosette rank
+	 * @return child-plan index, or {@code -1} when no bourse child is scheduled
+	 */
+	public int popPlannedBoursePlanIndexAtRosetteRank(int rosetteRank1) {
+		if (this.spurAttachPlan == null) return -1;
+		if (this.nextSpurAttachIdx >= this.spurAttachPlan.length) return -1;
+		if (rosetteRank1 < 1) rosetteRank1 = 1;
+
+		while (this.nextSpurAttachIdx < this.spurAttachPlan.length &&
+			   this.spurAttachPlan[this.nextSpurAttachIdx][0] < rosetteRank1) {
+			if (printFlag) {
+				println("[mixed-bud][bourse] skip stale plan parentApex=" + this.getId()
+					+ " idx=" + this.nextSpurAttachIdx
+					+ " attachRank=" + this.spurAttachPlan[this.nextSpurAttachIdx][0]
+					+ " childPlanIdx=" + this.spurAttachPlan[this.nextSpurAttachIdx][1]
+					+ " currentRosetteRank=" + rosetteRank1);
+			}
+			this.nextSpurAttachIdx++;
+		}
+
+		if (this.nextSpurAttachIdx < this.spurAttachPlan.length &&
+			this.spurAttachPlan[this.nextSpurAttachIdx][0] == rosetteRank1) {
+			int childPlanIndex = this.spurAttachPlan[this.nextSpurAttachIdx][1];
+			this.nextSpurAttachIdx++;
+			return childPlanIndex;
+		}
+		return -1;
+	}
+
+	/**
+	 * Copy out one planned bourse shoot for the requested child-plan index.
+	 *
+	 * @param childPlanIndex index inside {@link #bourseShootPlans}
+	 * @return copied plan, or {@code null} when no plan exists
+	 */
+	public AppleShootPlan getBourseShootPlan(int childPlanIndex) {
+		if (childPlanIndex < 0) return null;
+		if (this.bourseShootPlans == null) return null;
+		if (childPlanIndex >= this.bourseShootPlans.length) return null;
+		AppleShootPlan childShootPlan = this.bourseShootPlans[childPlanIndex];
+		return (childShootPlan != null) ? childShootPlan.copy() : null;
+	}
+
+	
+	/**
+	 * Get the branching angle used for a newly emitted phytomer.
+	 *
+	 * @return random branching angle in degrees
+	 */
+	public double getAngle()
+	{
+		// this needs to be coupled to branchType
+		return irandom(60, 80);
+	}
+	
+	/**
+	 * Advance the apex rank and cpn after phytomer creation.
+	 */
+	public void increment()
+	{
+		rank = rank +1;
+		cpn = cpn + 1;
+	}
+	/**
+	 * Update the apex water potential from the nearest parent internode when available.
+	 */
+	public void updateWaterPotential()
+	{
+		if(parent[0] == null) { this.parent[0] = first((*this (<--)+ Internode*));}
+		
+		if(parent[0] == null) {
+			this.waterPotential = inputWaterPotential;
+		} else {
+			this.waterPotential = parent[0].waterPotential;
+			this.order = parent[0].order;
+		}
+	}
+	
+} ==> Sphere(this.length).(setShader(RED));

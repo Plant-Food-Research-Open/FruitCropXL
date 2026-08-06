@@ -1,0 +1,1027 @@
+import static globalParameters.*;
+import static plantParameters.*;
+import static modelOptions.*;
+import static lightInterception.*;
+import static initialConditions.*;
+import static absOrgan.*;
+import static leaf.*;
+import static shoot.*;
+import static environment.*;
+import static extraTools.*;
+import static plantBase.*;
+import static carbonTransport.*;
+import static shootPositioning.*;
+import static structuralVariation.*;
+import static archReader.*;
+import static rootSystem.*;
+import static fineRoot.*;
+import static structuralRoot.*;
+import static soil.*;
+import static initiationBase.*;
+import static fruitBase.*;
+import static budBase.*;
+import static fieldBase.*;
+import static shootBase.*;
+import static main.*;
+
+/**
+ * Standard coded initiation service for FruitCropXL.
+ *
+ * <p>This class builds a regular field/orchard/vineyard scene directly from the
+ * current JSON-controlled runtime options. It creates the field scaffold, optional
+ * tile grid, plant identifiers, plant bases, root/soil branches, and a
+ * {@link StandardCanopyScaffold} marker for each plant. The actual above-ground
+ * canopy architecture is then emitted in {@link #initArchitecture()} according to
+ * {@code trainingSystem}.</p>
+ *
+ * <p>Important index convention used throughout the training-system blocks:</p>
+ * <ul>
+ *   <li>{@code i}: plant number within the generated field.</li>
+ *   <li>{@code l}: cordon/layer/arm identifier, depending on the training system.</li>
+ *   <li>{@code k}: shoot or cane position along the current cordon/layer.</li>
+ *   <li>{@code j}: phytomer rank along the current annual shoot.</li>
+ * </ul>
+ *
+ * <p>The code intentionally mixes Java-style blocks with XL/RGG production syntax.
+ * Java blocks initialise services and assign object state, while turtle commands
+ * such as {@code RH}, {@code RU}, {@code RL}, {@code RV}, {@code RG},
+ * {@code Translate}, and {@code M} control local orientation and geometry.</p>
+ */
+public class InitiationStandard extends InitiationService {
+    // Preserve the UID already stored in Scripts/graph.xml so GroIMP does not
+    // reset the saved graph and drop project shader/object links after class edits.
+    private static final long serialVersionUID = -6873756884043871125L;
+
+    /**
+     * Legacy flag for one-layer versus two-layer canopy logic.
+     *
+     * <p>The current standard-initiation code does not actively branch on this
+     * field, but it is kept to avoid changing the serialized class layout and to
+     * preserve compatibility with older graph/project files.</p>
+     */
+    private boolean dLayer;
+    /**
+     * Controls whether a dormant bud is attached directly to the cordon/trunk.
+     *
+     * <p>When {@code ENDING_PHYTOMER_NUM == 0}, the standard initiation creates
+     * permanent structure only and places buds on cordons so that later dynamic
+     * development can create annual shoots. When {@code ENDING_PHYTOMER_NUM > 0},
+     * the annual shoot and phytomers are built immediately, so the direct cordon
+     * bud is skipped.</p>
+     */
+    private boolean shouldInitiateBd = ENDING_PHYTOMER_NUM == 0 ? true : false;
+
+    /**
+     * Guard against repeated expansion of {@link StandardCanopyScaffold} markers.
+     *
+     * <p>Several runtime paths can call {@link #initArchitecture()}. This flag
+     * prevents same-step re-entry from duplicating trunks, cordons, shoots,
+     * leaves, fruit, and apices under the same {@code PlantBase}.</p>
+     */
+    private boolean canopyInitiated = false;
+
+    /**
+     * Build the field-level graph and place one {@code StandardCanopyScaffold}
+     * marker under each {@code PlantBase}.
+     *
+     * <p>This method deliberately separates field/root/soil construction from
+     * canopy construction. The field pass creates plants, roots, soil layers,
+     * optional tile grids, and the scaffold markers. The canopy pass in
+     * {@link #initArchitecture()} later replaces each scaffold with the selected
+     * training-system topology.</p>
+     */
+    public void initiate() {[
+        {
+            continueRunning = true;
+            focalPlants = 0;
+            shouldInitiateBd =ENDING_PHYTOMER_NUM == 0 ? true : false;
+            canopyInitiated = false;
+            // The field graph is about to be rebuilt. Resetting this guard allows
+            // initArchitecture() to expand each StandardCanopyScaffold exactly once.
+		
+        }
+        
+        Axiom ==>
+        temp
+		if(isRayTracingLightMode() && useDirectRadiation) (
+        // Initialize direct light settings 
+           [dir:DirectLight]            
+           { dir.update();}  
+        )
+	        if(isRayTracingLightMode() && useDiffuseRadiation) (
+        // Initialize diffuse light settings 
+           [dif:DiffuseLight]            
+           { dif.update();
+           	 leafAngleOptimization.initRadiationLocations();
+           }  
+        )
+        // Rotate the whole generated field into the configured row orientation.
+        // All row, strip, plant, and canopy turtle operations below inherit this frame.
+        RH(rowOrientation)
+        //for this particular situation, where we stack rows above each other
+        {println("useShadingFactor: " + useShadingFactor);}
+        // FieldBase is the reportable orchard/vineyard anchor. PlantBase nodes are
+        // emitted below it; cloneFieldBase() may later duplicate this reportable field
+        // for edge-effect-free radiation calculations.
+        FieldBase
+        {double tileWidth = plantDistance/nrTiles;}
+        /** measure stick (to compare ..) *************************************/
+            [
+                //Translate(-(nrTiles+1)*tileWidth,-tileWidth,0) 
+                //measureStick(10, 0.1) // (number of steps, step length (in m))
+            ] 
+                
+        [
+            {
+                int i = 0;
+            }
+            // Build strips first, then rows within strips, then plant positions within rows.
+            // This keeps plant numbering and border metadata consistent with the planting
+            // geometry used in output aggregation.
+            for (int strip=1; strip<=nrStrips; strip++) (
+            
+            //setup of a strip
+            for (int row=1; row<=nrRows; row++) (
+
+                //setup of a row
+                [
+                    {borderX = 0;}
+                    for (int pos=1; pos<=nrPlants; pos++) (
+                        //if one wants to reduce the overlap between rows
+                        //if(pos == 1) (Translate(row%2 == 0 ? 0.5*plantDistance : 0,0,0))
+
+                    [
+                            {i++;}
+                        
+                        // Optional plant-local soil/tile grid. Tiles are associated with
+                        // the current plant index and later used for field/interception or
+                        // soil-surface style outputs where enabled.
+                        if (associatePlantsToTiles == true) (
+                            [
+                                Translate(-0.5*(nrTiles-1)*tileWidth,0,0)
+                                {int tn = 0;} // Tile number tracker
+                                for (1:nrTiles) (
+                                    [
+                                        for (1:nrTiles) (
+                                            t:Tile
+                                            Translate(plantDistance/nrTiles,0,0)
+                                            {
+                                                tn++;
+                                            	t.initiate(i, row, pos, strip, tn);
+                                            }
+                                        )
+                                    ]
+                                Translate(0,rowDistance/nrTiles,0)
+                                )
+                            ]   
+                            )//end of associatePlantsToTiles
+    /* 					 if (associatePlantsToTiles == false) (
+                            [
+                                //M(-0.0011) Box(0.001,plantDistance * (nrPlants-2), rowDistance * (nrRows-2) + (nrStrips-1)*stripDistance).(setShader(BLACK))
+                                //t:TestTile {t.initiate();}
+                            ] 
+                            )
+                            else (
+                            [
+                                Translate(-0.5*(nrTiles-1)*tileWidth,0,0)
+                                for (1:nrTiles) (
+                                    [
+                                        for (1:nrTiles) (
+                                            t:Tile
+                                            Translate(plantDistance/nrTiles,0,0)
+                                            {
+                                                t.initiate(i, row, pos, strip);
+                                            }
+                                        )
+                                    ]
+                                Translate(0,rowDistance/nrTiles,0)
+                                )
+                            ] 
+                            ) */ 
+                            // Add visual posts for dynamic fruiting-cutting scenarios that
+                            // use shoot-positioning. This is purely structural/visual support;
+                            // the PlantBase and biological organs are emitted below.
+                            if(trainingSystem == 0 && useStaticArc == false && useShootPositioning == true) (
+                                if (pos == 1) (
+                                    [Translate(-plantDistance/2, 0, 0) Post]
+                                )
+                                if (pos == nrPlants) (
+                                    [Translate(plantDistance/2, 0, 0) Post]
+                                )
+                                if (pos != nrPlants && pos % 4 == 0) (
+                                    [Translate(plantDistance/2, 0, 0) Post]
+                                )
+                            )
+
+                            // PlantIdentifier stores the field coordinates and species label.
+                            // PlantBase is the whole-plant anchor. RootBase is created in a
+                            // downward branch by rotating the turtle 180 degrees.
+                            pi:PlantIdentifier pb:PlantBase [RU(180) rb:RootBase]
+                            {
+                                pi.initiate(i, row, pos, strip, species);
+                                pb.initiate(i, row, pos, strip, pi);
+                                rb.initiate_pb(pb,numofSoilLayers);
+
+                                pb.addRootBase(rb);
+                                if (pb.border == false) {focalPlants++;}
+                            }
+
+                            // Create one soil layer, one structural root, and one fine-root
+                            // branch per configured soil layer. RootBase keeps explicit child
+                            // references for layer-specific water/nutrient uptake calculations.
+                            [
+                                RU(180) for (int r = 0; r < numofSoilLayers; r++) (
+                                    sl:Soil {sl.initiate(r, pb);}
+                                    [ M(-sl.length) sr:StructuralRoot [fr:FineRoot]]
+
+                                    {
+                                        fr.initiate_pb(r, pb);
+                                        sr.initiate_pb(r, pb);
+                                        rb.addChildSoilRoot(r, sl, fr, sr);
+                                    }
+                                )
+                            ]
+                            // Placeholder node consumed by initArchitecture(). Keeping the
+                            // scaffold separate from field construction avoids duplicating the
+                            // whole field when only canopy topology needs to be regenerated.
+                            StandardCanopyScaffold
+    /* ########  bracket for the row #######################*/	
+    
+    
+
+    ]
+    /* #############################################################*/					
+                        if (pos != nrPlants && pos % 4 == 0) (
+                                        Translate(plantDistance, 0, 0)
+                                    )
+                        else (Translate(plantDistance,0,0) )
+                        
+                        {if (pos != nrPlants) {borderX += plantDistance;}}
+                        )
+                ]
+                
+                if (row != nrRows) (
+                    Translate(0,rowDistance,0)
+            
+                    {borderY += rowDistance;}
+                )
+            )
+            Translate(0,stripDistance,0)
+            //for testing purpose
+           // {WOOD_LENGTH = 0.95;}
+            
+            {if (strip != nrStrips) {borderY += stripDistance;}}
+        )	
+        ]	
+
+        {
+            totalArea = rowDistance * plantDistance * totalPlants;
+            focalArea = rowDistance * plantDistance * focalPlants;
+            dens = 1 / (rowDistance * plantDistance);
+            // Field-level metadata are derived after all strips/rows/plants are known.
+            initializeReportableFieldMetadata();
+            //Boolean.parseBoolean(ModelArgs.headless) == true && 
+	            if (isRayTracingLightMode() && useShadingFactor == false && (cloneX > 0 || cloneY > 0))
+            {
+                cloneFieldBase();
+                println("cloneFieldBase succeed");
+            }
+        }
+        
+    ; //end of Axiom
+
+    ]}
+
+    /**
+	 * Clone the already-built reportable {@code FieldBase} after Axiom creation.
+	 *
+	 * <p>The source field is first built once under the configured {@code rowOrientation}.
+	 * This method then emits {@code CopyFieldBase} nodes around it for neighbour/edge
+	 * radiation calculations. The clone loop is intentionally outside {@link #initiate()}
+	 * so it does not recursively clone clone-fields.</p>
+	 */
+	private void cloneFieldBase() {[
+		Axiom ==>
+		{
+			long fieldIdCutoff = getMaxFieldBaseId();
+			int cloneLayersX = Math.max(0, cloneX);
+			int cloneLayersY = Math.max(0, cloneY);
+		}
+		for (int y = -cloneLayersY; y <= cloneLayersY; y++) (
+			for (int x = -cloneLayersX; x <= cloneLayersX; x++) (
+				if (x != 0 || y != 0) (
+					{
+						float posY = y * rowDistance * nrRows;
+						float posX = x * plantDistance * nrPlants;
+					}
+					// The source field is already built under RH(rowOrientation) in the Axiom.
+					// Reapplying that rotation here rotates each copied field a second time.
+					[Translate(posX, posY, 0) CopyFieldBase]
+				)
+			)
+		)
+		{
+            if (shouldSkipCloneFinalizationForDebug()) {
+                println("[cloneFieldBase] Skipping finalizeCloneFieldCopies for GPU grapevine diagnostic.");
+            } else {
+			    finalizeCloneFieldCopies(fieldIdCutoff);
+            }
+		}
+		;
+	]}
+
+    /**
+     * Temporary diagnostic guard for isolating GPU flux-light clone-field hangs.
+     *
+     * <p>Returning {@code true} skips final clone materialisation/finalisation while
+     * preserving the rest of the initiation pathway. Keep this guard narrow so normal
+     * scenarios still use complete clone-field metadata.</p>
+     */
+    private boolean shouldSkipCloneFinalizationForDebug() {
+        // Diagnostic path for the full-clone GPU grapevine hang:
+        // isolate clone-copy materialization from FieldBase finalization.
+	        return isGpuLightMode()
+            && useShadingFactor == false
+            && "grapevine".equals(species);
+    }
+
+    /**
+     * Replace each {@code StandardCanopyScaffold} with the selected canopy topology.
+     *
+     * <p>The training-system switch controls only the above-ground structure emitted
+     * below each already-created {@code PlantBase}. Each block should initialise the
+     * same biological identifiers ({@code plantNumber}, {@code rank},
+     * {@code shootNumber}, {@code cordonNumber}) so downstream physiology, outputs,
+     * and development services can treat the generated organs consistently.</p>
+     *
+     * <p>General construction pattern inside each training system:</p>
+     * <ol>
+     *   <li>Initialise trunk/permanent wood.</li>
+     *   <li>Loop over cordons/layers ({@code l}) and shoot positions ({@code k}).</li>
+     *   <li>Create cordons/canes and optional dormant buds if no annual shoot exists.</li>
+     *   <li>If {@code ENDING_PHYTOMER_NUM > 0}, emit a {@code ShootBase}, internodes,
+     *       buds, petioles, leaves, optional fruit, and the terminal apex.</li>
+     * </ol>
+     */
+    public void initArchitecture() {
+        if (canopyInitiated == true) {
+            // Prevent repeated derive/init calls from expanding the same scaffold twice.
+            return;
+        }
+        canopyInitiated = true;
+        [
+            sc:StandardCanopyScaffold ==>
+            
+            {
+                // Find the PlantBase that owns this scaffold marker. The reverse-path
+                // query walks from the scaffold back to the current plant anchor.
+                PlantBase pb = first((* sc (<--)+ parentPlantQuery:PlantBase *));
+                int i = pb.plantNumber;
+            }
+            /**
+             * Training system 0: fruiting-cutting / single-shoot system.
+             *
+             * <p>Creates one trunk, one {@code ShootBase}, one short cordon-like basal
+             * axis, and a single annual shoot. This is the simplest static topology and
+             * is useful for calibration of leaf gas exchange, hydraulics, carbon status,
+             * and berry/fruit modules without field-scale canopy complexity.</p>
+             */
+            /* ############################# FRUITING CUTTING SYSTEM ################################*/
+            if(trainingSystem == 0) (
+                // Permanent trunk anchor for the single-shoot plant.
+                w:Trunk {w.initiate_pb(pb);}
+                [
+                    // ShootBase stores shoot-level metadata and helper functions used
+                    // by organs emitted along this single annual axis.
+                    sb:ShootBase
+                    {sb.initiate(i, 0, 0);}
+                    // Basal cordon-like element before the annual phytomer sequence.
+                    RV(-2) i0:Cordon   {
+                        i0.initiate_pb(pb,1, 1);
+                    }
+                    for(int j:(1:ENDING_PHYTOMER_NUM)) (
+                        {
+                            // Create a fresh bud and fruit template for this phytomer.
+                            // Reusing the same service object across phytomers can cause
+                            // aliasing/circular-reference problems in the generated graph.
+                            BudService bud = new BudCreator(species).createBud();
+                            FruitService fruitTemplate = main.FRUIT_CREATOR.createFruit();
+                        }
+                        // Pre-leaf ranks: emit internodes and optional early fruit only.
+                        if(j < STARTING_LEAF_NUMBER) (
+                            RV(-3) RH(phyllotaxis) itn:Internode
+                            [if(j == 2) (RV(0.71) b2:fruitTemplate {b2.initiate_pb(pb, j,0,0); })]
+                            {itn.initiate_pb(pb, j, 0, 0); }
+                        )
+                        // Leaf-bearing ranks: emit internode, lateral bud, petiole,
+                        // midrib, and polygonal leaflets that make up the full leaf shape.
+                        if(j >= STARTING_LEAF_NUMBER && j <= ENDING_LEAF_NUMBER ) (
+                            RV(-2) RH(phyllotaxis) RL(random(0,5)) itn:Internode {itn.initiate_pb(pb, j,0,0);}
+                            [
+                                bd:bud
+                                {
+                                    bd.initiate(itn, 1);
+                                }
+                            ]
+                            [
+                                RU(-45) AdjustLU pt:Petiole {pt.initiate_pb(pb, j, 0, 0); }
+                                RH(180)
+                                jm:JMidrib(JMidrib.calcLeafDeclination(pt.rank, pt.order, 0.1))
+                                for (int m = 0; m < leafShape.polyleaf[0].length; m++) (
+                                    [lf:Leaf]
+                                    {
+                                        lf.initiate_pb(pb, pt.rank, pt.nodeNumber, pt.cordonNumber);
+                                        lf.order = pt.order;
+                                        lf.fid = m;
+                                        lf.area = leafShape.calcLeafPolygonArea(lf.length, lf.width, lf.fid);
+                                        jm.initiate(lf);
+                                    }
+                                )
+                            ]
+                            [if(j == 2) (RV(0.71) b2:fruitTemplate {b2.initiate_pb(pb, j,0,0); })]
+                            [if(j == 4 && bunchNumPerShoot>1) (RV(0.71) b:fruitTemplate  {b.initiate_pb(pb, j,0,0); })]
+                        )
+                    )
+                    {
+                        BudService bud = new BudCreator(species).createBud();
+                        ApexService apex = bud.createApex();
+                    }
+                    if(ENDING_PHYTOMER_NUM > 0) (
+                        ap:apex {ap.initiate_pb(pb,ENDING_PHYTOMER_NUM, 0, 0);}
+                    )
+                    if(ENDING_PHYTOMER_NUM == 0) (bd:bud {bd.initiate(i0,2);})
+                ]
+            ) //bracket for the fruit cutting system
+            
+            /**
+             * Training system 1: cane-pruning system.
+             *
+             * <p>Creates multiple cordons/canes controlled by {@code CORDEN_NUM} and
+             * {@code SHOOT_NUM}. Special cases for {@code l == 3 || l == 4} adjust the
+             * first and fifth shoots to mimic angled positions near the vine head. When
+             * {@code ENDING_PHYTOMER_NUM == 0}, buds are attached to cordons for later
+             * dynamic development; otherwise annual shoots are generated immediately.</p>
+             */
+            /* ############################# CANE PRUNNING SYSTEM ################################*/
+            if(trainingSystem == 1) (
+                w:Trunk {w.initiate_pb(pb);}
+                // Loop over cordons/canes. The sign of Math.pow(-1,l) alternates
+                // left/right orientation around the trunk.
+                for (int l:(1 : CORDEN_NUM)) ([ RU( Math.pow(-1,l) * 90)
+                    // Loop over shoot positions along the current cordon/cane.
+                    for(int k:(1:SHOOT_NUM)) (
+                        {
+                            BudService bud = new BudCreator(species).createBud();
+                        }
+                        // Lower/inner cane start: angle the first shoot away from the head
+                        // to avoid all shoots occupying the same initial turtle frame.
+                        if((l == 3 | l == 4) & k == 1) (
+                            RL(45) RU(-Math.pow(-1,l) * 30)
+                            cor : Cordon {cor.initiate_pb(pb,k, l);}
+                            if(ENDING_PHYTOMER_NUM == 0) ([b:bud] {b.initiate(cor,2); println("new syllepticOrder" + b.syllepticOrder);})
+                        )
+                        if((l == 3 | l == 4) &(k == 2 | k == 3 | k == 4)) (
+                            cor : Cordon {cor.initiate_pb(pb,k, l);}
+                            if(ENDING_PHYTOMER_NUM == 0) ([b:bud] {b.initiate(cor,2); println("new syllepticOrder" + b.syllepticOrder);})
+                        )
+                        // Lower/inner cane end: mirror the opening angle used for k == 1.
+                        if((l == 3 | l == 4) & k == 5) (
+                            RU(Math.pow(-1,l) * 30) RL(-45)
+                            cor : Cordon {cor.initiate_pb(pb,k, l);}
+                            if(ENDING_PHYTOMER_NUM == 0) ([b:bud] {b.initiate(cor,2);println("new syllepticOrder" + b.syllepticOrder);})
+                        )
+                        if((l == 1 | l == 2) & k == 1) (
+                            cor : Cordon {cor.initiate_pb(pb,k, l);}
+                            if(ENDING_PHYTOMER_NUM == 0) ([b:bud] {b.initiate(cor,2); println("new syllepticOrder" + b.syllepticOrder);})
+                        )
+                        else if(!((l == 3 | l == 4) & (k > 1 & k <= 5))) (
+                            cor : Cordon {cor.initiate_pb(pb,k, l);}
+                            if(ENDING_PHYTOMER_NUM == 0) ([b:bud] {b.initiate(cor,2);})
+                        )
+
+                        {int fruitPosition = random_int(2, 6);}
+
+                        if(ENDING_PHYTOMER_NUM > 0) (
+                            [
+                                sb:ShootBase
+                                {sb.initiate(i, l, k);}
+                                // Set annual-shoot insertion angle from the cane and add a
+                                // small alternating roll so neighbouring shoots separate.
+                                RU(Math.pow(-1,l) * -random(85,92)) RL(Math.pow(-1,k) *  random(1,30))
+                                for(int j:(1:ENDING_PHYTOMER_NUM)) (
+                                    {
+                                        BudService bud1 = new BudCreator(species).createBud();
+                                        FruitService fruitTemplate = main.FRUIT_CREATOR.createFruit();
+                                    }
+
+                                    if(j < STARTING_LEAF_NUMBER) (
+                                        if((l == 3 | l == 4) & j <= 4) (RV(-1)) else (RV(-0.05))
+                                        itn:Internode  jt:Joint [if(fruitPosition == j) (b:fruitTemplate  {b.initiate_pb(pb,j, k, l); })]
+                                        {itn.initiate_pb(pb, j, k, l);  }
+                                    )
+                                    if(j >= STARTING_LEAF_NUMBER && j <= ENDING_LEAF_NUMBER ) (
+                                        RV(-0.05) RL(random(-5,5)) RH(phyllotaxis)
+                                        itn:Internode  jt:Joint [if(fruitPosition == j) (RH(phyllotaxis) be:fruitTemplate  { be.initiate_pb(pb, j, k, l); })]
+                                        [bd:bud1 {bd.initiate(itn, 1); itn.initiate_pb(pb, j,k,l);  }]
+                                        [RU(-45) AdjustLU
+                                        pt:Petiole
+                                        {pt.initiate_pb(pb, j, k, l); }
+                                        RH(180)
+                                        jm:JMidrib(JMidrib.calcLeafDeclination(pt.rank, pt.order, 0.1))
+                                        for (int m = 0; m < leafShape.polyleaf[0].length; m++) (
+                                            [lf:Leaf]
+                                            {
+                                                lf.initiate_pb(pb, j, k, l);
+                                                lf.order = pt.order;
+                                                lf.fid = m;
+                                                lf.area = leafShape.calcLeafPolygonArea(lf.length, lf.width, lf.fid);
+                                                jm.initiate(lf);
+                                            }
+                                        )]
+                                    )
+                                    if(j > ENDING_LEAF_NUMBER && j <= ENDING_PHYTOMER_NUM ) (
+                                        RV(-0.05)
+                                        itn:Internode  jt:Joint [b:bud]
+                                        {itn.initiate_pb(pb, j, k, l); b.initiate(itn, 1);}
+                                    )
+                                )
+                                if(ENDING_PHYTOMER_NUM > 0) (
+                                    {
+                                        // Terminal apex is created from the same bud service family
+                                    // so species-specific apex implementation stays consistent.
+                                    ApexService apex = bud.createApex();
+                                    }
+                                    ap:apex {ap.initiate_pb(pb,ENDING_PHYTOMER_NUM, k, l);}
+                                )
+                            ]
+                        )
+                    )
+                ])
+            )
+            /**
+             * Training system 2: Scott Henry split-canopy system.
+             *
+             * <p>Creates four canopy layers/cordon sets. The first two layers behave as
+             * upper canes/cordons, while {@code l == 3 || l == 4} represent the lower
+             * downward-oriented Scott Henry layer. The first three shoots on the lower
+             * layers are angled explicitly to spread shoots around the lower fruiting
+             * zone.</p>
+             *
+             * <p>For lower layers, {@code RG} is applied immediately after
+             * {@code ShootBase} creation to orient the following annual shoot downward.
+             * Be careful when adding {@code RU(180)} or negative {@code RV} values here:
+             * those can flip or bend the local growth direction back upward.</p>
+             */
+            /* ############################# SCOTT HENRY SYSTEM ################################*/
+            if(trainingSystem == 2) (
+                w:Trunk {w.initiate_pb(pb);}
+                // Scott Henry uses exactly four layers: two upper layers and two lower
+                // downward-trained layers. The alternating RU sign separates sides.
+                for (int l:(1 : 4)) ([ RU( Math.pow(-1,l) * 90)
+                    for(int k:(1:SHOOT_NUM)) (
+                        {
+                            BudService bud = new BudCreator(species).createBud();
+                        }
+                        if((l == 3 | l == 4) & k == 1) (RU(-Math.pow(-1,l) * 25) RL(20)
+                            cor : Cordon {cor.initiate_pb(pb,k, l);}
+                            if(ENDING_PHYTOMER_NUM == 0) ([b:bud] {b.initiate(cor,2);})
+                        )
+                        if((l == 3 | l == 4) & k == 2) (
+                            cor : Cordon {cor.initiate_pb(pb,k, l);}
+                            if(ENDING_PHYTOMER_NUM == 0) ([b:bud] {b.initiate(cor,2);})
+                        )
+                        if((l == 3 | l == 4) & k == 3) ( RU(Math.pow(-1,l) * 25) RL(-20)
+                            cor : Cordon {cor.initiate_pb(pb,k, l);}
+                            if(ENDING_PHYTOMER_NUM == 0) ([b:bud] {b.initiate(cor,2);})
+                        )
+                        else if(!((l == 3 | l == 4) & (k <= 3))) (
+                            cor : Cordon {cor.initiate_pb(pb,k, l);}
+                            if(ENDING_PHYTOMER_NUM == 0) ([b:bud] {b.initiate(cor,2);})
+                        )
+
+                        {int fruitPosition = random_int(1, 6);}
+
+                        if(ENDING_PHYTOMER_NUM > 0) (
+                            [sb:ShootBase
+                            {sb.initiate(i, l, k);}
+                           // Lower Scott Henry layers should initiate downward. RG sets the
+                           // local growth direction downward; do not follow it with RU(180).
+                           if(l == 3 || l == 4) (
+								RG
+							)
+
+                            for(int j:(1:ENDING_PHYTOMER_NUM)) (
+                                {
+                                    BudService bud1 = new BudCreator(species).createBud();
+                                    FruitService fruitTemplate = main.FRUIT_CREATOR.createFruit();
+                                }
+
+                                if(j < STARTING_LEAF_NUMBER) (
+                                    // Lower Scott Henry basal phytomers use positive RV to keep
+                                    // the shoot bending downward after the initial RG command.
+                                    if((l == 3 | l == 4) & j <= 4) (RV(0.5)) else (RV(-3))
+                                    itn:Internode  [if(fruitPosition == j) (b:fruitTemplate  {b.initiate_pb(pb,j, k, l); })]
+                                    {itn.initiate_pb(pb, j, k, l); }
+                                )
+                                if(j >= STARTING_LEAF_NUMBER && j <= ENDING_LEAF_NUMBER ) (
+                                    RV(-0.05) RL(random(-5,5))  RH(phyllotaxis) itn:Internode  [if(fruitPosition == j) (be:fruitTemplate  { be.initiate_pb(pb, j, k, l); })]
+                                    [bd:bud1 {bd.initiate(itn, 1); itn.initiate_pb(pb, j,k,l); }]
+                                    [RU(-45) AdjustLU  pt:Petiole
+                                    {pt.initiate_pb(pb, j, k, l); }
+                                    RH(180)
+                                    jm:JMidrib(JMidrib.calcLeafDeclination(pt.rank, pt.order, 0.1))
+                                    for (int m = 0; m < leafShape.polyleaf[0].length; m++) (
+                                        [lf:Leaf]
+                                        {
+                                            lf.initiate_pb(pb, j, k, l);
+                                            lf.order = pt.order;
+                                            lf.fid = m;
+                                            lf.area = leafShape.calcLeafPolygonArea(lf.length, lf.width, lf.fid);
+                                            jm.initiate(lf);
+                                        }
+                                    )]
+                                )
+                                if(j > ENDING_LEAF_NUMBER && j <= ENDING_PHYTOMER_NUM ) (
+                                    RV(-0.05) itn:Internode
+                                    [bd:bud1 {bd.initiate(itn, 1); itn.initiate_pb(pb, j,k,l); }]
+                                )
+                            )
+                            if(ENDING_PHYTOMER_NUM > 0) (
+                                {
+                                    // Terminal apex is created from the same bud service family
+                                    // so species-specific apex implementation stays consistent.
+                                    ApexService apex = bud.createApex();
+                                }
+                                ap:apex {ap.initiate_pb(pb,ENDING_PHYTOMER_NUM, k, l);}
+                            )
+                            ]
+                        )
+                    )
+                ])
+            )
+            /**
+             * Training system 3: horizontal pergola / wide-spreading system.
+             *
+             * <p>Creates cordons with strongly lateral annual shoots. Each shoot begins
+             * with a basal internode and bud before the normal phytomer sequence. This
+             * system is useful for broad horizontal canopies where shoots are spread away
+             * from the cordon axis.</p>
+             */
+            if(trainingSystem == 3) (
+                w:Trunk {w.initiate_pb(pb);}
+                for (int l:(1 : CORDEN_NUM)) ([ RU( Math.pow(-1,l) * 90)
+                    for(int k:(1:SHOOT_NUM)) (
+                        // Permanent cordon node for this shoot position. Fruit position is
+                        // selected once per shoot so only one fruit is emitted by default.
+                        cor : Cordon
+                        {cor.initiate_pb(pb,k, l); int fruitPosition = random_int(1, 6); }
+                        { BudService bud = new BudCreator(species).createBud(); }
+                        [
+                            sb:ShootBase {sb.initiate(i, l, k);}
+                            // Strong lateral roll creates the pergola-style horizontal shoot
+                            // orientation. The basal internode carries a bud of order 2.
+                            RL(Math.pow(-1,k) * random(70,90)) i0:Internode  [b:bud]
+                            {i0.initiate_pb(pb,0,k,l);  b.initiate(i0,2);}
+
+                            for(int j:(1:ENDING_PHYTOMER_NUM)) (
+                                {
+                                    BudService bud1 = new BudCreator(species).createBud();
+                                    FruitService fruitTemplate = main.FRUIT_CREATOR.createFruit();
+                                }
+
+                                if(j < STARTING_LEAF_NUMBER) (
+                                    RL(Math.pow(-1,k) * 3) RH(phyllotaxis)
+                                    itn:Internode  [if(fruitPosition == j) (be:fruitTemplate  {be.initiate_pb(pb, j, k, l); })]
+                                    {itn.initiate_pb(pb, j, k, l); }
+                                )
+                                if(j >= STARTING_LEAF_NUMBER && j <= ENDING_LEAF_NUMBER ) (
+                                    RV(-0.05) RL(random(-5,5)) RH(phyllotaxis) itn:Internode  [if(fruitPosition == j) (be:fruitTemplate  {be.initiate_pb(pb, j, k, l); })]
+                                    [bd:bud1 {bd.initiate(itn, 1); itn.initiate_pb(pb, j,k,l); }]
+                                    [RU(-45) AdjustLU  pt:Petiole
+                                    {pt.initiate_pb(pb, j, k, l); }
+                                    RH(180)
+                                    jm:JMidrib(JMidrib.calcLeafDeclination(pt.rank, pt.order, 0.1))
+                                    for (int m = 0; m < leafShape.polyleaf[0].length; m++) (
+                                        [lf:Leaf]
+                                        {
+                                            lf.initiate_pb(pb, j, k, l);
+                                            lf.order = pt.order;
+                                            lf.fid = m;
+                                            lf.area = leafShape.calcLeafPolygonArea(lf.length, lf.width, lf.fid);
+                                            jm.initiate(lf);
+                                        }
+                                    )]
+                                )
+                                if(j > ENDING_LEAF_NUMBER && j <= ENDING_PHYTOMER_NUM ) (
+                                    RV(-0.05) itn:Internode  [bd:bud1]
+                                    {itn.initiate_pb(pb, j, k, l); bd.initiate(itn,1); }
+                                )
+                            )
+                            if(ENDING_PHYTOMER_NUM > 0) (
+                                {
+                                    // Terminal apex is created from the same bud service family
+                                    // so species-specific apex implementation stays consistent.
+                                    ApexService apex = bud.createApex();
+                                }
+                                ap:apex {ap.initiate_pb(pb,ENDING_PHYTOMER_NUM, k, l);}
+                            )
+                        ]
+                    )
+                ])
+            )
+            /**
+             * Training system 4: bilateral horizontal cordon with inclined shoot planes.
+             *
+             * <p>Creates two horizontal cordon directions, then two lateral shoot planes
+             * from each cordon. A short {@code Cylinder} is used as visual/supporting
+             * permanent wood before cordon and shoot emission. Buds are attached near the
+             * cordon and annual shoots are tilted according to the current horizontal arm
+             * and side layer.</p>
+             */
+            if(trainingSystem == 4) (
+                w:Trunk {w.initiate_pb(pb);}
+                // Two mirrored horizontal cordon directions are emitted from the trunk.
+                for(int horizontalCordon : (1 : 2)) ([
+                    // Short cylinder provides a visible/supporting arm before lateral shoots.
+                    RU(Math.pow(-1, horizontalCordon) * 90) Cylinder(0.2, 0.02)
+                    // Two shoot planes are created from each horizontal arm.
+                    for (int l:(1 : 2)) ( [RL( Math.pow(-1,l) * 90)
+                        for(int k:(1:SHOOT_NUM)) (
+                            cor : Cordon
+                            { BudService bud = new BudCreator(species).createBud(); }
+                            [RU(Math.pow(-1,horizontalCordon) * -85) RL(Math.pow(-1,l) * -20 * random(0.9,1.1)) b:bud]
+                            {cor.initiate_pb(pb,k, l);  b.initiate(cor,2); int fruitPosition = random_int(1, 6); }
+                            [sb:ShootBase
+                            {sb.initiate(i, l, k);}
+                            RU(Math.pow(-1,horizontalCordon) * -85) RL(Math.pow(-1,l) * -20)
+                            for(int j:(1:ENDING_PHYTOMER_NUM)) (
+                                {
+                                    BudService bud1 = new BudCreator(species).createBud();
+                                    FruitService fruitTemplate = main.FRUIT_CREATOR.createFruit();
+                                }
+                                if(j < STARTING_LEAF_NUMBER) (
+                                    RV(-0.05) RL(Math.pow(-1,k) * 3) itn:Internode  [if(fruitPosition == j) (be:fruitTemplate  { be.initiate_pb(pb, j, k, l); })]
+                                    {itn.initiate_pb(pb, j, k, l); }
+                                )
+                                if(j >= STARTING_LEAF_NUMBER && j <= ENDING_LEAF_NUMBER ) (
+                                    RV(-0.05) RL(random(-5,5)) RH(phyllotaxis) itn:Internode  [if(fruitPosition == j) (be:fruitTemplate  { be.initiate_pb(pb, j, k, l); })]
+                                    [bd:bud1 {bd.initiate(itn, 1); itn.initiate_pb(pb, j,k,l);  }]
+                                    [RU(-45) AdjustLU  pt:Petiole
+                                    {pt.initiate_pb(pb, j, k, l); }
+                                    RH(180)
+                                    jm:JMidrib(JMidrib.calcLeafDeclination(pt.rank, pt.order, 0.1))
+                                    for (int m = 0; m < leafShape.polyleaf[0].length; m++) (
+                                        [lf:Leaf]
+                                        {
+                                            lf.initiate_pb(pb, j, k, l);
+                                            lf.order = pt.order;
+                                            lf.fid = m;
+                                            lf.area = leafShape.calcLeafPolygonArea(lf.length, lf.width, lf.fid);
+                                            jm.initiate(lf);
+                                        }
+                                    )]
+                                )
+                                if(j > ENDING_LEAF_NUMBER && j <= ENDING_PHYTOMER_NUM ) (
+                                    RV(-0.05) itn:Internode  [bd:bud1]
+                                    {itn.initiate_pb(pb, j, k, l); bd.initiate(itn, 1);}
+                                )
+                            )
+                            if(ENDING_PHYTOMER_NUM > 0) (
+                                {
+                                    BudService bud3 = new BudCreator(species).createBud();
+                                    ApexService apex = bud3.createApex();
+                                }
+                                ap:apex {ap.initiate_pb(pb,ENDING_PHYTOMER_NUM, k, l);}
+                            )]
+                        )
+                    ])
+                ])
+            )
+            /**
+             * Training system 5: inclined bilateral cordon / alternate shoot wall system.
+             *
+             * <p>Similar to training system 4, but the permanent cordon and annual shoot
+             * orientation use different {@code RU} angles to make a more inclined canopy
+             * wall. This block is mainly geometry-driven and keeps the same phytomer,
+             * leaf, bud, fruit, and apex emission pattern as the other multi-shoot
+             * systems.</p>
+             */
+            if(trainingSystem == 5) (
+                w:Trunk {w.initiate_pb(pb);}
+                // Two inclined permanent arms, less horizontal than training system 4.
+                for(int horizontalCordon : (1 : 2)) ([
+                    RU(Math.pow(-1, horizontalCordon) * 70) Cylinder(0.3, 0.02)
+                    // Two shoot planes are created from each horizontal arm.
+                    for (int l:(1 : 2)) ( [RL( Math.pow(-1,l) * 90)
+                        for(int k:(1:SHOOT_NUM)) (
+                            {
+                                BudService bud1 = new BudCreator(species).createBud();
+                            }
+                            // Attach a dormant bud near the cordon in the same orientation as
+                            // the annual shoot wall.
+                            cor : Cordon  [RU(Math.pow(-1,horizontalCordon) * 85 * random(0.9, 1.1)) b:bud1]
+                            {cor.initiate_pb(pb,k, l); b.initiate(cor,2); int fruitPosition = random_int(1, 6); }
+
+                            [sb:ShootBase
+                            {sb.initiate(i, l, k);}
+                            RU(Math.pow(-1,horizontalCordon) * 85)
+                            for(int j:(1:ENDING_PHYTOMER_NUM)) (
+                                {
+                                    BudService bud = new BudCreator(species).createBud();
+                                    FruitService fruitTemplate = main.FRUIT_CREATOR.createFruit();
+                                }
+                                if(j < STARTING_LEAF_NUMBER) (
+                                    RL(Math.pow(-1,k) * 1) itn:Internode  [if(fruitPosition == j) (be:fruitTemplate  { be.initiate_pb(pb, j, k, l); })]
+                                    {itn.initiate_pb(pb, j, k, l); }
+                                )
+                                if(j >= STARTING_LEAF_NUMBER && j <= ENDING_LEAF_NUMBER ) (
+                                    RL(random(-5,5)) RH(phyllotaxis) itn:Internode  [if(fruitPosition == j) (be:fruitTemplate  { be.initiate_pb(pb, j, k, l); })]
+                                    [bd:bud {bd.initiate(itn, 1); itn.initiate_pb(pb, j,k,l); }]
+                                    [RU(-45) AdjustLU  pt:Petiole
+                                    {pt.initiate_pb(pb, j, k, l); }
+                                    RH(180)
+                                    jm:JMidrib(JMidrib.calcLeafDeclination(pt.rank, pt.order, 0.1))
+                                    for (int m = 0; m < leafShape.polyleaf[0].length; m++) (
+                                        [lf:Leaf]
+                                        {
+                                            lf.initiate_pb(pb, j, k, l);
+                                            lf.order = pt.order;
+                                            lf.fid = m;
+                                            lf.area = leafShape.calcLeafPolygonArea(lf.length, lf.width, lf.fid);
+                                            jm.initiate(lf);
+                                        }
+                                    )]
+                                )
+                                if(j > ENDING_LEAF_NUMBER && j <= ENDING_PHYTOMER_NUM ) (
+                                    itn:Internode  [bd:bud]
+                                    {itn.initiate_pb(pb, j, k, l); bd.initiate(itn, 1); }
+                                )
+                            )
+                            if(ENDING_PHYTOMER_NUM > 0) (
+                                {
+                                    BudService bud = new BudCreator(species).createBud();
+                                    // Terminal apex is created from the same bud service family
+                                    // so species-specific apex implementation stays consistent.
+                                    ApexService apex = bud.createApex();
+                                }
+                                ap:apex {ap.initiate_pb(pb,ENDING_PHYTOMER_NUM, k, l);}
+                            )]
+                        )
+                    ])
+                ])
+            )
+            /**
+             * Training system 6: radial/head-trained or fan-like system.
+             *
+             * <p>Distributes cordons radially using {@code RH(l * 70)} and alternates
+             * their inclination with {@code RU(Math.pow(-1, l) * 80)}. Fruit position is
+             * fixed at phytomer rank 3. Leaves are omitted at the fruit position, which
+             * keeps the fruit node visually and topologically simple.</p>
+             */
+            if(trainingSystem == 6) (
+                w:Trunk {w.initiate_pb(pb);}
+                // Radially distribute cordons around the head/trunk.
+                for (int l:(1 : CORDEN_NUM)) ( [
+                    RH(l * 70) RU(Math.pow(-1, l) * 80)
+                    for(int k:(1:SHOOT_NUM)) (
+                        {
+                            BudService bud = new BudCreator(species).createBud();
+                        }
+                        cor : Cordon  [RH(Math.pow(-1, SHOOT_NUM) * 70) b:bud]
+                        // Use a fixed fruit rank for this geometry-focused system.
+                        {cor.initiate_pb(pb,k, l); b.initiate(cor,2); int fruitPosition = 3; }
+
+                        [
+                            RU(Math.pow(-1,k) * 30)
+                            for(int j:(1:ENDING_PHYTOMER_NUM)) (
+                                {
+                                    BudService bud1 = new BudCreator(species).createBud();
+                                    FruitService fruitTemplate = main.FRUIT_CREATOR.createFruit();
+                                }
+                                if(j < STARTING_LEAF_NUMBER) (
+                                    RL(Math.pow(-1,k) * 1) itn:Internode  [if(fruitPosition == j) (be:fruitTemplate  { be.initiate_pb(pb, j, k, l); })]
+                                    {itn.initiate_pb(pb, j, k, l); }
+                                )
+                                if(j >= STARTING_LEAF_NUMBER && j <= ENDING_LEAF_NUMBER ) (
+                                    RV(-0.03)
+                                    RL(2) RH(phyllotaxis) itn:Internode  [if(fruitPosition == j) (be:fruitTemplate  { be.initiate_pb(pb, j, k, l); })]
+                                    [bd:bud1 {bd.initiate(itn, 2); itn.initiate_pb(pb, j,k,l); }]
+                                    if(fruitPosition != j) (
+                                        [RU(-45) AdjustLU pt:Petiole
+                                        {pt.initiate_pb(pb, j, k, l); }
+                                        RH(180)
+                                        jm:JMidrib(JMidrib.calcLeafDeclination(pt.rank, pt.order, 0.1))
+                                        for (int m = 0; m < leafShape.polyleaf[0].length; m++) (
+                                            [lf:Leaf]
+                                            {
+                                                lf.initiate_pb(pb, j, k, l);
+                                                lf.order = pt.order;
+                                                lf.fid = m;
+                                                lf.area = leafShape.calcLeafPolygonArea(lf.length, lf.width, lf.fid);
+                                                jm.initiate(lf);
+                                            }
+                                        )]
+                                    )
+                                )
+                                if(j > ENDING_LEAF_NUMBER && j <= ENDING_PHYTOMER_NUM ) (
+                                    itn:Internode  [bd:bud1]
+                                    [if(fruitPosition == j)
+                                    (be:fruitTemplate  { be.initiate_pb(pb, j, k, l); })]
+                                    {itn.initiate_pb(pb, j, k, l); bd.initiate(itn, 2); }
+                                )
+                            )
+                            if(ENDING_PHYTOMER_NUM > 0) (
+                                {
+                                    BudService bud3 = new BudCreator(species).createBud();
+                                    ApexService apex = bud3.createApex();
+                                }
+                                ap:apex {ap.initiate_pb(pb,ENDING_PHYTOMER_NUM, 0, 0);}
+                            )
+                        ]
+                    )
+                ])
+            )
+            /**
+             * Training system 7: simplified single-cordon / open-canopy system.
+             *
+             * <p>Creates one cordon layer and a configurable number of annual shoots.
+             * Initial shoot orientation alternates with {@code k} and includes random
+             * pitch/roll to produce an open, irregular canopy. This is useful for quick
+             * visual or light-interception tests where a full multi-cordon training
+             * system is unnecessary.</p>
+             */
+            if(trainingSystem == 7) (
+                w:Trunk {w.initiate_pb(pb);}
+                // Single cordon/layer; vary shoot azimuth by k for an open canopy.
+                for (int l:(1 : 1)) ([
+                    for(int k:(1:SHOOT_NUM)) (
+                        {
+                            BudService bud = new BudCreator(species).createBud();
+                        }
+
+                        cor : Cordon {cor.initiate_pb(pb,k, l);}
+
+                        {int fruitPosition = random_int(1, 3);}
+
+                        if(ENDING_PHYTOMER_NUM > 0) (
+                            [ sb:ShootBase
+                            {sb.initiate(i, l, k);}
+                            // Alternating random pitch and roll prevents a flat repeated fan
+                            // and gives quick visual separation between shoots.
+                            RU(-Math.pow(-1, k) * random(25, 40)) RL(random(10, 45)* Math.pow(-1, k))
+
+                            for(int j:(1:ENDING_PHYTOMER_NUM)) (
+                                {
+                                    BudService bud1 = new BudCreator(species).createBud();
+                                    FruitService fruitTemplate = main.FRUIT_CREATOR.createFruit();
+                                }
+
+                                if(j < STARTING_LEAF_NUMBER) (
+                                    itn:Internode  [if(fruitPosition == j) ( RV(30) b:fruitTemplate  {b.initiate_pb(pb,j, k, l); })]
+                                    {itn.initiate_pb(pb, j, k, l); }
+                                )
+                                if(j >= STARTING_LEAF_NUMBER && j <= ENDING_LEAF_NUMBER ) (
+                                    RV(-0.05) RL(random(-5,5))  RH(phyllotaxis) itn:Internode  [if(fruitPosition == j) (be:fruitTemplate  { be.initiate_pb(pb, j, k, l); })]
+                                    [bd:bud1 {bd.initiate(itn, 1); itn.initiate_pb(pb, j,k,l); }]
+                                    [RU(-45) AdjustLU  pt:Petiole
+                                    {pt.initiate_pb(pb, j, k, l); }
+                                    RH(180)
+                                    jm:JMidrib(JMidrib.calcLeafDeclination(pt.rank, pt.order, 0.1))
+                                    for (int m = 0; m < leafShape.polyleaf[0].length; m++) (
+                                        [lf:Leaf]
+                                        {
+                                            lf.initiate_pb(pb, j, k, l);
+                                            lf.order = pt.order;
+                                            lf.fid = m;
+                                            lf.area = leafShape.calcLeafPolygonArea(lf.length, lf.width, lf.fid);
+                                            jm.initiate(lf);
+                                        }
+                                    )]
+                                )
+                            )
+                            ]
+                        )
+                    )
+                ])
+            )
+            ;
+        ]
+        derive();
+    }}
+
+    /**
+     * Marker module inserted during field construction and consumed by
+     * {@link #initArchitecture()} to build the selected above-ground topology.
+     */
+    module StandardCanopyScaffold;
+
+/**
+ * Clone proxy for copying the already-built reportable {@code FieldBase}.
+ *
+ * <p>The module instantiation rule resolves the original reportable field with
+ * {@code fieldInstanceId == 0}. Final clone materialisation is handled by
+ * {@code finalizeCloneFieldCopies(fieldIdCutoff)} in {@link #cloneFieldBase()}.</p>
+ */
+module CopyFieldBase==>{
+    FieldBase fb = first((* i:FieldBase, (i.isReportable && i.fieldInstanceId == 0) *));
+}fb;

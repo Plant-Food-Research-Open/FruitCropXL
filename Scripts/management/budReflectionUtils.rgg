@@ -1,0 +1,67 @@
+import static plantBase.*;
+import static budBase.*;
+import static budApple.*;
+import static shootBase.*;
+import static shoot.*;
+import static leaf.*;
+import static absOrgan.*;
+import static globalParameters.*;
+import static plantParameters.*;
+import static modelOptions.*;
+import static extraTools.*;
+import static archReader.*;
+
+/**
+ * Small reflection helper used by BudPlanner T0 and T1 parts.
+ */
+public final class BudReflectionUtils {
+
+  private BudReflectionUtils() {}
+
+  public static Double getDoubleField(Object obj, String name) {
+    try {
+      if (obj == null) return null;
+      java.lang.reflect.Field f = obj.getClass().getField(name);
+      Object v = f.get(obj);
+      if (v instanceof Number) {
+        return Double.valueOf(((Number) v).doubleValue());
+      }
+      if (v instanceof String) {
+        return Double.valueOf(Double.parseDouble((String) v));
+      }
+    } catch (Throwable t) {
+      // ignore
+    }
+    return null;
+  }
+
+  public static Integer getIntField(Object obj, String name) {
+    try {
+      if (obj == null) return null;
+      java.lang.reflect.Field f = obj.getClass().getField(name);
+      Object v = f.get(obj);
+      if (v instanceof Number) {
+        return Integer.valueOf(((Number) v).intValue());
+      }
+      if (v instanceof String) {
+        return Integer.valueOf(Integer.parseInt((String) v));
+      }
+    } catch (Throwable t) {
+      // ignore
+    }
+    return null;
+  }
+  
+  // Similar in spirit to BudPlanner.getIntField(...)
+public static String getStringField(Object o, String name) {
+    if (o == null) return null;
+    try {
+        java.lang.reflect.Field f = o.getClass().getField(name);
+        Object v = f.get(o);
+        return (v instanceof String) ? (String) v : null;
+    } catch (Throwable t) {
+        return null;
+    }
+}
+
+}

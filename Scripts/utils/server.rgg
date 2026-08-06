@@ -1,0 +1,111 @@
+import com.fasterxml.jackson.databind.JsonNode;
+
+import de.grogra.pf.ui.Command;
+import de.grogra.pf.ui.Context;
+import de.grogra.graph.impl.GraphManager;
+import de.grogra.imp.IMPWorkbench;
+import de.grogra.pf.registry.Registry;
+import de.grogra.pf.ui.Workbench;
+import de.grogra.pf.ui.JobManager;
+
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.io.PrintWriter;
+
+import java.net.InetAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import static main.*;
+import static extraTools.*;
+import static socketRun.*;
+
+static Server s;
+protected static CommandLineArgs commandLineArgs;
+
+public static void launchServer() { 
+	commandLineArgs = new CommandLineArgs();
+    String rawHost = commandLineArgs.getRawProperty("host");
+    String rawPort = commandLineArgs.getRawProperty("port");
+
+    if(rawHost == null) {
+        rawHost =  "127.0.0.1";
+    }
+
+    if(rawPort == null) {
+        rawPort =  "6666";
+    }
+
+    InetAddress host = InetAddress.getByName(rawHost);
+    int port = (Integer) rawPort;
+    startServer(host, port);
+}
+
+protected static void startServer(InetAddress host, int port) {
+	Workbench wb = de.grogra.rgg.Library.workbench();    
+ 	s = new Server(wb, host, port);
+	s.start();
+}
+
+public class Server {
+	protected RequestHandlerThread t = null;
+
+	public Server (Context ctx, InetAddress host, int port) {
+		t = new RequestHandlerThread(ctx, host, port);
+	}
+	
+	public void start() {
+		t.setDaemon(false);
+		t.start();		
+	}
+	
+	public boolean isServerReady() {
+		return t != null;
+	}
+}
+
+public class RequestHandlerThread extends Thread {
+	protected final ServerSocket serversocket;
+	protected final Context ctx;
+	protected final GraphManager graph;
+
+	public RequestHandlerThread(Context ctx, InetAddress host, int port) {
+        this.ctx = ctx;
+		this.serversocket = new ServerSocket(port, 100, host);
+
+        Workbench wb = ctx.getWorkbench();
+        Registry r = wb.getRegistry();
+        this.graph = r.getProjectGraph(); 
+	}
+
+    public void run() {
+		System.out.println("Server address: " + this.serversocket.getInetAddress());
+		System.out.println("Listening on port " + this.serversocket.getLocalPort());
+		while (!Thread.interrupted()) {
+				Socket socket = this.serversocket.accept();		
+				SocketWrapper sw = new SocketWrapper(socket);
+				Command c = new SimulationCommand(graph);
+				ctx.getWorkbench().getJobManager().runLater(c, sw, ctx, JobManager.ACTION_FLAGS);
+		}
+	}
+}
+
+public class SocketWrapper {
+	public final Socket socket;
+    public final String body;
+    public final BufferedReader reader;
+    public final PrintWriter writer;
+
+	public SocketWrapper(Socket socket) {
+		this.socket = socket;
+
+		writer = new PrintWriter(socket.getOutputStream(), true);
+        reader = new BufferedReader(
+            new InputStreamReader(socket.getInputStream())
+        );
+        body = reader.readLine();
+	}
+}

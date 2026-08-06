@@ -1,0 +1,159 @@
+import static absOrgan.*;
+import static archReader.*;
+import static leaf.*;
+import static shoot.*;
+import static plantBase.*;
+import static charts.*;
+import static outputTables.*;
+import static environment.*;
+import static globalParameters.*;
+import static plantParameters.*;
+import static modelOptions.*;
+import static initialConditions.*;
+import static carbonTransport.*;
+import static shootPositioning.*;
+import static structuralVariation.*;
+import static pruning.*;
+import static developBase.*;
+import static budBase.*;
+import static budGrapevine.*;
+import static fruitBase.*;
+import static fieldBase.*;
+import static shootBase.*;
+
+public class DevelopGrapevineStructuralVariation extends DevelopService {
+	public void develop() {
+		boolean newShootAppeared = false;
+		[
+		/**
+		 * Rule for bud burst.
+		 * <p>
+		 * When a should break, it initiates an apex.
+		 * </p>
+		 */
+		{//start a java block inside the Lsystem [] block
+			if ("ArchReader".equals(initiation_method)) 
+			{ //java if statement
+				[ //XL replacement rules
+				
+					ShootMeristem b:BudService, (b.shouldBreak()) ==>
+						{ApexService apex = b.createApex();} 
+						RV(-1) a:apex
+					{		
+						a.initiate(b);
+						if (printFlag) { println("bud type : " + b.budType + " age " + b.age); }
+					}
+					; //end of the replacement rule
+				]
+			} else {				
+				[ //XL replacement rules
+				
+					b:BudService, (b.shouldBreak()) ==>
+						{ApexService apex = b.createApex();} 
+						RV(-1) a:apex
+					{		
+						a.initiate(b);
+						if (printFlag) { println("bud type : " + b.budType + " age " + b.age); }
+					}
+					; //end of the replacement rule
+				]
+			
+			} // end of the java if statement
+			
+		} //end of the java block
+		 
+		
+		
+		/**
+		 * Rule for updating water potential in an apex.
+		 */
+		a:ApexService ::> 
+		{
+			a.updateWaterPotential();
+		}
+		
+		
+		// produce vegetative phtyomer
+		a:ApexService, (useStaticArc == false && a.shouldProducePhytomer() == true) ==>
+			{
+				ShootBase sb;
+				BudCreator budCreator = new BudCreator(species);
+				BudService bud = budCreator.createBud();
+			}
+			if (a.rank <= 1) (
+				s:ShootBase
+				{s.initiate(a); sb = s;}
+				RG() RU(180)
+				RH(-singleAzimuthAngle)
+				RU(90 - singleBasalElevation))
+			else ( 
+				{sb = first((* s:ShootBase, (s.isBaseOf(a)) *));}
+			)
+			
+			i:Internode jt:Joint 
+			{ 
+				i.initiate_apex(a); jt.initiate(i); 
+				//add variations to the internode length
+				//needs to fix
+				i.length = sb.normalizedLength * i.length;
+				i.maxLength = i.maxLength;
+			}
+			RU(sb.getInternodeAngle(a.rank))
+			if(a.shouldProduceBunch() == true) (
+				[RH(180) be:main.FRUIT_CREATOR.createFruit() {be.initiate_apex(a);}]
+			)
+			//[ b:Bud l:Leaf]
+			[b1:bud { b1.initiate(i,0); println("internode rank " + i.rank);}]
+			[
+			RG() RU(180) // Make z axis vertical
+			RH(sb.getPetioleRotation(a.rank))
+			RU(sb.getPetioleDeclination(a.rank))
+			pt:Petiole
+			//AdjustLU make the rotated local x-axis (the turtle's left axis) is horizontal
+			{pt.initiate_apex(a);}
+			RH(180)
+			jm:JMidrib(sb.getLeafDeclination(a.rank))
+			for (int m = 0; m < leafShape.polyleaf[0].length; m++) (
+				[lf:Leaf]
+				{
+					lf.initiate_apex(a);
+					lf.fid = m;
+					lf.area = leafShape.calcLeafPolygonArea(lf.length, lf.width, lf.fid);
+					jm.initiate(lf);
+				}
+			)
+			]
+			a 
+			{
+				a.increment();
+				if (printFlag) { println("New Phytomer" + a.rank); }
+				newShootAppeared = true;
+				derive();
+			}
+			;
+			
+		// shed flower/fruit
+		//b:FruitService, (b.shouldFall()) ==> cut;
+		
+		//shed a leaf
+		//l:Leaf, (l.shouldFall() == true) ==>> ; 
+		
+				
+		/** call the update oder function when new shoot appeared */
+		pb:PlantBase, (newShootAppeared == true) ::>
+		{
+			pb.updateOrder();
+		}
+		
+
+		{
+			if (useStaticArc == false && useShootPositioning == true) {
+			ApplyBend();
+		}
+		}
+
+		
+		// ignore
+		temp ==> temp;
+	]}
+}

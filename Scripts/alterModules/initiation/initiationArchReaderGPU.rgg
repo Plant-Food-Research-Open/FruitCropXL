@@ -1,0 +1,1258 @@
+import org.apache.commons.math3.distribution.*;
+import java.io.*;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.Map;
+import static globalParameters.*;
+import static plantParameters.*;
+import static modelOptions.*;
+import static lightInterception.*;
+import static initialConditions.*;
+import static absOrgan.*;
+import static leaf.*;
+import static shoot.*;
+import static budBase.*;
+import static environment.*;
+import static extraTools.*;
+import static plantBase.*;
+import static carbonTransport.*;
+import static shootPositioning.*;
+import static structuralVariation.*;
+import static archReader.*;
+import static rootSystem.*;
+import static soil.*;
+import static initiationBase.*;
+import static flowerBase.*;
+import static fruitBase.*;
+import static fineRoot.*;
+import static structuralRoot.*;
+import static fieldBase.*;
+import static modelOptions.*;
+import static main.*;
+import static budPlannerConfig.*;
+import static budPlannerT0.*;
+import static aggregatedRoot.*;
+import fruitPlanner.*;
+import aggregatedRoot.*;
+
+global boolean debugRootSoilGridVisualisation = false;
+
+
+public class InitiationArchReaderGPU extends InitiationService {
+	private static final long serialVersionUID = 1L;
+
+	private InitArch initArch;
+
+	public InitiationArchReaderGPU() {
+		// Instantiate an InitArch instance specific to InitiationGPU.
+		initArch = new InitArchReader();
+	}
+
+    public void initiate() {[
+        {
+            continueRunning = true;
+            focalPlants = 0;            
+            InitArchReader.init();
+            
+            //leafAngleOptimization.initRadiationLocations();
+            //if (printFlag) { println(leafAngleOptimization.numDiffuseLights); }
+        }
+        
+        Axiom ==>
+        
+        Translate(tx, ty, 0)
+        
+	        if(isRayTracingLightMode() && useDirectRadiation) (
+        // Initialize direct light settings 
+           [dir:DirectLight]            
+           { dir.update();}  
+        )
+	        if(isRayTracingLightMode() && useDiffuseRadiation) (
+        // Initialize diffuse light settings 
+           [dif:DiffuseLight]            
+           { dif.update();}  
+        )
+        RH(rowOrientation)
+		temp
+		FieldBase
+		{double tileWidth = plantDistance/nrTiles;}
+		/** measure stick (to compare ..) *************************************/
+			[
+				//Translate(-(nrTiles+1)*tileWidth,-tileWidth,0) 
+				//measureStick(10, 0.1) // (number of steps, step length (in m))
+			] 
+				
+		[	
+			// Define row orientation inside of FieldBase to apply to clones
+			
+
+			{ 
+				int i = 0;
+
+				int strip = 1;  
+				int row = 1;
+				int pos = 1;
+			}
+
+			
+			// ============================================ one plant
+			//setup of a row
+			{borderX = 0;} // TODO: what is this used for?
+					
+			
+			{i++;}
+			
+			/** adding the tiles on the ground */
+			if (associatePlantsToTiles == true) ([
+				Translate(-0.5*(nrTiles-1)*tileWidth,0,0)
+				{int tn = 0;}
+				for (1:nrTiles) (
+					[
+						for (1:nrTiles) (
+							t:Tile
+							Translate(plantDistance/nrTiles,0,0)
+							{
+								tn++;
+								t.initiate(i, row, pos, strip, tn);
+							}
+						)
+					]
+					Translate(0,rowDistance/nrTiles,0)
+				)
+			])
+				
+	 /** If complex root system is disabled, initiate simple root system */
+			if(useComplexRoot == false) (
+				//rootbase needs to be in branch because xeg reader uses it 
+				// to initiate all the shoot, and it would push the soil up 
+				//if this is not in branch
+				pi:PlantIdentifier pb:PlantBase [RU(180) rb:RootBase]
+				{
+					
+					pi.initiate(i, row, pos, strip, species);
+					pb.initiate(i, row, pos, strip, pi);
+					rb.initiate_pb(pb,numofSoilLayers);
+					if (pb.border == false) {focalPlants++;}
+												
+				}
+						
+				//add the soil and root layers as branches
+				[
+					RU(180) for (int r = 0; r < numofSoilLayers; r++) (
+					sl:Soil {sl.initiate(r, pb);}
+					[ M(-sl.length) sr:StructuralRoot [fr:FineRoot]] 
+						
+						{
+							fr.initiate_pb(r, pb);							
+							
+							sr.initiate_pb(r, pb);
+							rb.addChildSoilRoot(r, sl, fr, sr);
+						}
+					)
+				]
+					
+
+			) //close useCompleRoot == false
+						
+						
+						
+				/** Initialize complex root system if enabled */
+			if(useComplexRoot == true) (
+				pi:PlantIdentifier pb:PlantBase [RU(180) rb:RootBase] 					
+				{
+					pi.initiate(i, row, pos, strip, species);  // Plant initialization
+					pb.initiate(i, row, pos, strip, pi);  // Plant base setup
+					int gridNumber = InitArchReader.rootData.maxNodeID;
+					println("total grid from the input " + gridNumber);  // Debug output
+					rb.initiate_pb(pb, gridNumber);  // Root base setup
+					if (pb.border == false) {focalPlants++;}  // Update plant count
+				}
+			) //end of complexRoot 
+				
+				
+			//use light sensors to  	
+			if (useLightSensors == true && sensor_heights.length >= 1) ([
+				// Sensor heights include one extra top layer used only as the sky reference.
+				for (int h :(0 : sensor_heights.length - 1)) (
+					{float height = (float) sensor_heights[h];}
+					[
+						Translate(-plantDistance/2 + plantDistance/10,0.3,height)
+						for (1 :9) ( 
+							ls:LightSensor Translate((plantDistance)/10, 0, 0) 
+							{ls.initiate(height); }	
+						)
+					]
+				)
+			]) //close useLightSensors == ture 
+		]
+
+
+    
+        {
+            totalArea = rowDistance * plantDistance * totalPlants;
+            focalArea = rowDistance * plantDistance * focalPlants;
+            dens = 1 / (rowDistance * plantDistance);
+			initializeReportableFieldMetadata();
+			
+		if (isRayTracingLightMode() && Boolean.parseBoolean(ModelArgs.headless) == true && useShadingFactor  == false && (cloneX > 0 || cloneY > 0))
+            {
+            	cloneFieldBase();
+            }
+          
+            	
+        }
+		;
+    ]
+
+}
+
+	/**
+	 * Need to specify a new function to modify Axiom, as inserting this double for loop in the initiate() Axiom
+	 * will result in an infinite recursive loop.
+	 */
+			private void cloneFieldBase() {[
+				Axiom ==>
+
+				{
+					long fieldIdCutoff = getMaxFieldBaseId();
+					int cloneLayersX = Math.max(0, cloneX);
+					int cloneLayersY = Math.max(0, cloneY);
+				}
+
+				for (int y = -cloneLayersY; y <= cloneLayersY; y++) (
+					for (int x = -cloneLayersX; x <= cloneLayersX; x++) (
+					if (x != 0 || y != 0) ( // Check so we do not clone at the original's position
+						{ 
+							// Account for original position (tx, ty)
+							float posY = ty + y * rowDistance * nrRows; 
+							float posX = tx + x * plantDistance * nrPlants;
+						}
+						
+						// The arch-reader field already carries its row-orientation transform.
+						// Apply translation only so copied fields keep the same orientation.
+						[Translate(posX, posY, 0)  CopyFieldBase]
+					)
+
+					)
+				)
+			{
+				finalizeCloneFieldCopies(fieldIdCutoff);
+			}
+			;
+		]}
+
+	/**
+	 * Override default initArchitecture with ArchReader specific initiation.
+	 */
+	public void initArchitecture() {
+		initArch.initArchitecture();
+	}
+}
+
+module CopyFieldBase ==> { FieldBase fb = first((* i:FieldBase, (i.isReportable && i.fieldInstanceId == 0) *)); } fb;
+//module CopyFieldBase ==> { Trunk tr = first((* i:Trunk *)); } tr;
+
+
+
+/**
+ * Handles the initialization and configuration of the plant and root system architecture.
+ * This class extends `InitArch` and supports loading architectural data for shoots, roots,
+ * and associated components such as leaves, buds, and soil grids.
+ * 
+ * Responsibilities include:
+ * - Initializing shoots and roots using external data sources.
+ * - Managing architectural structures by processing plant models.
+ * - Supporting dynamic architectural growth if enabled.
+ */
+
+class InitArchReader extends InitArch {
+	/** Keep deserialization compatibility with previously saved graphs. */
+	private static final long serialVersionUID = -5014632200300883167L;
+
+/** Data reader for loading shoot architecture information. */
+    public static XEGDataReader treeData;
+
+    /** Data reader for loading root architecture information. */
+    public static XEGDataReader rootData;
+    
+    /**
+     * Initializes the architecture reader by setting default states and loading data.
+     * 
+     * This method performs the following:
+     * - Resets the bunch count for tracking plant clusters.
+     * - Initializes the shoot data reader and loads shoot data from files.
+     * - If the complex root system is enabled, initializes and loads root data.
+     */
+	public static void init() {
+		InitArchReader.bunchCount = 0;
+		InitArchReader.initShoot();
+		InitArchReader.readShootData();
+
+		if(useComplexRoot == true) {
+			InitArchReader.initRoot();
+			InitArchReader.readRootData();
+		}
+	}
+	
+    /**
+     * Manages the architecture initialization process.
+     * 
+     * This method:
+     * - Loads architectural data, including shoots, roots, and environmental components.
+     * - Adds leaves and buds if these features are enabled.
+     * - Finalizes the initialization by invoking the derive() method.
+     * 
+     * This ensures that the architecture setup is consistent and ready for simulation.
+     */
+    @Override 
+	public void initArchitecture() {	
+		if (shootsInitiated == false)
+		{
+            
+			loadArchitectureData(); 
+			// Dynamic apple runs should add buds (if needed) without masking DevelopApple leaf emergence via static init leaves.
+			boolean allowStaticInitLeaves = addLeaves;
+			if(addBuds == true && "apple".equals(species) && "dynamicApple".equals(special_scenario)) allowStaticInitLeaves = false;
+			if(allowStaticInitLeaves == true) addLeaves();
+			if(addBuds == true) addBuds();
+			derive();  // Finalizes architectural initialization		
+		} 	
+	}
+
+	
+	/**
+	 * Initializes shoot-related architectural data.
+	 * Sets the `shootsInitiated` flag to `false`, ensuring that shoots
+	 * are not considered initialized until properly processed.
+	 */
+	static void initShoot() {
+		shootsInitiated = false;
+	}
+	/**
+	 * Initializes root-related architectural data.
+	 * Sets the `rootsInitialised` flag to `false`, preparing for root data initialization.
+	 */
+	static void initRoot() {
+		rootsInitialised = false;
+	}
+	
+	/**
+	 * Loads architectural data by processing both shoots and roots.
+	 * 
+	 * This method performs the following:
+	 * - Loads shoot data if the initialization step is the first.
+	 * - If the complex root system is enabled, loads root data and associated soil grids.
+	 * - Adjusts the trunk position after initializing the soil and roots.
+	 */	
+	static void loadArchitectureData() { 
+		if(step <= 1)
+		{
+			loadShoots();
+			 if(useComplexRoot == true) {
+				if (rootDataHasNonGridRootNodes()) {
+					loadRoots();
+					debugRootMeristemSummary();
+				} else {
+					rootsInitialised = true;
+					if (printFlag) { println("root is here"); }
+				}
+
+				addRootSoilGridFromRootData();
+				debugRootBaseAndSoilActualLocations();
+
+			 	//handle the misteriour change of the 
+			 	//trunk after initializing the soil and root
+			 	[	
+			 		t:Trunk ==> RV(10) t;	
+			 	]
+			 
+			 }	
+		} 	 
+	}
+	/**
+	 * Loads shoots from external data sources and initializes them.
+	 * 
+	 * This method:
+	 * - Iterates through all `RootBase` instances by plant number.
+	 * - Creates a corresponding `TreeFactory` for each root base.
+	 * - Initializes each plant's architecture using its node map.
+	 * - Marks shoots as initialized by setting `shootsInitiated` to `true`.
+	 */
+	static void loadShoots() {
+		//change this if the measured length is not in cm
+			
+		if(!shootsInitiated) {
+			[ 					
+				st:RootBase, (st.plantNumber == 1 ) ::> {
+					//organs are specified based on orders. For organs have the same level, then
+					//organ type will be used.
+					//if (printFlag) { println("st " + st.plantNumber); }
+					//if (printFlag) { println("st " + st.pi); }
+					IOrganFactory factory = new TreeFactory(st);  
+					initialiseArchitecture(st, factory, treeData.getNodeMap(st.plantNumber));
+				}
+				st:RootBase, (st.plantNumber == 2 )::> {
+					//organs are specified based on orders. For organs have the same level, then
+					//organ type will be used.
+					//if (printFlag) { println("st " + st.plantNumber); }
+					IOrganFactory factory = new TreeFactory(st);  
+					initialiseArchitecture(st, factory, treeData.getNodeMap(st.plantNumber));
+				}
+				
+				st:RootBase, (st.plantNumber == 3)::> {
+					//organs are specified based on orders. For organs have the same level, then
+					//organ type will be used.
+					//if (printFlag) { println("st " + st.plantNumber); }
+					IOrganFactory factory = new TreeFactory(st);  
+					initialiseArchitecture(st, factory, treeData.getNodeMap(st.plantNumber));
+				}
+				
+				st:RootBase, (st.plantNumber == 4)::> {
+					//organs are specified based on orders. For organs have the same level, then
+					//organ type will be used.
+					if (printFlag) { println("st " + st.plantNumber); }
+					IOrganFactory factory = new TreeFactory(st);  
+					initialiseArchitecture(st, factory, treeData.getNodeMap(st.plantNumber));
+				}
+				
+				st:RootBase, (st.plantNumber == 5 )::> {
+					//organs are specified based on orders. For organs have the same level, then
+					//organ type will be used.
+					if (printFlag) { println("st " + st.plantNumber); }
+					IOrganFactory factory = new TreeFactory(st);  
+					initialiseArchitecture(st, factory, treeData.getNodeMap(st.plantNumber));
+				}
+				st:RootBase, (st.plantNumber == 6)::> {
+					//organs are specified based on orders. For organs have the same level, then
+					//organ type will be used.
+					if (printFlag) { println("st " + st.plantNumber); }
+					IOrganFactory factory = new TreeFactory(st);  
+					initialiseArchitecture(st, factory, treeData.getNodeMap(st.plantNumber));
+				}
+				
+				st:RootBase, (st.plantNumber == 7)::> {
+					//organs are specified based on orders. For organs have the same level, then
+					//organ type will be used.
+					if (printFlag) { println("st " + st.plantNumber); }
+					IOrganFactory factory = new TreeFactory(st);  
+					initialiseArchitecture(st, factory, treeData.getNodeMap(st.plantNumber));
+				}
+				
+				st:RootBase, (st.plantNumber == 8)::> {
+					//organs are specified based on orders. For organs have the same level, then
+					//organ type will be used.
+					if (printFlag) { println("st " + st.plantNumber); }
+					IOrganFactory factory = new TreeFactory(st);  
+					initialiseArchitecture(st, factory, treeData.getNodeMap(st.plantNumber));
+				}
+				
+				st:RootBase, (st.plantNumber == 9)::> {
+					//organs are specified based on orders. For organs have the same level, then
+					//organ type will be used.
+					if (printFlag) { println("st " + st.plantNumber); }
+					IOrganFactory factory = new TreeFactory(st);  
+					initialiseArchitecture(st, factory, treeData.getNodeMap(st.plantNumber));
+				} 
+				
+		/* 		s:ShootMeristem l:Leaf ==>  l M(-l.length) 
+				for (int n=0; n< l.numFacets; n++) (
+					[ff:LeafFacet]
+					{
+					// if (printFlag) { println("leafLength" + l.length); }
+					 ff.initiate(l, n);
+					 //if (printFlag) { println("ff.length" + ff.length); }
+					}
+				) */
+				//; 
+				
+				
+	
+			]
+			shootsInitiated = true;
+		}	
+	}
+	
+	/**
+	 * Loads root data from external sources and initializes them.
+	 * 
+	 * This method:
+	 * - Iterates through all `RootBase` instances.
+	 * - Creates a corresponding `RootFactory` for each root base.
+	 * - Initializes each root's architecture using its node map.
+	 * - Marks roots as initialized by setting `rootsInitialised` to `true`.
+	 */
+	static void loadRoots() {
+			
+		if(!rootsInitialised) {
+			[ 	
+				rb:RootBase ::> {
+					
+					IOrganFactory factory = new RootFactory(rb);				
+					initialiseArchitecture(rb, factory, rootData.getNodeMap(rb.plantNumber));
+				}
+				
+			]
+			rootsInitialised = true;
+			if (printFlag) { println("root is here"); }
+		}	
+	}
+	
+	/**
+ * Reads shoot data from an external source and initializes the corresponding node map.
+ * This method:
+ * - Sets the coordinate scaling factor to convert measurements from cm to meters.
+ * - Creates a new XEGDataReader for shoot data.
+ * - Loads shoot architectural data into the node map.
+ */			 
+	
+static void readShootData()
+{
+    // change this if the measured length is not in cm
+    coordinateScale = 0.01f;
+
+    try {
+        if (ModelArgs.shootArchitecturePath != null) {
+            treeData = new XEGDataReader(ModelArgs.shootArchitecturePath, xNodeFactory);
+            // Smoke-test the primary path; throws IOException if the file isn’t present/usable.
+            treeData.readFileFromPath(shootArchitecture_file);
+        } else {
+            // No custom path provided; use default
+            treeData = new XEGDataReader(PATH_INPUT, xNodeFactory);
+        }
+    } catch (IOException e) {
+        // Fall back to default input path
+        treeData = new XEGDataReader(PATH_INPUT, xNodeFactory);
+    }
+
+    loadNodeMap(treeData, shootArchitecture_file);
+}
+
+	
+	
+	/**
+ * Reads root data from an external source and initializes the corresponding node map.
+ * This method:
+ * - Sets the coordinate scaling factor to convert measurements from cm to meters.
+ * - Creates a new XEGDataReader for root data.
+ * - Loads root architectural data into the node map.
+ */
+	static void readRootData()
+	{
+		//change this if the measured length is not in cm
+		coordinateScale = 0.01f;
+		// Root data must be loaded from rootArchitecture_file; do not gate it on the shoot path.
+		rootData = new XEGDataReader(PATH_INPUT, xNodeFactory);
+ 
+		loadNodeMap(rootData, rootArchitecture_file);
+		if (debugRootSoilGridVisualisation) {
+			println("[RootRead]"
+				+ " rootArchitecture_file=" + rootArchitecture_file
+				+ " shootArchitecture_file=" + shootArchitecture_file
+				+ " rootData.maxNodeID=" + (rootData == null ? -1 : rootData.maxNodeID));
+		}
+		debugRootDataSummary(rootArchitecture_file);
+	}
+
+	static void incIntMap(Map m, int key) {
+		Integer k = Integer.valueOf(key);
+		Integer v = (Integer) m.get(k);
+		m.put(k, Integer.valueOf(v == null ? 1 : v.intValue() + 1));
+	}
+
+	static boolean isGridRootMeristem(RootMeristem rm) {
+		if (rm == null || rm.N == null || rm.N.organType == null) return false;
+		String ot = rm.N.organType.toLowerCase();
+		return rm.hasBreakout == true && ot.indexOf("grid") >= 0;
+	}
+
+	static boolean isGridXRootNode(XNode n) {
+		if (!(n instanceof XRootNode)) return false;
+		if (n == null || n.organType == null) return false;
+		return n.organType.toLowerCase().indexOf("grid") >= 0;
+	}
+
+	static ArrayList getRootGridNodesForPlant(int plantNumber) {
+		ArrayList nodes = new ArrayList();
+		if (rootData == null) return nodes;
+		NodeMap nm = rootData.getNodeMap(plantNumber);
+		if (nm == null) return nodes;
+
+		for (Object kk : nm.getKeySet()) {
+			XNode n = nm.getNode(kk);
+			if (isGridXRootNode(n)) {
+				nodes.add(n);
+			}
+		}
+
+		Collections.sort(nodes, new Comparator() {
+			public int compare(Object a, Object b) {
+				XRootNode ra = (XRootNode) a;
+				XRootNode rb = (XRootNode) b;
+				if (ra.plantID != rb.plantID) return ra.plantID - rb.plantID;
+				if (ra.gridX != rb.gridX) return ra.gridX - rb.gridX;
+				if (ra.gridY != rb.gridY) return ra.gridY - rb.gridY;
+				if (ra.vLayer != rb.vLayer) return ra.vLayer - rb.vLayer;
+				return ra.id - rb.id;
+			}
+		});
+		return nodes;
+	}
+
+	static boolean rootDataHasNonGridRootNodes() {
+		if (rootData == null) return false;
+		int plants = Math.max(1, nrPlants * nrRows * nrStrips);
+		for (int pn = 1; pn <= plants; pn++) {
+			NodeMap nm = rootData.getNodeMap(pn);
+			if (nm == null) continue;
+			for (Object kk : nm.getKeySet()) {
+				XNode n = nm.getNode(kk);
+				if (!(n instanceof XRootNode)) continue;
+				String ot = (n.organType == null) ? "" : n.organType.toLowerCase();
+				if (ot.indexOf("grid") < 0) return true;
+			}
+		}
+		return false;
+	}
+
+	static double rootNodeDZ(XRootNode rn) {
+		if (rn == null) return soilGridSize;
+		if (rn.cellDZ > 0.0 && !Double.isNaN(rn.cellDZ)) return rn.cellDZ;
+		if (rn.soildepth > 0.0 && !Double.isNaN(rn.soildepth)) return rn.soildepth;
+		return soilGridSize;
+	}
+
+	static double rootNodeDX(XRootNode rn) {
+		if (rn == null) return soilGridSize;
+		if (rn.cellDX > 0.0 && !Double.isNaN(rn.cellDX)) return rn.cellDX;
+		return soilGridSize;
+	}
+
+	static double rootNodeDY(XRootNode rn) {
+		if (rn == null) return soilGridWidth;
+		if (rn.cellDY > 0.0 && !Double.isNaN(rn.cellDY)) return rn.cellDY;
+		return soilGridWidth;
+	}
+
+	static double rootGridVoxelX(XRootNode rn) {
+		if (rn == null || rn.start == null) return tx;
+		return rn.start.x + tx;
+	}
+
+	static double rootGridVoxelY(XRootNode rn) {
+		if (rn == null || rn.start == null) return ty;
+		return rn.start.y + ty;
+	}
+
+	static double rootGridVoxelZCentre(XRootNode rn) {
+		if (rn == null || rn.start == null) return 0.0;
+		// Root-grid CSV coordinates are voxel centres: layer 0 centre -0.1 with dz 0.2 has top face at z=0.
+		return rn.start.z;
+	}
+
+	static double rootGridToRootBaseLocalX(double xWorld, double yWorld, double zWorld) {
+		// Convert CSV/world-like root-grid coordinates into the current RootBase/RV-local frame.
+		// CSV/world convention: x is along row, y is perpendicular to row.
+		// RH(rowOrientation) is applied before emitting the grid, so no x/y swap is done here.
+		// RootBase is in an RV/RU-adjusted local turtle frame, so use sign inversion only.
+		return -xWorld;
+	}
+
+	static double rootGridToRootBaseLocalY(double xWorld, double yWorld, double zWorld) {
+		return -yWorld;
+	}
+
+	static double rootGridToRootBaseLocalZ(double xWorld, double yWorld, double zWorld) {
+		return -zWorld;
+	}
+
+	static int countNonNullObjects(Object[] a) {
+		if (a == null) return 0;
+		int n = 0;
+		for (int i = 0; i < a.length; i++) {
+			if (a[i] != null) n++;
+		}
+		return n;
+	}
+
+	static int countNonZeroLongs(long[] a) {
+		if (a == null) return 0;
+		int n = 0;
+		for (int i = 0; i < a.length; i++) {
+			if (a[i] != 0L) n++;
+		}
+		return n;
+	}
+
+	static void debugRootBaseCounts(String tag, RootBase rb) {
+		if (!debugRootSoilGridVisualisation || rb == null) return;
+		println(tag
+			+ " plant=" + rb.plantNumber
+			+ " slArrayLength=" + (rb.sl == null ? -1 : rb.sl.length)
+			+ " provisionalSl=" + countNonNullObjects(rb.sl)
+			+ " provisionalFr=" + countNonNullObjects(rb.frs)
+			+ " provisionalSr=" + countNonNullObjects(rb.srs)
+			+ " slIDs.length=" + (rb.slIDs == null ? -1 : rb.slIDs.length)
+			+ " linkedSl=" + countNonZeroLongs(rb.slIDs)
+			+ " linkedFr=" + countNonZeroLongs(rb.frIDs)
+			+ " linkedSr=" + countNonZeroLongs(rb.srIDs));
+	}
+
+	static void debugRootDataSummary(String fileName) {
+		if (!debugRootSoilGridVisualisation || rootData == null) return;
+
+		int nodeCount = 0;
+		int gridRows = 0;
+		int xRootNodes = 0;
+		int layer0GridRows = 0;
+		Map byLayer = new HashMap();
+		Map byColumn = new HashMap();
+		Map byVoxel = new HashMap();
+		int plants = Math.max(1, nrPlants * nrRows * nrStrips);
+
+		for (int pn = 1; pn <= plants; pn++) {
+			NodeMap nm = rootData.getNodeMap(pn);
+			if (nm == null) continue;
+			for (Object kk : nm.getKeySet()) {
+				XNode n = nm.getNode(kk);
+				if (n == null) continue;
+				nodeCount++;
+				String ot = (n.organType == null) ? "" : n.organType.toLowerCase();
+				if (ot.indexOf("grid") >= 0) {
+					gridRows++;
+					if (n instanceof XRootNode) {
+						XRootNode rn = (XRootNode) n;
+						xRootNodes++;
+						incIntMap(byLayer, rn.vLayer);
+						String colKey = rn.gridX + "," + rn.gridY;
+						Integer cv = (Integer) byColumn.get(colKey);
+						byColumn.put(colKey, Integer.valueOf(cv == null ? 1 : cv.intValue() + 1));
+						String voxelKey = rn.gridX + "," + rn.gridY + "," + rn.vLayer;
+						Integer vv = (Integer) byVoxel.get(voxelKey);
+						byVoxel.put(voxelKey, Integer.valueOf(vv == null ? 1 : vv.intValue() + 1));
+						if (rn.vLayer == 0) layer0GridRows++;
+					}
+				}
+			}
+		}
+
+		println("[RootSoilGrid:read] file=" + fileName
+			+ " nodes=" + nodeCount
+			+ " gridRows=" + gridRows
+			+ " xRootGridRows=" + xRootNodes
+			+ " layer0GridRows=" + layer0GridRows
+			+ " byLayer=" + byLayer
+			+ " columns=" + byColumn.size()
+			+ " voxels=" + byVoxel.size());
+	}
+
+	static void debugRootMeristemSummary() {
+		if (!debugRootSoilGridVisualisation) return;
+
+		int rmCount = 0;
+		Map byLayer = new HashMap();
+		Map byColumn = new HashMap();
+		Map byVoxel = new HashMap();
+		[
+			rm:RootMeristem, (isGridRootMeristem(rm)) ::> {
+				rmCount++;
+				incIntMap(byLayer, rm.N.vLayer);
+				String colKey = rm.N.gridX + "," + rm.N.gridY;
+				Integer cv = (Integer) byColumn.get(colKey);
+				byColumn.put(colKey, Integer.valueOf(cv == null ? 1 : cv.intValue() + 1));
+				String voxelKey = rm.N.gridX + "," + rm.N.gridY + "," + rm.N.vLayer;
+				Integer vv = (Integer) byVoxel.get(voxelKey);
+				byVoxel.put(voxelKey, Integer.valueOf(vv == null ? 1 : vv.intValue() + 1));
+			}
+		]
+
+		println("[RootSoilGrid:meristem]"
+			+ " breakoutGridRootMeristems=" + rmCount
+			+ " byLayer=" + byLayer
+			+ " columns=" + byColumn.size()
+			+ " voxels=" + byVoxel.size());
+	}
+
+	static void debugRootBaseAndSoilActualLocations() {
+		if (!debugRootSoilGridVisualisation) return;
+		[
+			pb:PlantBase ::> {
+				try {
+					println("[RootFrame] pb plant=" + pb.plantNumber
+						+ " loc=" + location(pb).x + "," + location(pb).y + "," + location(pb).z);
+				} catch (RuntimeException e) {
+					println("[RootFrame] pb location unavailable plant=" + pb.plantNumber);
+				}
+			}
+		]
+		[
+			rb:RootBase ::> {
+				try {
+					println("[RootFrame] rb plant=" + rb.plantNumber
+						+ " loc=" + location(rb).x + "," + location(rb).y + "," + location(rb).z);
+				} catch (RuntimeException e) {
+					println("[RootFrame] rb location unavailable plant=" + rb.plantNumber);
+				}
+			}
+		]
+		[
+			t:Trunk ::> {
+				try {
+					println("[RootFrame] trunk id=" + t.getId()
+						+ " plant=" + t.plantNumber
+						+ " loc=" + location(t).x + "," + location(t).y + "," + location(t).z);
+				} catch (RuntimeException e) {
+					println("[RootFrame] trunk location unavailable id=" + t.getId());
+				}
+			}
+		]
+		[
+			s:Soil, (s.layer == 0 && s.gridX == 0 && s.gridY == 0) ::> {
+				try {
+					println("[SoilActual] id=" + s.id
+						+ " grid=" + s.gridX + "," + s.gridY
+						+ " layer=" + s.layer
+						+ " loc=" + location(s).x + "," + location(s).y + "," + location(s).z
+						+ " dims=" + s.widthX + "," + s.widthY + "," + s.length);
+				} catch (RuntimeException e) {
+					println("[SoilActual] location unavailable id=" + s.id
+						+ " grid=" + s.gridX + "," + s.gridY
+						+ " layer=" + s.layer);
+				}
+			}
+		]
+	}
+
+	static void debugRootVisualChecks() {
+		if (!debugRootSoilGridVisualisation) return;
+		[
+			{ int printed = 0; }
+			f:FineRoot, (printed < 5 && f.parentID > 0) ::> {
+				StructuralRoot srNode = null;
+				Soil soilNode = null;
+				Object parentObj = f.getParent();
+				if (parentObj instanceof StructuralRoot) {
+					srNode = (StructuralRoot) parentObj;
+				}
+				if (f.slID > 0) {
+					Object soilObj = graph().getNodeForId(f.slID);
+					if (soilObj instanceof Soil) {
+						soilNode = (Soil) soilObj;
+					}
+				}
+				boolean parentOK = (srNode != null && f.parentID == srNode.getId());
+				boolean backlinkOK = (srNode != null && srNode.frID == f.getId());
+				boolean sameVoxelOK = (soilNode != null
+					&& srNode != null
+					&& soilNode.id == f.ID
+					&& soilNode.id == srNode.ID
+					&& soilNode.plantNumber == f.plantNumber
+					&& soilNode.plantNumber == srNode.plantNumber
+					&& soilNode.layer == f.layer
+					&& soilNode.layer == srNode.layer
+					&& soilNode.gridX == srNode.gridX
+					&& soilNode.gridY == srNode.gridY);
+				println("[RootLinkCheck]"
+					+ " plant=" + f.plantNumber
+					+ " voxelID=" + f.ID
+					+ " grid=" + (soilNode == null ? "NA" : (soilNode.gridX + "," + soilNode.gridY))
+					+ " layer=" + f.layer
+					+ " soilGraphID=" + (soilNode == null ? -1 : soilNode.getId())
+					+ " srGraphID=" + (srNode == null ? -1 : srNode.getId())
+					+ " frGraphID=" + f.getId()
+					+ " fr.parentID=" + f.parentID
+					+ " sr.frID=" + (srNode == null ? -1 : srNode.frID)
+					+ " parentOK=" + parentOK
+					+ " backlinkOK=" + backlinkOK
+					+ " sameVoxelOK=" + sameVoxelOK);
+				try {
+					println("[RootVisualCheck]"
+						+ " plant=" + f.plantNumber
+						+ " voxelID=" + f.ID
+						+ " soilLoc=" + (soilNode == null ? "NA" : (location(soilNode).x + "," + location(soilNode).y + "," + location(soilNode).z))
+						+ " srLoc=" + (srNode == null ? "NA" : (location(srNode).x + "," + location(srNode).y + "," + location(srNode).z))
+						+ " frLoc=" + location(f).x + "," + location(f).y + "," + location(f).z
+						+ " sr.length=" + (srNode == null ? Double.NaN : srNode.length)
+						+ " dz=" + (soilNode == null ? Double.NaN : soilNode.length));
+				} catch (RuntimeException e) {
+					println("[RootVisualCheck] location unavailable"
+						+ " plant=" + f.plantNumber
+						+ " voxelID=" + f.ID
+						+ " reason=" + e.getMessage());
+				}
+				printed++;
+			}
+		]
+	}
+
+	/**
+	 * Creates complex-root soil voxels directly from imported root-grid CSV data.
+	 *
+	 * Root-grid CSV rows are biological voxel centres: x is along the orchard row,
+	 * y is perpendicular to the row, and z is vertical with negative values below
+	 * the soil surface. RH(rowOrientation) is applied before emitting voxels under
+	 * RootBase, so the coordinate helpers use sign inversion only and do not swap
+	 * x/y. The final Translate uses zLocal - 0.5 * dz as a visual-origin correction
+	 * for Soil extending M(length); rn.start.z remains the biological voxel centre.
+	 *
+	 * Do not call location(s) in the same production that creates s:Soil. Use the
+	 * post-creation diagnostics above instead.
+	 */
+	static void addRootSoilGridFromRootData() {
+		[
+			rb:RootBase ==>
+				RH(rowOrientation)
+				rb [
+					{
+						ArrayList rootGridNodes = getRootGridNodesForPlant(rb.plantNumber);
+						PlantBase pb = first((* p:PlantBase, (p.plantNumber == rb.plantNumber) *));
+
+						if (debugRootSoilGridVisualisation) {
+							println("[RootSoilGrid:array]"
+								+ " plant=" + rb.plantNumber
+								+ " rbArrayLength=" + (rb.sl == null ? -1 : rb.sl.length)
+								+ " maxNodeID=" + (rootData == null ? -1 : rootData.maxNodeID)
+								+ " importedGridRows=" + rootGridNodes.size());
+						}
+					}
+
+					for (int vi = 0; vi < rootGridNodes.size(); vi++) (
+						[
+							{
+								XRootNode rn = null;
+								RootMeristem rm = null;
+
+								double dx = 0.0;
+								double dy = 0.0;
+								double dz = 0.0;
+								double xWorld = 0.0;
+								double yWorld = 0.0;
+								double zWorld = 0.0;
+								double xLocal = 0.0;
+								double yLocal = 0.0;
+								double zLocal = 0.0;
+								double zTopWorld = 0.0;
+								double zBottomWorld = 0.0;
+
+								boolean validRootGridNode = false;
+
+								Object obj = rootGridNodes.get(vi);
+								if (obj instanceof XRootNode) {
+									rn = (XRootNode) obj;
+
+									if (rn != null && rn.start != null) {
+										rm = new RootMeristem(rn);
+										rm.hasBreakout = true;
+										rm.pi = rb.pi;
+
+										dx = rootNodeDX(rn);
+										dy = rootNodeDY(rn);
+										dz = rootNodeDZ(rn);
+
+										xWorld = rootGridVoxelX(rn);
+										yWorld = rootGridVoxelY(rn);
+										zWorld = rootGridVoxelZCentre(rn);
+										xLocal = rootGridToRootBaseLocalX(xWorld, yWorld, zWorld);
+										yLocal = rootGridToRootBaseLocalY(xWorld, yWorld, zWorld);
+										zLocal = rootGridToRootBaseLocalZ(xWorld, yWorld, zWorld);
+										zTopWorld = zWorld + 0.5 * dz;
+										zBottomWorld = zWorld - 0.5 * dz;
+
+										validRootGridNode = true;
+									}
+								}
+
+								if (!validRootGridNode) {
+									println("[RootSoilGrid:createFromData] skip invalid root grid node"
+										+ " plant=" + rb.plantNumber
+										+ " vi=" + vi);
+								}
+							}
+
+							if (validRootGridNode) (
+								RV(10000)
+								Translate(xLocal, yLocal, zLocal - 0.5 * dz)
+
+								s:Soil [
+									M(- 0.5 *dz)
+									[sr:StructuralRoot]
+									[
+										f:FineRoot
+									]
+								]
+
+								{
+									if (pb != null) {
+										s.initiate(pb, rm);
+										f.initiate_node(pb, rm);
+										sr.initiate_node(pb, rm);
+										f.nodeID = f.getId();
+										sr.nodeID = sr.getId();
+										f.storeParentId(sr);
+										sr.frID = f.getId();
+										rb.addChildSoilRoot(rn.id, s, f, sr);
+
+										if (debugRootSoilGridVisualisation) {
+											boolean parentOK = (f.parentID == sr.getId());
+											boolean backlinkOK = (sr.frID == f.getId());
+											boolean sameVoxelOK = (s.id == rn.id
+												&& sr.ID == rn.id
+												&& f.ID == rn.id
+												&& s.plantNumber == sr.plantNumber
+												&& s.plantNumber == f.plantNumber
+												&& s.layer == sr.layer
+												&& s.layer == f.layer
+												&& s.gridX == sr.gridX
+												&& s.gridY == sr.gridY);
+											println("[RootLinkCheck]"
+												+ " plant=" + rn.plantID
+												+ " voxelID=" + rn.id
+												+ " grid=" + rn.gridX + "," + rn.gridY
+												+ " layer=" + rn.vLayer
+												+ " soilGraphID=" + s.getId()
+												+ " srGraphID=" + sr.getId()
+												+ " frGraphID=" + f.getId()
+												+ " fr.parentID=" + f.parentID
+												+ " sr.frID=" + sr.frID
+												+ " parentOK=" + parentOK
+												+ " backlinkOK=" + backlinkOK
+												+ " sameVoxelOK=" + sameVoxelOK);
+											println("[RootSoilGrid:place]"
+												+ " id=" + rn.id
+												+ " pid=" + rn.pid
+												+ " plant=" + rn.plantID
+												+ " grid=" + rn.gridX + "," + rn.gridY
+												+ " layer=" + rn.vLayer
+												+ " csvCentre=" + rn.start.x + "," + rn.start.y + "," + rn.start.z
+												+ " worldCentre=" + xWorld + "," + yWorld + "," + zWorld
+												+ " localTranslate=" + xLocal + "," + yLocal + "," + zLocal
+												+ " zTopWorld=" + zTopWorld
+												+ " zBottomWorld=" + zBottomWorld
+												+ " soil=" + s.getId()
+												+ " dims=" + dx + "," + dy + "," + dz);
+										}
+									} else {
+										println("[RootSoilGrid:createFromData] missing PlantBase for plant "
+											+ rb.plantNumber);
+									}
+								}
+							)
+						]
+					)
+				];
+		]
+
+		if (debugRootSoilGridVisualisation) [
+			rb2:RootBase ::> {
+				debugRootBaseCounts("[RootSoilGrid:createFromData]", rb2);
+			}
+		]
+		debugRootVisualChecks();
+	}
+	
+	
+	/**
+ * Adds soil grid and associated roots for each plant in the simulation.
+ * This method:
+ * - Matches root meristem nodes based on breakout conditions.
+ * - Translates and initializes corresponding soil and root elements.
+ * - Associates the new soil and root elements with plant bases.
+ * - Resizes arrays by removing null entries after soil initialization.
+ *
+ //this is a very important rule that separate different columns of soil
+		if(r2.N.vLayer == 0 && r2.N.order > 0) (
+			RV(10000)Translate(r2.N.start.x-location(r2).x+tx,
+					  r2.N.start.y-location(r2).y+ty, 
+					  location(r2).z)
+		)
+ */
+
+/**
+ * Adds the soil grid and associated root placeholders from an aggregated root–grid
+ * representation.
+ *
+ * <p><b>Big picture.</b> For each plant, detect the transition from the reconstructed
+ * “skeleton” root graph to the aggregated root grid, then spawn one soil cell plus a
+ * structural/fine-root pair <i>once per grid column</i>. The soil column is aligned to the
+ * coordinates supplied in the CSV (N.start) and shifted by the plant offsets (tx, ty, tz).</p>
+ *
+ * <h4>Detection rule (boundary to a grid column)</h4>
+ * <pre>{@code
+ * r1:RootMeristem r2:RootMeristem,
+ * (r1.hasBreakout == false && r2.hasBreakout == true) ==> ...
+ * }</pre>
+ * <ul>
+ *   <li>{@code r2.hasBreakout == true} marks the first aggregated “Grid” node in a column
+ *       (set in {@code RootFactory} for organ_type == "Grid").</li>
+ *   <li>{@code r1.hasBreakout == false} ensures we are exactly at the transition from the
+ *       non-grid (skeleton) part to the grid.</li>
+ * </ul>
+ *
+ * <h4>On match</h4>
+ * <ol>
+ *   <li>If {@code r2.N.vLayer == 0} and {@code r2.N.order > 0}, establish the column’s
+ *       anchor transform at the top layer (align to {@code r2.N.start} + {@code (tx,ty,tz)}).
+ *       Lower layers reuse this anchor to avoid cumulative drift.</li>
+ *   <li>Create {@code Soil} → {@code StructuralRoot} → {@code FineRoot} objects and
+ *       initialize them from {@code r2} (cell geometry, IDs, fractions, soil state).</li>
+ *   <li>Register the created objects in the owning {@code RootBase} via
+ *       {@code rb.addChildSoilRoot(r2.N.id, s, f, sr)} for later access and cleanup.</li>
+ * </ol>
+ *
+ * <h4>Coordinate frames & transforms</h4>
+ * <ul>
+ *   <li>{@code Translate(...)} places the cell in world space at the CSV position (plus
+ *       offsets). Because {@code location(r2)} may differ from {@code r2.N.start} after
+ *       reconstruction, the translation uses the delta between those coordinates.</li>
+ *   <li>{@code RH(-rowOrientation)} rotates the box around the local z‑axis so that the
+ *       cell’s x–y footprint aligns with the vineyard row direction. The negative sign
+ *       corrects the handedness/sign convention mismatch between the measured row angle
+ *       and the local frame at insertion time.</li>
+ *   <li>Centering the geometry: apply {@code M(-dz/2)} immediately before {@code Box(dz,dx,dy)}
+ *       so the box’s top face sits at the soil surface (optional but recommended).</li>
+ * </ul>
+ *
+ * <h4>Postconditions</h4>
+ * <ul>
+ *   <li>Exactly one soil column is spawned per aggregated grid column and plant.</li>
+ *   <li>Each cell is aligned to CSV coordinates and row orientation, with consistent layer spacing.</li>
+ *   <li>All created references are tracked by {@code RootBase}; null entries can be removed later
+ *       (e.g., via {@code rb.filterAndResizeArrays()}).</li>
+ * </ul>
+ *
+ * <h4>Implementation note</h4>
+ * <pre>{@code
+ * // Local-axis rotation fixing the visual alignment:
+ * because soil grid is pointing downwards, so x and y needs to swapped
+ * Box(length, widthY , widthX ).(setLayer(soilLayer), setShader(DARK_GRAY));
+ }</pre>
+ *
+ * <h4>Debugging tip</h4>
+ * Use {@code println("soil location: " + location(this));} and
+ * {@code println("soil dir: " + direction(this));} right after the box is created to verify
+ * world position and vertical axis.
+ **/
+
+ 
+	/**
+	 * Legacy transition-based complex-root soil-grid creation.
+	 * Kept for rollback/comparison. Current GPU ArchReader complex-root path uses
+	 * addRootSoilGridFromRootData().
+	 */
+	static void addRootSoilGrid() { 	
+		[
+		// fires once at the boundary to a grid column
+			r1:RootMeristem r2:RootMeristem,
+			(r1.hasBreakout == false && r2.hasBreakout == true) ==>  
+			
+			// anchor only at the top layer
+			if (r2.N.vLayer == 0 && r2.N.order > 0) (
+				Translate(  // shift the insertion point to CSV x,y (+ offsets)
+		
+				r2.N.start.y - location(r2).y + ty,
+				r2.N.start.x - location(r2).x + tx,		
+					location(r2).z   // keep current z; change to r2.N.start.z if desired
+				)
+			)
+			
+			// create the cell and center the root geometry *within* the cell
+			s:Soil [ 
+			   M(-soilGridSize * 0.5)     // half-cell centering along local z
+			   sr:StructuralRoot [ f:FineRoot ]
+			] {
+			   // tie objects to the plant/root bases and initialize from r2’s grid record
+			   PlantBase pb = first((* p:PlantBase, (p.plantNumber == r2.pi.plantNumber)*));
+			   RootBase  rb = first((* r:RootBase,  (r.plantNumber == r2.pi.plantNumber)*));
+			   s.initiate(pb, r2); 
+			   sr.initiate_node(pb, r2);
+			   f.initiate_node(pb, r2);
+			   rb.addChildSoilRoot(r2.N.id, s, f, sr);
+			};
+			  	   
+		]
+	}
+
+	
+	/**
+ * Adds buds to each internode with an associated shoot meristem.
+ * This method:
+ * - Creates a new bud using the BudService.
+ * - Associates the new bud with plant bases that contain valid internodes.
+ */
+	static void addBuds() { 	
+		BudPlannerConfig.Cfg cfg = BudPlannerConfig.buildCfgFromProjectParams(false, 0);
+		BudPlannerT0.seedImportedArchitectureBuds_T0(cfg);
+	}
+	
+	
+	
+	
+	/**
+ * Adds leaves to each internode based on plant configuration.
+ * This method:
+ * - Configures leaf parameters based on the internode rank and plant type.
+ * - Creates and initializes petioles, midribs, and leaf polygons.
+ * - Uses a calculated leaf declination angle for realism.
+ */
+	//It is not a good idea to replace/remove the organ node as it will greatly affect the architecture.
+	//we can keep the organ node and root meristem just for check whether the condition is good to grow new apex and add the new apex as a new branch besides it
+	static void addLeaves() {
+				
+			[
+			i:Internode, (!((i instanceof Cordon) || (i instanceof Trunk))) ==>  i 
+			   {
+			   	   PlantBase pb = first((* p:PlantBase, (p.plantNumber == i.plantNumber)*)); 		 
+			   }
+			
+				[ //adding leaves
+				RH(i.rank * phyllotaxis) RU(-45) AdjustLU pt:Petiole
+				//AdjustLU make the rotated local x-axis (the turtle's left axis) is horizontal
+				{pt.initiate_pb(pb, i.rank, (int) i.ID, 1); pt.order = i.order;}				
+				//regular fixed settings for leaf angle
+				RH(180) 
+				//@need to update the leaf declination angles 
+				jm:JMidrib(JMidrib.calcLeafDeclination(pt.rank, pt.order, 0.1))
+				for (int m = 0; m < leafShape.polyleaf[0].length; m++) (
+					[lf:Leaf]
+					{
+						lf.initiate_pb(pb, i.rank, i.nodeNumber, i.cordonNumber); 
+						lf.order = i.order;
+						lf.fid = m;
+						lf.area = leafShape.calcLeafPolygonArea(lf.length, lf.width, lf.fid);
+						jm.initiate(lf);
+						//println("leaf biomass: " + lf.biomass);
+					}
+				) //close the leaf loop
+				] //close the RH petilo loop
+				; //close the line of internode replacement rule			
+				]
+
+				
+				if(!main.FRUIT_CREATOR.usesVirtualFruitService()) {
+				[
+					i:Internode, ((i.rank == 3 || i.rank == 4) && i.order== 4 && bunchCount < bunchNumPerVine) ==> i
+					{
+						FruitService b = main.FRUIT_CREATOR.createFruit();
+					}
+					[
+						b {
+							bunchCount++;
+							PlantBase pb = first((* p:PlantBase, (p.plantNumber == i.plantNumber)*));
+							b.initiate_pb(pb, i.rank, i.nodeNumber, i.cordonNumber);
+						}
+					];
+				]//closing adding bunches
+				}
+				
+				//for species except grapevine
+				if(main.FRUIT_CREATOR.usesVirtualFruitService())
+				{
+					FruitPlanner.addInitialAppleFruitsFromTargets(false);
+				}
+				
+				
+		
+	}
+
+}

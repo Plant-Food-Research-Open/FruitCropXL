@@ -1,0 +1,1106 @@
+import static absOrgan.*;
+import static leaf.*;
+import static shoot.*;
+import static plantBase.*;
+import static extraTools.*;
+import static globalParameters.*;
+import static plantParameters.*;
+import static modelOptions.*;
+import static initialConditions.*;
+import static environment.*;
+import static carbonTransport.*;
+import static rootSystem.*;
+import static soil.*;
+import static fruitBase.*;
+import static fineRoot.*;
+import static structuralRoot.*;
+import static fieldBase.*;
+/**
+ * Charts.rgg
+ *
+ * Set or predefined charts.
+ *
+ * This file is part of the FSPM-Prototype 0.4
+ * Functional Structural Plant Modelling - Prototype 
+ *
+ * by Michael Henke and Gerhard Buck-Sorlin, Nov. 2009-2014
+ * revised by Junqi Zhu 2015.
+*/
+// identifies the individual from which the charts are made of
+
+// identifies the secound individual to compare with the first one
+private static int INDI_ID_B = 1;
+// chart descriptions 
+private final static String[] CHART_DESCRIPTION = {
+// system simulation rates
+	"Simulation rate(s/step)", // 0
+// field level specific
+	"Leaf area index", //1
+// plant level specific
+	"Plant dry mass [g] (P "+INDI_ID_A+")", // 2
+	"Plant nitrogen common pool[mg] (P "+INDI_ID_A+")", // 3
+	"Plant mobile N content (P "+INDI_ID_A+")", // 4
+	"Plant leaf area [m2](P "+INDI_ID_A+")", // 5
+	"Plant height [m](P "+INDI_ID_A+")", // 6
+	"Radiation (P "+INDI_ID_A+")", // 7
+//biomass of different part
+	"biomass of different organs", // 8
+ // respiration
+	"Growth + maintenance respiration [g c]", // 9
+// carbon assimilation
+	"Carbon assimilation, [mg/hour]", // 10
+// Water flux 
+	"Water flux of the whole plant [mg/s]",   //11
+// leaf specific
+	"Area of leaf blades 1 to 16 [m2]", // 12
+	"Carbon assimilation rate of leaves 1 to 16 [umol co2/m2/s]", // 13 useful for calibrating 
+	"Transpiration rate of leaves 1 to 16 [mm/s]", // 14
+	
+	"Soil available water [kg]", // 15 
+	"Soil water potential [MPa]", // 16
+	"FineRoot conductance [mg/MPa/s]", // 17
+	"Xylem water potential [MPa]", // 18
+	
+//single fruit properties
+	"Fruit fresh and dry weight, [mg]", // 19 
+	"Sugar and water import, [g/hour]", // 20
+	"Water balance, [g/hour]",// 21
+	"Fruit water potential, [MPa]", //22
+	"Phloem water potential, [MPa]", //23
+	// phloem concentration
+	"Carbon partition",  //24
+	"phloem concentration [mg/mgH20]",  //25  times 1/0.42/342 * 1e6 to get mmol/L, 0.036 mg/mg is about 250 mmol/L
+	//root nitrogen uptake
+	"FineRoot nitrogen uptake and cost [mg]",  //26
+	//stomata conductance outputed by xinyou's method and by tardieu's method
+	"Stomata conductance of leaves 1 to 16, [mol/m2/s]", //27
+	"leaf temperature 1 to 16 degree", //28
+	"C partitioning fraction", //29
+	"Fruit sugar concentration", //30
+	"Leaf conductance of leaves 1 to 16, [mg/MPa/s]", //31
+	"water potential of leaves 1 to 16, [MPa]", //32
+	"ABA concentration umol/m3", //33
+	"carbon potential", //34
+	"bunches at different positions", //35
+	"Fraction of carbon unloading (daily mean)" //36
+	
+	//"Actual DW vs. final DW (measured) of leaves 1 to 15 [g C]", //19
+	
+};
+
+
+// selection of charts; maximum 10 in total (max(|CHARTS|+|CHARTS_VS|)=10)!
+// to monitor a single individual
+//private final static int[] CHARTS = {11, 5,7,8, 3,26, 9, 10,14, 15, 16, 17, 18, 33, 25, 24, 29,30,19, 21, 31, 32, 27}; // {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}
+//private final static int[] CHARTS = {11,19, 8, 16, 20,21,22,23,24,25,29}; // {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}
+/* optimization CARBON ALLOCATION USING CHART 8*/
+//private final static int[] CHARTS = {8, 25, 12, 5, 11,18};
+//private final static int[] CHARTS = {7, 10, 8, 24, 34};
+static int[] CHARTS = {0};
+//static int[] CHARTS = {7, 8, 10, 11, 18, 19, 23};
+// array of datasets
+static DatasetRef DATASETS[] = {
+	new DatasetRef("CHART 0"),
+	new DatasetRef("CHART 1"), new DatasetRef("CHART 2"),
+	new DatasetRef("CHART 3"), new DatasetRef("CHART 4"),
+	new DatasetRef("CHART 5"), new DatasetRef("CHART 6"),
+	new DatasetRef("CHART 7"), new DatasetRef("CHART 8"),
+	new DatasetRef("CHART 9"), new DatasetRef("CHART 10"),
+	new DatasetRef("CHART 11"), new DatasetRef("CHART 12"),
+	new DatasetRef("CHART 13"), new DatasetRef("CHART 14"),
+	new DatasetRef("CHART 15"), new DatasetRef("CHART 16"),
+	new DatasetRef("CHART 17"), new DatasetRef("CHART 18"),
+	new DatasetRef("CHART 19"), new DatasetRef("CHART 20"),
+	new DatasetRef("CHART 21"), new DatasetRef("CHART 22"),
+	new DatasetRef("CHART 23"), new DatasetRef("CHART 24"),
+	new DatasetRef("CHART 25"), new DatasetRef("CHART 26"),
+	new DatasetRef("CHART 27"), new DatasetRef("CHART 28"),
+	new DatasetRef("CHART 29"), new DatasetRef("CHART 30"),
+	new DatasetRef("CHART 31"), new DatasetRef("CHART 32"),
+	new DatasetRef("CHART 33"), new DatasetRef("CHART 34")
+};
+
+private final static int MAX_DAILY_UNLOADING_SCENARIOS = 64;
+private static int[] dailyMeanUnloadingDay = new int[MAX_DAILY_UNLOADING_SCENARIOS];
+private static int[] dailyMeanUnloadingCount = new int[MAX_DAILY_UNLOADING_SCENARIOS];
+private static double[] dailyMeanFineRootUnloadingSum = new double[MAX_DAILY_UNLOADING_SCENARIOS];
+private static double[] dailyMeanLeafUnloadingSum = new double[MAX_DAILY_UNLOADING_SCENARIOS];
+private static double[] dailyMeanPerennielWoodUnloadingSum = new double[MAX_DAILY_UNLOADING_SCENARIOS];
+private static double[] dailyMeanFruitUnloadingSum = new double[MAX_DAILY_UNLOADING_SCENARIOS];
+private static double[] dailyMeanInternodeUnloadingSum = new double[MAX_DAILY_UNLOADING_SCENARIOS];
+private static double[] dailyMeanStructuralRootUnloadingSum = new double[MAX_DAILY_UNLOADING_SCENARIOS];
+
+private static void resetDailyMeanUnloading(int scenarioIndex, int currentDay) {
+	dailyMeanUnloadingDay[scenarioIndex] = currentDay;
+	dailyMeanUnloadingCount[scenarioIndex] = 0;
+	dailyMeanFineRootUnloadingSum[scenarioIndex] = 0;
+	dailyMeanLeafUnloadingSum[scenarioIndex] = 0;
+	dailyMeanPerennielWoodUnloadingSum[scenarioIndex] = 0;
+	dailyMeanFruitUnloadingSum[scenarioIndex] = 0;
+	dailyMeanInternodeUnloadingSum[scenarioIndex] = 0;
+	dailyMeanStructuralRootUnloadingSum[scenarioIndex] = 0;
+}
+
+private static int getDailyMeanUnloadingScenarioIndex(int scenarioNumber) {
+	if (scenarioNumber < 0) {
+		return 0;
+	}
+	if (scenarioNumber >= MAX_DAILY_UNLOADING_SCENARIOS) {
+		return MAX_DAILY_UNLOADING_SCENARIOS - 1;
+	}
+	return scenarioNumber;
+}
+
+// initialize the charts
+protected static void initCharts() {
+	// init charts to monitor a single individual
+	for (int i=0; i<CHARTS.length; i++) {
+		initChart(CHARTS[i], DATASETS[i]);
+		chart(DATASETS[i], XY_PLOT); //LINE_PLOT
+	}
+	// init charts to compare individuals
+	/* for (int i=0; i<CHARTS_VS.length; i++) {
+		initChartVS(CHARTS_VS[i], DATASETS[i]);
+		chart(DATASETS[i], XY_PLOT); //LINE_PLOT
+	} */
+}
+
+/**
+ * this functions initializes the single charts
+ */
+private static void initChart(int chart, DatasetRef dataset) {
+	if (chart==0) {
+		dataset.clear().setTitle(CHART_DESCRIPTION[chart]).
+			setColumnKey(0,"simRate (steps/s)");
+	}
+	if (chart==1) {
+		dataset.clear().setTitle(CHART_DESCRIPTION[chart]).
+			setColumnKey(0,"LAI ");
+	}
+	if (chart==2) {
+		dataset.clear().setTitle(CHART_DESCRIPTION[chart]).
+			setColumnKey(0, "Plant biomass(g)").
+			setColumnKey(1, "Carbon total (g)");
+	}
+	if (chart==3) {
+		dataset.clear().setTitle(CHART_DESCRIPTION[chart]).
+		setColumnKey(0,"Plant nitrogen common pool[mg]");
+	}
+
+	if( chart== 4 )  {
+		dataset.clear().setTitle(CHART_DESCRIPTION[chart]).
+			setColumnKey(0,"Plant mobile N content");
+	}
+
+	if(chart==5) {
+		dataset.clear().setTitle(CHART_DESCRIPTION[chart]).
+			setColumnKey(0,"Leaf area(m2)");
+	}
+
+	if(chart==6) {
+		dataset.clear().setTitle(CHART_DESCRIPTION[chart]).
+			setColumnKey(0,"Plant height(m)");
+	}
+
+	if(chart==7) {
+		dataset.clear().setTitle(CHART_DESCRIPTION[chart]).
+			setColumnKey(0,"fabs").setColumnKey(1,"absm2 umol/m2/s").
+			setColumnKey(2,"incoming radiation umol/m2/s").
+			setColumnKey(3,"plant radiation absorption umol/plant/s");
+	}
+	if(chart==8) {
+		dataset.clear().setTitle(CHART_DESCRIPTION[chart]).
+			setColumnKey(0,"leafDM").setColumnKey(1,"internodeDM").
+			setColumnKey(2,"woodDM").setColumnKey(3,"rootDM").
+			setColumnKey(4,"berryDM").setColumnKey(5,"leafNSC").
+			setColumnKey(6,"internodeNSC").setColumnKey(7,"trunkNSC").
+			setColumnKey(8,"fineRootNSC").setColumnKey(9,"berrySugar").
+			setColumnKey(10,"KM_BERRY").setColumnKey(11, "KM_ROOTS").
+			setColumnKey(12,"KM_SECONDARY").	
+			setColumnKey(13,"HYDROLYSIS_RATE").
+			setColumnKey(14, "day").
+			setColumnKey(15, "hourOfDay").
+			setColumnKey(16, "scenario").
+			setColumnKey(17, "structuralRootDM").
+			setColumnKey(18, "structuralRootNSC").
+			setColumnKey(19, "cordonDM").
+			setColumnKey(20, "cordonNSC")
+			;
+	}
+	
+    if(chart==9) {
+		dataset.clear().setTitle(CHART_DESCRIPTION[chart]).
+		setColumnKey(0,"maintance [gc])").setColumnKey(1,"growth respiration [gc])").
+		setColumnKey(2,"whole respiration [gc])");
+	}
+	
+   	if(chart == 10) {
+		dataset.clear().setTitle(CHART_DESCRIPTION[chart])
+		/* .setColumnKey(0,"row distance [m]")
+		.setColumnKey(1,"plant distance [m]")
+		.setColumnKey(2,"leaf area per vine [m2]")
+		.setColumnKey(3,"LAI")
+		.setColumnKey(4,"absorbedPAR")
+		.setColumnKey(5,"incPAR")
+		.setColumnKey(6,"fPAR-plant")
+		.setColumnKey(7,"fPAR-btleaf") */
+		.setColumnKey(8,"CarbonAssimilation [mg/h/plant]")
+		.setColumnKey(9,"carbonAssimilation [mg/h/m2]")
+		/* .setColumnKey(10,"biomass [mg/m2]")
+		.setColumnKey(11,"accBiomass [mg/m2]")
+		.setColumnKey(12,"waterFlux [mg/h/m2]")
+		.setColumnKey(13,"fPAR-btleaf-btLayer")
+		.setColumnKey(14, "meanLeafMidLayer")
+		.setColumnKey(15, "meanLeafUpLayer")
+		.setColumnKey(16, "fdiff")
+		.setColumnKey(17, "hourOfDay")
+		.setColumnKey(18, "density")
+		.setColumnKey(19, "scenario")
+		.setColumnKey(20, "fruitUnloading")
+		.setColumnKey(21, "internodeUnloading")
+		.setColumnKey(22, "meanLeafLowPAR")
+		.setColumnKey(23, "meanLeafMidPAR")
+		.setColumnKey(24, "meanLeafUpPAR")
+		.setColumnKey(25, "rowOrientation")
+		.setColumnKey(26, "meanLeafFourthLayer")
+		.setColumnKey(27, "meanLeafFifthLayer")
+		.setColumnKey(28, "meanLeafFourthPAR")
+		.setColumnKey(29, "meanLeafFifthPAR") */
+		;
+	}
+	
+    if(chart == 11) {
+		dataset.clear().setTitle(CHART_DESCRIPTION[chart]).
+		setColumnKey(0,"water flux optimized").setColumnKey(1,"water flux potential").setColumnKey(2,"observed water flux");
+	}
+		
+	if(chart==12) {
+		dataset.clear().setTitle(CHART_DESCRIPTION[chart]).
+		setColumnKey(0,"Leaf 1").setColumnKey(1,"Leaf 2").setColumnKey(2,"Leaf 3").setColumnKey(3,"Leaf 4").setColumnKey(4,"Leaf 5").setColumnKey(5,"Leaf 6").
+		setColumnKey(6,"Leaf 7").setColumnKey(7,"Leaf 8").setColumnKey(8,"Leaf 9").setColumnKey(9,"Leaf 10").setColumnKey(10,"Leaf 11").setColumnKey(11,"Leaf 12").
+		setColumnKey(12,"Leaf 13").setColumnKey(13,"Leaf 14").setColumnKey(14,"Leaf 15").setColumnKey(15,"Leaf 16");
+	}
+
+	if(chart==13) {
+		dataset.clear().setTitle(CHART_DESCRIPTION[chart]).
+		setColumnKey(0,"Leaf 1").setColumnKey(1,"Leaf 2").setColumnKey(2,"Leaf 3").setColumnKey(3,"Leaf 4").setColumnKey(4,"Leaf 5").setColumnKey(5,"Leaf 6").
+		setColumnKey(6,"Leaf 7").setColumnKey(7,"Leaf 8").setColumnKey(8,"Leaf 9").setColumnKey(9,"Leaf 10").setColumnKey(10,"Leaf 11").setColumnKey(11,"Leaf 12").
+		setColumnKey(12,"Leaf 13").setColumnKey(13,"Leaf 14").setColumnKey(14,"Leaf 15").setColumnKey(15,"Leaf 16");
+	}
+	if(chart==14) {
+		dataset.clear().setTitle(CHART_DESCRIPTION[chart]).
+		setColumnKey(0,"Leaf 1").setColumnKey(1,"Leaf 2").setColumnKey(2,"Leaf 3").setColumnKey(3,"Leaf 4").setColumnKey(4,"Leaf 5").setColumnKey(5,"Leaf 6").
+		setColumnKey(6,"Leaf 7").setColumnKey(7,"Leaf 8").setColumnKey(8,"Leaf 9").setColumnKey(9,"Leaf 10").setColumnKey(10,"Leaf 11").setColumnKey(11,"Leaf 12").
+		setColumnKey(12,"Leaf 13").setColumnKey(13,"Leaf 14").setColumnKey(14,"Leaf 15").setColumnKey(15,"Leaf 16").
+		setColumnKey(16,"Leaf 1 actual").setColumnKey(17,"Leaf 2 actual").setColumnKey(18,"Leaf 3 actual").setColumnKey(19,"Leaf 4 actual").setColumnKey(20,"Leaf 5 actual").setColumnKey(21,"Leaf 6 actual").
+		setColumnKey(22,"Leaf 7 actual").setColumnKey(23,"Leaf 8 actual").setColumnKey(24,"Leaf 9 actual").setColumnKey(25,"Leaf 10 actual").setColumnKey(26,"Leaf 11 actual").setColumnKey(27,"Leaf 12 actual").
+		setColumnKey(28,"Leaf 13 actual").setColumnKey(29,"Leaf 14 actual").setColumnKey(30,"Leaf 15 actual").setColumnKey(31,"Leaf 16 actual");
+	}
+	
+	if(chart == 15) {
+	dataset.clear().setTitle(CHART_DESCRIPTION[chart]).
+		setColumnKey(0,"Soil available water");
+	}
+	if(chart == 16) {
+		dataset.clear().setTitle(CHART_DESCRIPTION[chart]).
+			setColumnKey(0,"Soil water potential").setColumnKey(1,"Soil water potential");
+	}
+	
+    if(chart == 17) {
+		dataset.clear().setTitle(CHART_DESCRIPTION[chart]).
+		setColumnKey(0,"Lroot");
+	}
+	
+   	if(chart == 18) {
+		dataset.clear().setTitle(CHART_DESCRIPTION[chart]).
+			setColumnKey(0,"root water potential").setColumnKey(2,"FineRoot surface water potential");
+	}
+	
+	if(chart == 19) {
+	dataset.clear().setTitle(CHART_DESCRIPTION[chart]).
+		setColumnKey(0,"Fresh weight").setColumnKey(1,"Dry weight").setColumnKey(2,"fruit ageD").
+		setColumnKey(3,"age in hour").setColumnKey(4,"Fruit number").setColumnKey(5, "fruit.sugarConcentration_fruit").
+		setColumnKey(6, "fruit.solubleSugar").setColumnKey(7, "fruit.sugarUptake_active").
+		setColumnKey(8, "fruit.sugarUptake_passive").setColumnKey(9, "fruit.sugarUptake_massflow").
+		setColumnKey(10, "fruit.sugarConcentration_phloem").setColumnKey(11, "fruit.waterUptake_phloem").
+		setColumnKey(12, "fruit.turgorPressure_fruit").
+		setColumnKey(13, "scenario").
+		setColumnKey(14, "hour").
+		setColumnKey(15, "Ta").
+		setColumnKey(16, "RH").
+		setColumnKey(17, "phloemCarbonConcentration").
+		setColumnKey(18, "waterPotential_xylem").
+		setColumnKey(19, "fruit.structuralBiomass").
+		setColumnKey(20, "malicAcid").
+		setColumnKey(21, "tartaricAcid").
+		setColumnKey(22, "malicConcentration_fruit").
+		setColumnKey(23, "tartaricConcentration_fruit").
+		setColumnKey(24, "Lxylem").
+		setColumnKey(25, "Lphloem").
+		setColumnKey(26, "osmoticWaterPotential_fruit").
+		setColumnKey(27, "waterUptake_xylem")
+		;
+	}
+	
+    if(chart == 20) {
+		dataset.clear().setTitle(CHART_DESCRIPTION[chart]).
+		setColumnKey(0,"Sugar import").setColumnKey(1,"Xylem water import").setColumnKey(2,"Phloem water import");
+	}
+	
+   	if(chart == 21) {
+		dataset.clear().setTitle(CHART_DESCRIPTION[chart]).
+			setColumnKey(0,"Water uptake").setColumnKey(1,"respiration water").setColumnKey(2,"transpiration lost").
+			setColumnKey(3,"water balance");
+	}
+	
+	if(chart == 22) {
+		dataset.clear().setTitle(CHART_DESCRIPTION[chart]).
+			setColumnKey(0,"Osmetic water potential").setColumnKey(1,"Turgor pressure").setColumnKey(2,"Water potential");
+	}
+    if(chart == 23) {
+		dataset.clear().setTitle(CHART_DESCRIPTION[chart]).
+			setColumnKey(0,"Osmetic water potential").setColumnKey(1,"Turgor pressure").setColumnKey(2,"Water potential");
+	}
+   if(chart == 24) {
+		dataset.clear().setTitle(CHART_DESCRIPTION[chart]).
+			setColumnKey(0,"leaf loding").setColumnKey(1,"internode loading").setColumnKey(2,"wood loading").
+			setColumnKey(3,"internode leakage").setColumnKey(4,"wood leakage").setColumnKey(5,"root unloding").
+			setColumnKey(6,"fruit unloading");
+	}
+	if(chart == 25) {
+		dataset.clear().setTitle(CHART_DESCRIPTION[chart]).
+			setColumnKey(0,"Phloem carbon concentration");
+	}
+	if(chart == 26) {
+		dataset.clear().setTitle(CHART_DESCRIPTION[chart]).
+			setColumnKey(0,"Nitrogen uptake").setColumnKey(1,"Uptake cose");
+	}
+	if(chart == 27) {
+		dataset.clear().setTitle(CHART_DESCRIPTION[chart]).
+		setColumnKey(0,"gs 1").setColumnKey(1,"gs 2").setColumnKey(2,"gs 3").setColumnKey(3,"gs 4").setColumnKey(4,"gs 5").setColumnKey(5,"gs 6").
+		setColumnKey(6,"gs 7").setColumnKey(7,"gs 8").setColumnKey(8,"gs 9").setColumnKey(9,"gs 10").setColumnKey(10,"gs 11").setColumnKey(11,"gs 12").
+		setColumnKey(12,"gs 13").setColumnKey(13,"gs 14").setColumnKey(14,"gs 15").setColumnKey(15,"gs 16");
+	}
+		
+	if(chart == 28) {
+		dataset.clear().setTitle(CHART_DESCRIPTION[chart]).
+		setColumnKey(0,"Tleaf1").setColumnKey(1,"Tleaf2").setColumnKey(2,"Tleaf3").setColumnKey(3,"Tleaf4").setColumnKey(4,"Tleaf5").setColumnKey(5,"Tleaf6").
+		setColumnKey(6,"Tleaf7").setColumnKey(7,"Tleaf8").setColumnKey(8,"Tleaf9").setColumnKey(9,"Tleaf10").setColumnKey(10,"Tleaf11").setColumnKey(11,"Tleaf12").
+		setColumnKey(12,"Tleaf13").setColumnKey(13,"Tleaf 14").setColumnKey(14,"Tleaf15").setColumnKey(15,"Tleaf16");
+	}
+	
+	if(chart == 29) {
+		dataset.clear().setTitle(CHART_DESCRIPTION[chart]).
+			setColumnKey(0,"Fruit").setColumnKey(1,"FineRoot").setColumnKey(2,"wood + internode").
+			setColumnKey(3,"Leaf loading").setColumnKey(4,"wood+internode loading");
+	}
+	
+	if(chart == 30) {
+		dataset.clear().setTitle(CHART_DESCRIPTION[chart]).
+			setColumnKey(0,"Fruit sugar concentration");
+	}
+	
+	if(chart == 31) {
+		dataset.clear().setTitle(CHART_DESCRIPTION[chart]).
+		setColumnKey(0,"leaf conductance 1").setColumnKey(1,"leaf conductance 2").setColumnKey(2,"leaf conductance 3").setColumnKey(3,"leaf conductance 4").setColumnKey(4,"leaf conductance 5").setColumnKey(5,"leaf conductance 6").
+		setColumnKey(6,"leaf conductance 7").setColumnKey(7,"leaf conductance 8").setColumnKey(8,"leaf conductance 9").setColumnKey(9,"leaf conductance 10").setColumnKey(10,"leaf conductance 11").setColumnKey(11,"leaf conductance 12").
+		setColumnKey(12,"leaf conductance 13").setColumnKey(13,"leaf conductance 14").setColumnKey(14,"leaf conductance 15").setColumnKey(15,"leaf conductance 16").setColumnKey(16,"leaf conductance tardieu");;
+	}
+		
+	if(chart == 32) {
+		dataset.clear().setTitle(CHART_DESCRIPTION[chart]).
+		setColumnKey(0,"waterPotential1").setColumnKey(1,"waterPotential2").setColumnKey(2,"waterPotential3").setColumnKey(3,"waterPotential4").setColumnKey(4,"waterPotential5").setColumnKey(5,"waterPotential6").
+		setColumnKey(6,"waterPotential7").setColumnKey(7,"waterPotential8").setColumnKey(8,"waterPotential9").setColumnKey(9,"waterPotential10").setColumnKey(10,"waterPotential11").setColumnKey(11,"waterPotential12").
+		setColumnKey(12,"waterPotential13").setColumnKey(13,"waterPotential 14").setColumnKey(14,"waterPotential15").setColumnKey(15,"waterPotential16");
+	
+	}
+	if(chart == 33) {
+		dataset.clear().setTitle(CHART_DESCRIPTION[chart]).
+		setColumnKey(0,"ABA concentration").setColumnKey(1,"Observed ABA"); //the observed one is only few points per day normally on low rank leaves
+	}
+	
+	if(chart == 34) {
+		dataset.clear().setTitle(CHART_DESCRIPTION[chart]).
+			setColumnKey(0, "S1.cpb").
+			setColumnKey(1, "S1.cpt").
+			setColumnKey(2, "S2.cpb").
+			setColumnKey(3, "S2.cpt").
+			setColumnKey(4, "S3.cpb").
+			setColumnKey(5, "S3.cpt").
+			setColumnKey(6, "S4.cpb").
+			setColumnKey(7, "S4.cpt").
+			setColumnKey(8, "S5.cpb").
+			setColumnKey(9, "S5.cpt").
+			setColumnKey(10, "S6.cpb").
+			setColumnKey(11, "S6.cpt").
+			setColumnKey(12, "S7.cpb").
+			setColumnKey(13, "S7.cpt").
+			setColumnKey(14, "S8.cpb").
+			setColumnKey(15, "S8.cpt").
+			setColumnKey(16, "S9.cpb").
+			setColumnKey(17, "S9.cpt").
+			setColumnKey(18, "S10.cpb").
+			setColumnKey(19, "S10.cpt").
+			setColumnKey(20, "S11.cpb").
+			setColumnKey(21, "S11.cpt").
+			setColumnKey(22, "S12.cpb").
+			setColumnKey(23, "S12.cpt").
+			setColumnKey(24, "S13.cpb").
+			setColumnKey(25, "S13.cpt").
+			setColumnKey(26, "S14.cpb").
+			setColumnKey(27, "S14.cpt"); //the observed one is only few points per day normally on low rank leaves
+	}
+		
+	if(chart == 35) {
+		dataset.clear().setTitle(CHART_DESCRIPTION[chart]).
+		setColumnKey(0,"day").
+		setColumnKey(1,"hourOfDay").
+		setColumnKey(2,"Bunch.1").
+		setColumnKey(3,"Bunch.2").
+		setColumnKey(4,"Bunch.3").
+		setColumnKey(5,"Bunch.4").
+		setColumnKey(6,"Bunch.5").
+		setColumnKey(7, "b5.cpt").
+		setColumnKey(8, "b4.cpt").
+		setColumnKey(9, "b3.cpt").
+		setColumnKey(10, "b2.cpt").
+		setColumnKey(11, "b1.cpt")
+		;
+	}
+
+	if(chart == 36) {
+		dataset.clear().setTitle(CHART_DESCRIPTION[chart]).
+		setColumnKey(0,"fineRootUnloading").
+		setColumnKey(1,"leafUnloading").
+		setColumnKey(2,"perennielWoodUnloading").
+		setColumnKey(3,"fruitUnloading").
+		setColumnKey(4,"newShootUnloading").
+		setColumnKey(5,"structuralRootUnloading");
+	}
+	
+	
+
+}
+
+
+// updates the charts
+protected static void updateCharts() {
+	 if(outputTables.pbID <= 0 || step <= 1) { 
+	 	 PlantBase pb1 = first( (* p:PlantBase, (p.plantNumber == INDI_ID_A && p.isReportable) *));
+	 	 if(pb1 != null) {
+	 	 	 outputTables.addPlantBase(pb1);
+	 		 if (printFlag) { println(" Plantbase instance is added to chart"); }
+	 	 }
+	 } 
+	// update charts to monitor a single individual
+	for (int i=0; i<CHARTS.length; i++)                           
+		updateChart(CHARTS[i], DATASETS[i]);
+	// update charts to compare individuals
+	 for (int i=0; i<CHARTS_VS.length; i++)                           
+		updateChartVS(CHARTS_VS[i], DATASETS[i]); 
+}
+
+/**
+ * this functions updates the single charts
+ */ 
+private static void updateChart(int chart, DatasetRef dataset) {
+	PlantBase pb = null;
+		if(outputTables.pbID <= 0 || step <= 1) { 
+	 	 PlantBase pb1 = first( (* p:PlantBase, (p.plantNumber == INDI_ID_A && p.isReportable) *));
+	 	 if(pb1 != null) {
+	 	 	 outputTables.addPlantBase(pb1);
+	 	 	 
+	 		 if (printFlag) { println(" Plantbase instance is added to chart"); }
+	 	 }
+	 } 
+		  
+		 try {
+			if (outputTables.pbID > 0) {
+				pb = outputTables.getPlantBase();  // e.g., graph().getNodeForId(pbID)	
+				// Add any logic here that uses `pb`
+			}
+		} catch (Exception e) {
+			println("⚠️ Failed to retrieve or process PlantBase: " + e.getMessage());
+		}
+		
+	
+	if (chart==0) {
+		dataset.addRow().set(0,simRate > 1e8 ? 0 :simRate);
+	}
+	if (chart==1) {
+		FieldBase fb = first( (* f:FieldBase, (f.isReportable) *) );
+		dataset.addRow().set(0,fb.lai);
+	}
+	if (chart==2) {
+		dataset.addRow().
+		set(0,pb.biomass * mgTogram).
+		set(1,pb.carbon_total * mgTogram);  //internal unit is mg
+	}
+	if (chart==3) {
+		dataset.addRow().set(0, pb.nitrogenCommonPool);
+	}
+
+	if( chart== 4 )  {
+		dataset.addRow().set(0, pb.mobileNContent);
+	}
+
+	if(chart==5) {
+		dataset.addRow().set(0, pb.leafArea);
+	}
+
+	if(chart==6) {
+        dataset.addRow().set(0, pb.plantHeight);
+	}
+
+	if(chart==7) {
+		if(globalRadiation > LIGHT_THRESHOLD) 
+		{dataset.addRow().set(0, pb.fabs).set(1, pb.leafRad/pb.leafArea).
+							set(2, globalRadiation).set(3, pb.leafRad);}
+	}
+	if(chart==8) {
+		FruitService br = first((* b:FruitService,(b.plantNumber == INDI_ID_A && b.isReportable)*));
+		FineRoot fr = first((* f:FineRoot,(f.plantNumber == INDI_ID_A && f.isReportable)*));
+		if (printFlag) { println("br.plantNumber " + br.plantNumber + br.km_pri); }
+		
+		dataset.addRow().
+		set(0,pb.biomassLeaf).set(1,pb.biomassInternode).set(2, pb.biomassTrunk).
+		set(3,pb.biomassFineRoot).set(4,pb.biomassFruit).
+		set(5,pb.leafNSC).set(6,pb.internodeNSC).set(7,pb.trunkNSC).
+		set(8,pb.fineRootNSC).set(9,pb.berrySugar).
+		set(10,br.km_pri).
+		set(11, fr!= null? fr.km_pri : 0).
+		set(12,0).	
+		set(13,0).
+		set(14, day).
+		set(15, hourOfDay).
+		set(16, scenario).
+		set(17, pb.biomassStructuralRoot).
+		set(18, pb.structuralRootNSC).
+		set(19, pb.biomassCordon).
+		set(20, pb.cordonNSC)
+		;
+		
+		
+	}
+	if(chart==9) {
+		dataset.addRow().set(0, (pb.maintenanceDM*mgTogram)).
+		set(1, (pb.growthCost*mgTogram)).set(2, (pb.maintenanceDM +  pb.growthCost)*mgTogram);
+	}
+	if(chart==10) {
+		/* FieldBase fb = first((* f:FieldBase *) );
+		
+		
+		double meanPARabs = mean((* p:PlantBase, ( p.border == false ) *).leafPAR);
+		double meanLeafFPAR = mean((* l:Leaf, (l.rank <= 4 && l.border == false ) *).fabs);
+		double meanPBfpar = mean((* p:PlantBase, ( p.border == false ) *).fpar); */
+		//try to constrain the optimization by accumulated meanA > 1.3 * (fruitUnloading+internodeUnloading) 
+		double meanA = mean((* p:PlantBase, ( p.border == false && p.isReportable ) *).carbonAssimilation);
+		/* double fruitUnloading = mean((* p:PlantBase, ( p.border == false ) *).fruitUnloading);
+		double internodeUnloading = mean((* p:PlantBase, ( p.border == false ) *).internodeUnloading);
+		
+		double meanBio = mean((* p:PlantBase, ( p.border == false  ) *).biomass);
+		double meanAccB = mean((* p:PlantBase, ( p.border == false  ) *).accBiomass);
+		double meanWater = mean((* p:PlantBase, ( p.border == false  ) *).waterFlux_optimized);
+		
+		//0.05 is the shift for the second layer in a four-cane system 
+		double shift = 0.02;
+		double DEFAULT_WOOD_LENGTH = 0.3; 
+												
+		double meanLeafLowLayer = mean((* l:Leaf, (l.rank <= 4 && l.border == false && 
+										l.trunkHeight < DEFAULT_WOOD_LENGTH + shift) *).fabs);
+		double meanLeafMidLayer = mean((* l:Leaf, (l.rank <= 4 && l.border == false &&
+										l.trunkHeight > DEFAULT_WOOD_LENGTH + shift && l.trunkHeight < DEFAULT_WOOD_LENGTH*2 + shift) *).fabs);
+		double meanLeafUpLayer = mean((* l:Leaf, (l.rank <= 4 && l.border == false &&
+										l.trunkHeight > DEFAULT_WOOD_LENGTH*2 + shift && l.trunkHeight < DEFAULT_WOOD_LENGTH*3 + shift) *).fabs);
+		double meanLeafFourthLayer = mean((* l:Leaf, (l.rank <= 4 && l.border == false &&
+										l.trunkHeight > DEFAULT_WOOD_LENGTH*3 + shift && l.trunkHeight < DEFAULT_WOOD_LENGTH*4 + shift) *).fabs);										
+		double meanLeafFifthLayer = mean((* l:Leaf, (l.rank <= 4 && l.border == false &&
+										l.trunkHeight > DEFAULT_WOOD_LENGTH*4 + shift && l.trunkHeight < DEFAULT_WOOD_LENGTH*5 + shift) *).fabs);										
+		
+										
+		double meanLeafLowPAR = mean((* l:Leaf, (l.rank <= 4 && l.border == false && 
+										l.trunkHeight < DEFAULT_WOOD_LENGTH + shift) *).incPARm2);
+		double meanLeafMidPAR = mean((* l:Leaf, (l.rank <= 4 && l.border == false &&
+										l.trunkHeight > DEFAULT_WOOD_LENGTH + shift && l.trunkHeight < DEFAULT_WOOD_LENGTH*2 + shift) *).incPARm2);
+		double meanLeafUpPAR = mean((* l:Leaf, (l.rank <= 4 && l.border == false &&
+										l.trunkHeight > DEFAULT_WOOD_LENGTH*2 + shift && l.trunkHeight < DEFAULT_WOOD_LENGTH*3 + shift) *).incPARm2);
+		double meanLeafFourthPAR = mean((* l:Leaf, (l.rank <= 4 && l.border == false &&
+										l.trunkHeight > DEFAULT_WOOD_LENGTH*3 + shift && l.trunkHeight < DEFAULT_WOOD_LENGTH*4 + shift) *).incPARm2);										
+		double meanLeafFifthPAR = mean((* l:Leaf, (l.rank <= 4 && l.border == false &&
+										l.trunkHeight > DEFAULT_WOOD_LENGTH*4 + shift && l.trunkHeight < DEFAULT_WOOD_LENGTH*5 + shift) *).incPARm2);										
+										
+		
+				
+		if(Double.isNaN(meanLeafFPAR) || Double.isInfinite(meanLeafFPAR)) {meanLeafFPAR = 0;}
+		if(Double.isNaN(meanLeafMidLayer) || Double.isInfinite(meanLeafMidLayer)) {meanLeafMidLayer = 0;}
+		if(Double.isNaN(meanLeafUpLayer)|| Double.isInfinite(meanLeafUpLayer))  {meanLeafUpLayer = 0;}
+		if(Double.isNaN(meanLeafFourthLayer)|| Double.isInfinite(meanLeafFourthLayer))  {meanLeafFourthLayer = 0;}
+		if(Double.isNaN(meanLeafFifthLayer)|| Double.isInfinite(meanLeafFifthLayer))  {meanLeafFifthLayer = 0;}
+		
+		println("meanLeafFPAR " + meanLeafFPAR + "_meanLeafLowPAR_" + meanLeafLowPAR);  */
+		
+		dataset.addRow()
+		/* .set(0,  rowDistance)
+		.set(1,  plantDistance)
+		.set(2,  (fb!=null) ? fb.leafAreaPerTree  : 0)
+		.set(3,  (fb!=null) ? fb.leafAreaPerTree*dens  : 0) 
+	 	.set(4,  meanPARabs*dens)
+		.set(5,  globalRadiation*fPAR)
+		.set(6,  meanPBfpar)
+		.set(7,  meanLeafFPAR)  */
+		.set(8,  meanA)  //individual plant
+		.set(9,  meanA*dens)     //area based mean
+/* 		.set(10, meanBio*dens) 	   //mg
+		.set(11, meanAccB*dens)  //mg		
+		.set(12, meanWater*timeInterval*dens)  //mg.h.plant/dens - mg.h.m2
+		.set(13, meanLeafLowLayer)
+		.set(14, meanLeafMidLayer)
+		.set(15, meanLeafUpLayer)
+		.set(16, fdiff)
+		.set(17, hourOfDay-1)
+		.set(18, dens)
+		.set(19, scenario)
+		.set(20, fruitUnloading)
+		.set(21, internodeUnloading)
+		.set(22, meanLeafLowPAR)
+		.set(23, meanLeafMidPAR)
+		.set(24, meanLeafUpPAR)
+		.set(25, rowOrientation)
+		.set(26, meanLeafFourthLayer)
+		.set(27, meanLeafFifthLayer)
+		.set(28, meanLeafFourthPAR)
+		.set(29, meanLeafFifthPAR) */
+		
+		;
+	}
+	if(chart==11) {
+		dataset.addRow()
+		.set(0, pb.waterFlux_optimized)
+		.set(1, pb.waterFluxPotential)
+		.set(2, observedPlantTranspiration)
+		;
+	}
+	
+	if(chart==12 || chart==13 || chart==14 || chart == 27 || chart == 28 || chart == 31 || chart == 32) {
+		float a1=0, a2=0, a3=0, a4=0, a5=0, a6=0, a7=0, a8=0, a9=0, a10=0, a11=0, a12=0, a13=0, a14=0, a15=0,a16=0,
+		a17=0, a18=0, a19=0, a20=0, a21=0, a22=0, a23=0, a24=0, a25=0, a26=0, a27=0, a28=0, a29=0, a30=0, a31=0,a32=0;
+		Leaf l1 = first( (* l:Leaf, (l[rank]==1  && l[order]==0 && l.plantNumber==INDI_ID_A && l.isReportable ) *) );
+		Leaf l2 = first( (* l:Leaf, (l[rank]==2  && l[order]==0 && l.plantNumber==INDI_ID_A && l.isReportable ) *) );
+		Leaf l3 = first( (* l:Leaf, (l[rank]==3  && l[order]==0 && l.plantNumber==INDI_ID_A && l.isReportable ) *) );
+		Leaf l4 = first( (* l:Leaf, (l[rank]==4  && l[order]==0 && l.plantNumber==INDI_ID_A && l.isReportable ) *) );
+		Leaf l5 = first( (* l:Leaf, (l[rank]==5  && l[order]==0 && l.plantNumber==INDI_ID_A && l.isReportable ) *) );
+		Leaf l6 = first( (* l:Leaf, (l[rank]==6  && l[order]==0 && l.plantNumber==INDI_ID_A && l.isReportable ) *) );
+		Leaf l7 = first( (* l:Leaf, (l[rank]==7  && l[order]==0 && l.plantNumber==INDI_ID_A && l.isReportable ) *) );
+		Leaf l8 = first( (* l:Leaf, (l[rank]==8  && l[order]==0 && l.plantNumber==INDI_ID_A && l.isReportable ) *) );
+		Leaf l9 = first( (* l:Leaf, (l[rank]==9  && l[order]==0 && l.plantNumber==INDI_ID_A && l.isReportable ) *) );
+		Leaf l10 = first((* l:Leaf, (l[rank]==10 && l[order]==0 && l.plantNumber==INDI_ID_A && l.isReportable ) *) );
+		Leaf l11 = first((* l:Leaf, (l[rank]==11 && l[order]==0 && l.plantNumber==INDI_ID_A && l.isReportable ) *) );
+		Leaf l12 = first((* l:Leaf, (l[rank]==12 && l[order]==0 && l.plantNumber==INDI_ID_A && l.isReportable ) *) );
+		Leaf l13 = first((* l:Leaf, (l[rank]==13 && l[order]==0 && l.plantNumber==INDI_ID_A && l.isReportable ) *) );
+		Leaf l14 = first((* l:Leaf, (l[rank]==14 && l[order]==0 && l.plantNumber==INDI_ID_A && l.isReportable ) *) );
+		Leaf l15 = first((* l:Leaf, (l[rank]==15 && l[order]==0 && l.plantNumber==INDI_ID_A && l.isReportable ) *) );
+	    Leaf l16 = first((* l:Leaf, (l[rank]==16 && l[order]==0 && l.plantNumber==INDI_ID_A && l.isReportable ) *) );
+	    if (chart == 12) {
+			a1 	= (l1!=null) ? l1.area  : 0;
+			a2 	= (l2!=null) ? l2.area  : 0;
+			a3 	= (l3!=null) ? l3.area  : 0;
+			a4 	= (l4!=null) ? l4.area  : 0;
+			a5 	= (l5!=null) ? l5.area  : 0;
+			a6 	= (l6!=null) ? l6.area  : 0;
+			a7 	= (l7!=null) ? l7.area  : 0;
+			a8 	= (l8!=null) ? l8.area  : 0;
+			a9 	= (l9!=null) ? l9.area  : 0;
+			a10 = (l10!=null)? l10.area : 0;
+			a11 = (l11!=null)? l11.area : 0;
+			a12 = (l12!=null)? l12.area : 0;
+			a13 = (l13!=null)? l13.area : 0;
+			a14 = (l14!=null)? l14.area : 0;
+			a15 = (l15!=null)? l15.area : 0;
+			a16 = (l16!=null)? l16.area : 0;
+		}
+	/* 	if (chart == 13 ) {
+			a1 	= (l1!=null) ? l1.Alim  : 0;
+			a2 	= (l2!=null) ? l2.Alim  : 0;
+			a3 	= (l3!=null) ? l3.Alim  : 0;
+			a4 	= (l4!=null) ? l4.Alim  : 0;
+			a5 	= (l5!=null) ? l5.Alim  : 0;
+			a6 	= (l6!=null) ? l6.Alim  : 0;
+			a7 	= (l7!=null) ? l7.Alim  : 0;
+			a8 	= (l8!=null) ? l8.Alim  : 0;
+			a9 	= (l9!=null) ? l9.Alim  : 0;
+			a10 = (l10!=null)? l10.Alim : 0;
+			a11 = (l11!=null)? l11.Alim : 0;
+			a12 = (l12!=null)? l12.Alim : 0;
+			a13 = (l13!=null)? l13.Alim : 0;
+			a14 = (l14!=null)? l14.Alim : 0;
+			a15 = (l15!=null)? l15.Alim : 0;
+			a16 = (l16!=null)? l16.Alim : 0;
+			a17 = (l1!=null) ? l1.AlimActual  : 0;
+			a18 = (l2!=null) ? l2.AlimActual  : 0;
+			a19 = (l3!=null) ? l3.AlimActual  : 0;
+			a20 = (l4!=null) ? l4.AlimActual  : 0;
+			a21	= (l5!=null) ? l5.AlimActual  : 0;
+			a22	= (l6!=null) ? l6.AlimActual  : 0;
+			a23	= (l7!=null) ? l7.AlimActual  : 0;
+			a24	= (l8!=null) ? l8.AlimActual  : 0;
+			a25	= (l9!=null) ? l9.AlimActual  : 0;
+			a26 = (l10!=null)? l10.AlimActual : 0;
+			a27 = (l11!=null)? l11.AlimActual : 0;
+			a28 = (l12!=null)? l12.AlimActual : 0;
+			a29 = (l13!=null)? l13.AlimActual : 0;
+			a30 = (l14!=null)? l14.AlimActual : 0;
+			a31 = (l15!=null)? l15.AlimActual : 0;
+			a32 = (l16!=null)? l16.AlimActual : 0;
+		}
+		if (chart == 14 ) {
+			a1 	= (l1!=null) ? l1.EP  : 0;
+			a2 	= (l2!=null) ? l2.EP  : 0;
+			a3 	= (l3!=null) ? l3.EP  : 0;
+			a4 	= (l4!=null) ? l4.EP  : 0;
+			a5 	= (l5!=null) ? l5.EP  : 0;
+			a6 	= (l6!=null) ? l6.EP  : 0;
+			a7 	= (l7!=null) ? l7.EP  : 0;
+			a8 	= (l8!=null) ? l8.EP  : 0;
+			a9 	= (l9!=null) ? l9.EP  : 0;
+			a10 = (l10!=null)? l10.EP : 0;
+			a11 = (l11!=null)? l11.EP : 0;
+			a12 = (l12!=null)? l12.EP : 0;
+			a13 = (l13!=null)? l13.EP : 0;
+			a14 = (l14!=null)? l14.EP : 0;
+			a15 = (l15!=null)? l15.EP : 0;
+			a16 = (l16!=null)? l16.EP : 0;
+			a17 = (l1!=null) ? l1.Ea  : 0;
+			a18 = (l2!=null) ? l2.Ea  : 0;
+			a19 = (l3!=null) ? l3.Ea  : 0;
+			a20 = (l4!=null) ? l4.Ea  : 0;
+			a21	= (l5!=null) ? l5.Ea  : 0;
+			a22	= (l6!=null) ? l6.Ea  : 0;
+			a23	= (l7!=null) ? l7.Ea  : 0;
+			a24	= (l8!=null) ? l8.Ea  : 0;
+			a25	= (l9!=null) ? l9.Ea  : 0;
+			a26 = (l10!=null)? l10.Ea : 0;
+			a27 = (l11!=null)? l11.Ea : 0;
+			a28 = (l12!=null)? l12.Ea : 0;
+			a29 = (l13!=null)? l13.Ea : 0;
+			a30 = (l14!=null)? l14.Ea : 0;
+			a31 = (l15!=null)? l15.Ea : 0;
+			a32 = (l16!=null)? l16.Ea : 0;
+		}	
+		if (chart == 27) {
+			a1 	= (l1!=null) ? l1.GSWa*UNIT_CONVERSION_STOMATA  : 0;
+			a2 	= (l2!=null) ? l2.GSWa*UNIT_CONVERSION_STOMATA  : 0;
+			a3 	= (l3!=null) ? l3.GSWa*UNIT_CONVERSION_STOMATA  : 0;
+			a4 	= (l4!=null) ? l4.GSWa*UNIT_CONVERSION_STOMATA  : 0;
+			a5 	= (l5!=null) ? l5.GSWa*UNIT_CONVERSION_STOMATA  : 0;
+			a6 	= (l6!=null) ? l6.GSWa*UNIT_CONVERSION_STOMATA  : 0;
+			a7 	= (l7!=null) ? l7.GSWa*UNIT_CONVERSION_STOMATA  : 0;
+			a8 	= (l8!=null) ? l8.GSWa*UNIT_CONVERSION_STOMATA  : 0;
+			a9 	= (l9!=null) ? l9.GSWa*UNIT_CONVERSION_STOMATA  : 0;
+			a10 = (l10!=null)? l10.GSWa*UNIT_CONVERSION_STOMATA : 0;
+			a11 = (l11!=null)? l11.GSWa*UNIT_CONVERSION_STOMATA : 0;
+			a12 = (l12!=null)? l12.GSWa*UNIT_CONVERSION_STOMATA : 0;
+			a13 = (l13!=null)? l13.GSWa*UNIT_CONVERSION_STOMATA : 0;
+			a14 = (l14!=null)? l14.GSWa*UNIT_CONVERSION_STOMATA : 0;
+			a15 = (l15!=null)? l15.GSWa*UNIT_CONVERSION_STOMATA : 0;
+			a16 = (l16!=null)? l16.GSWa*UNIT_CONVERSION_STOMATA : 0;
+			FineRoot rt = first((* r:FineRoot, (r.plantNumber == INDI_ID_A && r.isReportable ) *) );
+		}
+		if (chart == 28) {
+			a1 	= (l1!=null) ? l1.Tleaf  : 0;
+			a2 	= (l2!=null) ? l2.Tleaf  : 0;
+			a3 	= (l3!=null) ? l3.Tleaf  : 0;
+			a4 	= (l4!=null) ? l4.Tleaf  : 0;
+			a5 	= (l5!=null) ? l5.Tleaf  : 0;
+			a6 	= (l6!=null) ? l6.Tleaf  : 0;
+			a7 	= (l7!=null) ? l7.Tleaf  : 0;
+			a8 	= (l8!=null) ? l8.Tleaf  : 0;
+			a9 	= (l9!=null) ? l9.Tleaf  : 0;
+			a10 = (l10!=null)? l10.Tleaf : 0;
+			a11 = (l11!=null)? l11.Tleaf : 0;
+			a12 = (l12!=null)? l12.Tleaf : 0;
+			a13 = (l13!=null)? l13.Tleaf : 0;
+			a14 = (l14!=null)? l14.Tleaf : 0;
+			a15 = (l15!=null)? l15.Tleaf : 0;
+			a16 = (l16!=null)? l16.Tleaf : 0;
+		}
+		if (chart == 31) {
+			a1 	= (l1!=null) ? l1.Ka  : 0;
+			a2 	= (l2!=null) ? l2.Ka  : 0;
+			a3 	= (l3!=null) ? l3.Ka  : 0;
+			a4 	= (l4!=null) ? l4.Ka  : 0;
+			a5 	= (l5!=null) ? l5.Ka  : 0;
+			a6 	= (l6!=null) ? l6.Ka  : 0;
+			a7 	= (l7!=null) ? l7.Ka  : 0;
+			a8 	= (l8!=null) ? l8.Ka  : 0;
+			a9 	= (l9!=null) ? l9.Ka  : 0;
+			a10 = (l10!=null)? l10.Ka : 0;
+			a11 = (l11!=null)? l11.Ka : 0;
+			a12 = (l12!=null)? l12.Ka : 0;
+			a13 = (l13!=null)? l13.Ka : 0;
+			a14 = (l14!=null)? l14.Ka : 0;
+			a15 = (l15!=null)? l15.Ka : 0;
+			a16 = (l16!=null)? l16.Ka : 0;
+		}
+		
+		if (chart == 32) {
+			a1 	= (l1!=null) ? l1.waterPotential  : 0;
+			a2 	= (l2!=null) ? l2.waterPotential  : 0;
+			a3 	= (l3!=null) ? l3.waterPotential  : 0;
+			a4 	= (l4!=null) ? l4.waterPotential  : 0;
+			a5 	= (l5!=null) ? l5.waterPotential  : 0;
+			a6 	= (l6!=null) ? l6.waterPotential  : 0;
+			a7 	= (l7!=null) ? l7.waterPotential  : 0;
+			a8 	= (l8!=null) ? l8.waterPotential  : 0;
+			a9 	= (l9!=null) ? l9.waterPotential  : 0;
+			a10 = (l10!=null)? l10.waterPotential : 0;
+			a11 = (l11!=null)? l11.waterPotential : 0;
+			a12 = (l12!=null)? l12.waterPotential : 0;
+			a13 = (l13!=null)? l13.waterPotential : 0;
+			a14 = (l14!=null)? l14.waterPotential : 0;
+			a15 = (l15!=null)? l15.waterPotential : 0;
+			a16 = (l16!=null)? l16.waterPotential : 0;
+			
+			 if (printFlag) { println("leaf water Potential " + l16.waterPotential ); }
+		} 
+		*/
+		if(chart == 12 || chart == 27 || chart == 28 || chart == 31|| chart == 32) {dataset.addRow().set(0,a1).set(1,a2).set(2,a3).set(3,a4).set(4,a5).set(5,a6).set(6,a7).set(7,a8).
+			set(8,a9).set(9,a10).set(10,a11).set(11,a12).set(12,a13).set(13,a14).set(14,a15).set(15,a16);}
+		
+		//if(chart == 32) {dataset.addRow().set(0,a1).set(1,a2).set(2,a3).set(3,a4).set(4,a5).set(5,a6).set(6,a7).set(7,a8).
+		//set(8,a9).set(9,a10).set(10,a11).set(11,a12).set(12,a13).set(13,a14).set(14,a15).set(15,a16).set(16, climate[step+1][12]);}
+			
+	    if(chart == 13 || chart == 14) 
+		{
+			dataset.addRow().set(0,a1).set(1,a2).set(2,a3).set(3,a4).set(4,a5).set(5,a6).set(6,a7).set(7,a8).
+			 set(8,a9).set(9,a10).set(10,a11).set(11,a12).set(12,a13).set(13,a14).set(14,a15).set(15,a16).
+			 set(16,a17).set(17,a18).set(18,a19).set(19,a20).set(20,a21).set(21,a22).set(22,a23).set(23,a24).
+			 set(24,a25).set(25,a26).set(26,a27).set(27,a28).set(28,a29).set(29,a30).set(30,a31).set(31,a32);}
+		}
+	
+	if(chart == 15) {
+	Soil sl = first((* s:Soil, (s[plantNumber] == INDI_ID_A && s.isReportable) *));
+	dataset.addRow().set(0, sl.waterContent);
+	}
+	
+	if(chart == 16) {
+		Soil sl = first((* s:Soil, (s[plantNumber] == INDI_ID_A && s.isReportable) *));
+		//dataset.addRow().set(0, sl.waterPotential);
+		dataset.getRow(step).set(scenario, sl.waterPotential);
+	}
+	if(chart == 17 ) {
+		FineRoot root = first((* r:FineRoot, (r[plantNumber] == INDI_ID_A && r.isReportable) *));
+		//dataset.addRow().set(0, root.Gr);
+		dataset.getRow(step).set(scenario, root.Gr);
+	}
+	if(chart==18 ) {
+		FineRoot root = first((* r:FineRoot, (r[plantNumber] == INDI_ID_A && r.isReportable) *));
+		dataset.getRow(step).
+		set(scenario, root!= null? root.waterPotential :0).
+		set(2, root.waterPotentialRootSurface); 
+	}
+    if(chart==19) {
+    	FruitService b = null;
+		try { 
+			FruitService b1 = first((* br:FruitService, (br.plantNumber == INDI_ID_A && br.isReportable) *));
+			
+			if (b1 != null) {
+				b = b1;
+			}
+		} catch (Exception e) {
+			println("⚠️ Failed to retrieve FruitService: " + e.getMessage());
+		}
+
+		float meanBerryFW = mean((* br:FruitService, (br.isReportable) *)[freshWeight]);
+		float meanBerryDW = mean((* br:FruitService, (br.isReportable) *)[biomass]);
+		if (printFlag) { println("test " + (b!= null)); }
+		if (printFlag) { println("b.ageD " + b.ageD); }
+		dataset.addRow(step).set(0, meanBerryFW).set(1, meanBerryDW).
+		set(2, b.ageD).
+		set(3, b.ageHour).
+		set(4, totalFruitNum).
+		set(5, b.sugarConcentration_fruit).
+		set(6, b.solubleSugar).set(7, b.sugarUptake_active).
+		set(8, b.sugarUptake_passive).set(9, b.sugarUptake_massflow).
+		set(10, b.sugarConcentration_phloem).set(11, b.waterUptake_phloem).
+		set(12, b.turgorPressure_fruit).
+		set(13, scenario).
+		set(14, inputVesselConditions ? berryModelInput[step][1] : hourOfDay).
+		set(15, inputVesselConditions ? berryModelInput[step][2] : Ta).
+		set(16, inputVesselConditions ? berryModelInput[step][3] : rh).
+		set(17, inputVesselConditions ? berryModelInput[step][4] : b.sugarConcentration_phloem).
+		set(18, inputVesselConditions ? berryModelInput[step][5] : b.waterPotential_xylem).
+		set(19, b.structuralBiomass).
+		set(20, b.malicAcid).
+		set(21, b.tartaricAcid).
+		set(22, b.malicConcentration_fruit).
+		set(23, b.tartaricConcentration_fruit).
+		set(24, b.Lxylem).
+		set(25, b.Lphloem).
+		set(26, b.osmoticWaterPotential_fruit).
+		set(27, b.waterUptake_xylem)
+		;
+	}
+	if(chart== 20) {
+		FruitService fruit = first((* b:FruitService, (b[plantNumber] == INDI_ID_A && b.isReportable) *));
+		dataset.addRow(step).set(0, fruit.unloading * mgTogram).set(1, fruit.waterUptake_xylem).set(2, fruit.waterUptake_phloem);
+	}
+	if(chart== 21) {
+		FruitService fruit = first((* b:FruitService, (b[plantNumber] == INDI_ID_A && b.isReportable) *));
+		dataset.addRow().set(0, fruit.waterUptake_xylem + fruit.waterUptake_phloem).
+		set(1, fruit.respirationWater).set(2, fruit.transpirationMass).
+		set(3, fruit.deltaWater);
+	}
+	if(chart== 22) {
+	FruitService fruit = first((* b:FruitService, (b[plantNumber] == INDI_ID_A && b.isReportable) *));
+	dataset.addRow().set(0, fruit. osmoticWaterPotential_fruit/10).  // convert from bar to MPa
+	set(1, fruit.turgorPressure_fruit/10).set(2, fruit.waterPotential_fruit/10);
+	}
+	if(chart== 23) {
+	FruitService fruit = first((* b:FruitService, (b[plantNumber] == INDI_ID_A && b.isReportable) *));
+	dataset.addRow().set(0, fruit. osmoticWaterPotential_phloem/10).
+	set(1, fruit.turgorPressure_phloem/10).set(2, fruit.waterPotential_phloem/10);
+	}
+	
+	if(chart== 24) {
+	dataset.getRow(step).set(0 + 7*scenario, pb.leafLoading).
+	set(1+ 7*scenario, pb.internodeLoading).set(2+ 7*scenario, pb.perennielWoodLoading).
+	set(3+7*scenario, pb.internodeLeakage).set(4+7*scenario, pb.perennielWoodLeakage).
+	set(5+7*scenario, pb.fineRootUnloading).set(6+7*scenario, pb.fruitUnloading);
+	}
+	if(chart== 25) {
+		
+		if(useCTRAM == true) {
+			 
+			double c = Math.sqrt(2.0 * (pb.cpb + pb.cpt)/2.0);
+			dataset.addRow().set(0, c);
+		}
+		if(useCTRAM == false) {dataset.addRow().set(0, pb.sugarConcentration_phloem);}
+	}
+	if(chart == 26) {
+	FineRoot rt = first((* r:FineRoot, (r[plantNumber] == INDI_ID_A && r.isReportable) *));
+	dataset.addRow().set(0, rt.Nuptake).set(1, rt.NuptakeCost);
+	}
+	
+	if(chart == 29) {
+		dataset.getRow(step).
+		set(0+5*scenario, pb.fraction_fruitUnloading).
+		set(1+5*scenario, pb.fraction_fineRootUnloading).
+		set(2+5*scenario, pb.fraction_internodeUnloading).
+		set(3+5*scenario, pb.fraction_leafLoading);
+	}
+	if(chart == 30) {
+		FruitService fruit = first((* b:FruitService, (b[plantNumber] == INDI_ID_A && b.isReportable) *));
+		dataset.addRow(step).set(0, fruit.sugarConcentration_fruit); //g sucrose/g water
+	}
+	if(chart == 33) {
+		FineRoot rt = first((* r:FineRoot, (r[plantNumber] == INDI_ID_A && r.isReportable) *));
+		dataset.addRow(step).set(0, rt.ABA); //.set(1, climate[step+1][13]);
+	}
+	
+	if (chart==34) {
+	//	PlantBase pb = first( (* p:PlantBase, (p.plantNumber == INDI_ID_A) *));
+	
+		
+	}
+	
+	if(chart == 35) {
+		FruitService b1 = first((* s:FruitService, ( s[cordonNumber]==1 && s[nodeNumber]==4 && s.isReportable) *)); //cordon 4
+	    FruitService b2 = first((* s:FruitService, ( s[cordonNumber]==1 && s[nodeNumber]==3 && s.isReportable) *)); //cordon 3
+	    FruitService b3 = first((* s:FruitService, ( s[cordonNumber]==1 && s[nodeNumber]==2 && s.isReportable) *)); //cordon 2
+	    FruitService b4 = first((* s:FruitService, ( s[cordonNumber]==1 && s[nodeNumber]==1 && s.isReportable) *)); //cordon 1
+
+	    dataset.addRow(day).(
+			set(0,day).
+			set(1,hourOfDay).
+			set(2,(b1 != null) ? b1.biomass : 0).
+			set(3,(b2 != null) ? b2.biomass : 0).
+			set(4,(b3 != null) ? b3.biomass : 0).
+			set(5,(b4 != null) ? b4.biomass : 0)
+				
+			);
+	}
+
+	if(chart == 36) {
+		int scenarioIndex = getDailyMeanUnloadingScenarioIndex(scenario);
+		if ((dailyMeanUnloadingCount[scenarioIndex] == 0) || (dailyMeanUnloadingDay[scenarioIndex] != day)) {
+			resetDailyMeanUnloading(scenarioIndex, day);
+		}
+
+		dailyMeanUnloadingCount[scenarioIndex]++;
+		dailyMeanFineRootUnloadingSum[scenarioIndex] += pb.fraction_fineRootUnloading;
+		dailyMeanLeafUnloadingSum[scenarioIndex] += pb.fraction_leafUnloading;
+		dailyMeanPerennielWoodUnloadingSum[scenarioIndex] += pb.fraction_perennielWoodUnloading;
+		dailyMeanFruitUnloadingSum[scenarioIndex] += pb.fraction_fruitUnloading;
+		// Use the current internode fraction as the daily new-shoot proxy.
+		dailyMeanInternodeUnloadingSum[scenarioIndex] += pb.fraction_internodeUnloading;
+		dailyMeanStructuralRootUnloadingSum[scenarioIndex] += pb.fraction_structuralRootUnloading;
+
+		double sampleCount = dailyMeanUnloadingCount[scenarioIndex];
+		dataset.getRow(day).
+		set(0 + 6*scenario, dailyMeanFineRootUnloadingSum[scenarioIndex] / sampleCount).
+		set(1 + 6*scenario, dailyMeanLeafUnloadingSum[scenarioIndex] / sampleCount).
+		set(2 + 6*scenario, dailyMeanPerennielWoodUnloadingSum[scenarioIndex] / sampleCount).
+		set(3 + 6*scenario, dailyMeanFruitUnloadingSum[scenarioIndex] / sampleCount).
+		set(4 + 6*scenario, dailyMeanInternodeUnloadingSum[scenarioIndex] / sampleCount).
+		set(5 + 6*scenario, dailyMeanStructuralRootUnloadingSum[scenarioIndex] / sampleCount);
+	}
+	
+	
+	
+}
+
+
+/** to compare individuals use the following example code */
+
+
+// to compare individuals
+private final static int[] CHARTS_VS = {}; // max 10!
+
+// chart descriptions to compare individuals
+private final static String[] CHART_DESCRIPTION_VS = {
+	"Number of plant organs (individual "+INDI_ID_A+" vs. "+INDI_ID_B+")", // 0
+	"Overview (Individual "+INDI_ID_A+" vs. "+INDI_ID_B+")", // 1
+	"" // 2
+};
+
+/**
+ * this functions updates the charts to compare individuals
+ */ 
+private static void updateChartVS(int chart, DatasetRef dataset) {
+	
+}
+		
+/**
+ * this functions inits the charts to compare individuals
+ */
+ 
+/* private static void initChartVS(int chart, DatasetRef dataset) {
+	if (chart==0) {
+		dataset.clear().setTitle(CHART_DESCRIPTION_VS[chart]).
+			setColumnKey(0,"Internode A").setColumnKey(1,"Leaf A").setColumnKey(2,"Peduncle A").setColumnKey(3,"Flower A").setColumnKey(4,"Fruit A").setColumnKey(5,"total A").
+			setColumnKey(6,"Internode B").setColumnKey(7,"Leaf B").setColumnKey(8,"Peduncle B").setColumnKey(9,"Flower B").setColumnKey(10,"Fruit B").setColumnKey(11,"total B");
+	}
+
+	if (chart==1) {
+		dataset.clear().setTitle(CHART_DESCRIPTION_VS[chart]).
+			setColumnKey(0,"Central C pool A").setColumnKey(1,"Dry Weight A").setColumnKey(2,"Fresh Weight A").setColumnKey(3,"Main TR A").setColumnKey(4,"Growth TR A").setColumnKey(5,"Absorbed Power A").setColumnKey(6,"Sink Demand").
+			setColumnKey(7,"Central C pool B").setColumnKey(8,"Dry Weight B").setColumnKey(9,"Fresh Weight B").setColumnKey(10,"Main TR B").setColumnKey(11,"Growth TR B").setColumnKey(12,"Absorbed Power B").setColumnKey(13,"Sink Demand");
+	}
+
+} */
+	
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		

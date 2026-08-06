@@ -1,0 +1,259 @@
+import static absOrgan.*;
+import static leaf.*;
+import static shoot.*;
+import static plantBase.*;
+import static java.lang.Math.*;
+import static globalParameters.*;
+import static plantParameters.*;
+import static modelOptions.*;
+import static initialConditions.*;
+import static extraTools.*;
+import static environment.*;
+import static rootSystem.*;
+
+
+public static void TestSoil() {
+    Soil sl = new Soil();
+
+    boolean testBool = false; // useComplexSoil;
+
+    if (useComplexSoil) {
+        // sl.setService(new ComplexSoil());
+    } else {
+        sl.setService(new SimpleSoil());
+    }
+
+    // switch (special_scenario) {
+	// 	case "berry_population":
+	// 		intiation.setService(new InitiationBerryPOpualtion());
+	// 	break;
+	// }
+
+    sl.service.initiate(0, new PlantBase());
+}
+
+
+/**
+ * Allows passing and setting by reference between module and classes.
+ */
+public class ModuleLength {
+    public float value;
+
+    public ModuleLength(float value) {
+        this.value = value;
+    }
+}
+
+
+
+module Soil extends M(length) implements Configurable {
+
+    public SoilService service;
+
+    public void setService(SoilService service) {
+        this.service = service;
+
+        this.service.length = new ModuleLength(length);
+    }
+
+    @Override 
+    public void loadParameters() {
+        this.service.loadParameters();
+    }
+
+    public void initiate(int i, PlantBase pb) {
+        this.service.initiate(i, pb);
+    }
+} ==> 
+/* if(trainingSystem == 0) (Translate(0,0,-0.1) Frustum(0.1,0.05,0.05).(setLayer(soilLayer), setShader(DARK_GRAY))) 
+	else (Translate(0,0,-depth*soilLayer) Frustum(0.25,0.10,0.15).(setLayer(soilLayer), setShader(DARK_GRAY)));
+ */
+ Box(length, length, length).(setLayer(soilLayer), setShader(DARK_GRAY));
+
+
+
+
+
+public interface SoilService {
+
+    /**
+     * Initializes the Soil object with layer and PlantBase information.
+     *
+     * @param i  The index or identifier for the soil layer.
+     * @param pb The PlantBase object associated with this soil.
+     */
+    void initiate(int i, PlantBase pb);
+
+    /**
+	 * Calculates the soil water potential based on the relative soil water content. van Genuchten 1980
+	 * 
+	 * <p>
+	 * The function uses the following equation: 
+	 * \[
+	 * \text{psi} = \left( \frac{1 - \left( \text{relativeWaterContent}^\frac{n}{n-1} \right)}{ \alpha \times \left( \text{relativeWaterContent}^\frac{1}{n-1} \right)} \right)^{\frac{1}{n}}
+	 * \]
+	 * 
+	 * Intermediate Variables:
+	 * A = relativeWaterContent^(n / (n - 1))
+	 * B = relativeWaterContent^(1 / (n - 1))
+	 * C = 1 - A
+	 * 
+	 * Simplified equation with intermediate variables:
+	 * \[
+	 * \text{psi} = \left( \frac{C}{\alpha \times B} \right)^{\frac{1}{n}}
+	 * \]
+	 * </p>
+	 *
+	 * @param relativeWaterContent The relative soil water content as a float.
+	 * @return The calculated soil water potential as a float.
+	 */
+    float calcSoilWaterPotential(float relativeWaterContent);
+
+    /**
+	 * Calculates the relative soil water content based on the soil water potential.
+	 * 
+	 * <p>
+	 * The function uses the following equation: 
+	 * \[
+	 * \text{relativeSoilWaterContent} = \left( 1 + \left( \text{airEntryCoef} \times \text{Psisoilm} \right)^{\text{poreSizeCoef}} \right)^{\frac{1 - \text{poreSizeCoef}}{\text{poreSizeCoef}}}
+	 * \]
+	 * 
+	 * Intermediate Variables:
+	 * A = \text{airEntryCoef} \times \text{Psisoilm}
+	 * B = A^{\text{poreSizeCoef}}
+	 * C = 1 + B
+	 * 
+	 * Simplified equation with intermediate variables:
+	 * \[
+	 * \text{relativeSoilWaterContent} = C^{\frac{1 - \text{poreSizeCoef}}{\text{poreSizeCoef}}}
+	 * \]
+	 * </p>
+	 *
+	 * @param waterPotential, the soil water potential in negative MPa, 
+	 * it converts to positive 10^4 pa inside the, -waterPotential * 100.
+	 * @return The calculated relative soil water content as a float.
+	 */
+	float calcRelativeSoilWaterContent(float waterPotential);
+
+    /**
+	 * Calculates the soil hydraulic conductivity.
+	 * <p>
+	 * This function uses empirical equations to calculate the soil's hydraulic conductivity based on
+	 * its current water content and potential.
+	 * </p>
+	 * @return The calculated soil hydraulic conductivity in m2 MPa-1 s-1.
+	 * mol m-1 s-1 Mpa-1 * 18 * 1e-6  =  m2 s-1 MPa-1
+	 *see detail steps:
+	 *mol m-1 s-1 Mpa-1 = mol m-1 s-1 Mpa-1 * 18 = g m-1 s-1 MPa-1 * 1e-6 = m3 m-1 s-1 MPa-1 = m2 s-1 MPa-1
+	 *1 g = 1m3 of water× 1 × 10−6
+	 */
+    float calcSoilConductivity();
+
+    /**
+     * Updates the soil water status based on the input flag inputSoilWaterPotential.
+     * If inputSoilWaterPotential is true, calculates relative soil water content based on soil water potential.
+     * Otherwise, uses soil water content directly.
+     */
+    void updateSoilWaterStatus();
+}
+
+public class SimpleSoil implements SoilService {
+
+    public ModuleLength length;
+
+
+    /** Plant number in the field */
+	int plantNumber;
+	/** True if border plant, false if focal plant */
+	boolean border;
+	/** Layer index */
+	int layer;
+	/** Volume used for calculating root density */
+	double volume;
+	/** Volumetric soil water content */
+	double waterContent;
+	/** The ratio between current soil water content and the saturated soil water content */
+	float relativeWaterContent;
+	/** Soil water potential in MPa */
+	float waterPotential;
+	/**actual Soil hydraulic conductivity in m2 MPa-1 s-1 */
+	float Ksoil;
+	/** N content in soil in g m-3 */
+	float Ncontent;
+	/** Fraction of NH4 nitrogen in soil */
+	double FRACTION_NH4;
+	/** Fraction of NO3 nitrogen in soil */
+	double FRACTION_NO3;
+	/** Max soil water content in kg H2O/kg dry soil */
+	double Wcmax;
+	/** Empirical parameter n used in equation 4 and 5 in Tardieu's model (jxb 2015) */
+	double poreSizeCoef;
+	/** Empirical parameter alpha used in equation 4 and 5 in Tardieu's model (jxb 2015) */
+	double airEntryCoef;
+	/** maximum Soil hydraulic conductance used in equation 5 */
+	double Ks_soil;
+	/** Parameter p used in equation 5 */
+	double tortuosityCoef;
+	/**point to plant base*/
+	PlantBase[] pb = new PlantBase[1]; 
+
+    @Override
+	public static void loadParameters() {
+        
+	}
+
+    @Override
+    protected void initiate(int i, PlantBase pb)
+	{
+        
+	}
+
+} 
+
+public class DummySoil implements SoilService {
+    public ModuleLength length;
+
+    @Override
+	public static void loadParameters() {
+        
+	}
+
+    @Override
+    protected void initiate(int i, PlantBase pb)
+	{
+        if (printFlag) { println("initiate"); }
+	}
+
+    
+    @Override
+	protected float calcSoilWaterPotential(float relativeWaterContent) {
+		if (printFlag) { println("calcSoilWaterPotential"); }
+	}
+
+    @Override
+    protected float calcRelativeSoilWaterContent(float waterPotential) {
+		if (printFlag) { println("calcRelativeSoilWaterContent"); }
+	}
+    
+
+    
+    @Override
+    protected float calcSoilConductivity() 
+    {
+        if (printFlag) { println("calcSoilConductivity"); }
+    }
+  
+    
+    @Override
+    protected float updateSoilWaterStatus() 
+    {
+        if (printFlag) { println("updateSoilWaterStatus"); }
+    }
+}
+
+// public class ComplexSoil extends SoilService {
+//     @Override
+//     protected void initiate() {
+//         if (printFlag) { println("Initiate complex soil"); }
+//     }
+// }

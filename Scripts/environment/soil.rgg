@@ -1,0 +1,721 @@
+import java.io.File;
+import de.grogra.pf.io.PropertyFileReader;
+import java.util.Random;
+import java.util.Arrays;
+
+import io.github.fruitcropxl.config.adapters.*;
+import io.github.fruitcropxl.config.params.*;
+import io.github.fruitcropxl.config.params.groups.*;
+import io.github.fruitcropxl.config.params.structures.*;
+
+import static absOrgan.*;
+import static leaf.*;
+import static shoot.*;
+import static plantBase.*;
+import static java.lang.Math.*;
+import static globalParameters.*;
+import static plantParameters.*;
+import static modelOptions.*;
+import static initialConditions.*;
+import static extraTools.*;
+import static environment.*;
+import static rootSystem.*;
+import static archReader.*;
+import interfaces.*;
+
+
+// Load grapevine phenology properties
+public static boolean loadSoilParameters(String file_name) 
+{
+	boolean error = false;
+	error = error || loadSoilParamsFile(file_name);
+	if (error == true) println("Error during reading of soil parameter file(s)!");
+	return error;
+}
+
+// Load the file with parameters which determine phenology
+private static boolean loadSoilParamsFile(String file_name) {
+	ConfigLoader loader = new ConfigLoader(new LoadSoilCommand());	
+	// groupName: file_path, path: CONFIG_PATH_SCENARIOS + file_path
+	return loader.load(file_name, PATH_SCENARIOS + file_name);
+}
+
+private class LoadSoilCommand implements LoadCommand {
+	public void execute(String file_name) {
+		loadProperties(file_name);
+	}
+}
+
+private static void loadProperties(String file_name) {
+	CategoryStore config = ((DocumentHybridCategoryNameGroup) CONFIG.getGroup(file_name, 
+		DocumentHybridCategoryNameGroup.class)).getCategoryStore();
+	config.setCategoryContext("soilPhysicalProperties");
+	numofSoilLayers = config.getInteger("numofSoilLayers");
+}
+
+/**
+ * Represents the soil environment in a plant field.
+ * <p>
+ * This class models the soil properties and interactions, including water content,
+ * hydraulic conductivity, and soil nutrients. It also maintains a connection to the PlantBase
+ * instances that are rooted in this soil.
+ * For simplicity, we are going to connect with APSIM soil to get the soil water content in real time
+ * thus this class will only recieve soil water content, water potential and 
+ * soil parameter for converting those two and 
+ * calculate soil hydraulic conductivity under given soil water water potential  
+ * </p>
+
+ * Complex-root soil voxel visualisation.
+ *
+ * In complex-root mode:
+ *   Soil.length = dz, the voxel depth
+ *   Soil.widthX = dx, the along-row voxel size in the root-grid CSV
+ *   Soil.widthY = dy, the across-row voxel size in the root-grid CSV
+ *
+ * The root-grid CSV convention is preserved:
+ *   x = along row
+ *   y = perpendicular to row
+ *   z = vertical, negative below the soil surface
+ *
+ * The row orientation is handled during soil-grid creation by applying
+ * RH(rowOrientation) before emitting voxels under RootBase. Coordinate helpers
+ * then only perform the RootBase-local sign correction; they do not swap x/y.
+ *
+ * The following Box argument order is the empirically validated complex-root
+ * visual mapping for the current Soil/RootBase turtle frame. Do not interpret
+ * this as a biological swap of the input CSV axes.
+ *
+ * Keep the simple-root branch unchanged; simple-root stacking relies on the
+ * older Soil extends M(length) behaviour.
+ */
+module Soil extends M(length) 
+{
+	/** Plant number in the field */
+	int plantNumber;
+	/** True for soil cells belonging to the reportable/original field instance. */
+	boolean isReportable = true;
+	/** Field instance identifier; original field = 0, clones > 0. */
+	int fieldInstanceId = 0;
+	/** width of the soil grid*/
+	//double width;
+	  // NEW — per-axis cell sizes for complex root voxels
+    double widthX;   // dx  (along the row)      ← soilGridSize / r.cellDX
+    double widthY;   // dy  (across the row)     ← soilGridWidth / r.cellDY
+    
+	/** True if border plant, false if focal plant */
+	boolean border;
+	/** Layer index */
+	int layer;
+	/** grid index */
+	int id;
+	/** grid x, y index based x, y position and soil grid size*/
+	int gridX, gridY;
+	
+	/** Volume used for calculating root density */
+	double volume;
+	/** Volumetric soil water content */
+	double waterContent;
+	/** The ratio between current soil water content and the saturated soil water content */
+	double relativeWaterContent;
+	/** Soil water potential in MPa */
+	public double waterPotential;
+	/**actual Soil hydraulic conductivity in m2 MPa-1 s-1 */
+	double Ksoil;
+	/** N content in soil in g m-3 */
+	double Ncontent;
+	/** N concentration in soluble N of soil layer l [gN.L-1]*/
+	double NsolubleConc;
+	/** Fraction of NH4 nitrogen in soil */
+	double FRACTION_NH4;
+	/** Fraction of NO3 nitrogen in soil */
+	double FRACTION_NO3;
+	/** Max soil water content in volumetic %, m³/m³, mm/mm*/
+	double Wcmax;
+	/** Minimum soil water content in volumetic %, m³/m³, mm/mm*/
+	double thetaR;
+	/** bulkDensity of the soil g/cm3*/
+	double bulkDensity;
+	/**eq4_n unit-less, Empirical parameter n used in equation 4 and 5 in Tardieu's model (jxb 2015)  */
+	double poreSizeCoef;
+	/**eq4_alpha, unit 1/MPa, Empirical parameter alpha used in equation 4 and 5 in Tardieu's model (jxb 2015) */
+	double airEntryCoef;
+	/** maximum Soil hydraulic conductance used in equation 5 */
+	/** it was converted from hydraulic conductivity mm/h in the soil input parameter to m2/s/MPa */
+	double Ks_soil;
+	/** Parameter p used in equation 5 eq5_p  */
+	double tortuosityCoef;
+	
+	/** needs to use feddes model to calculate the water logging effect
+	    Upper threshold where waterlogging occurs (α = 0) [Feddes Model] -h1 
+	    (-0.001 MPa = -10 cm) where **waterlogging occurs** (alpha = 0).*/
+	double h1 = -0.001;
+	/** Lower threshold where maximum water uptake occurs (α = 1) [Feddes Model] - h2 
+	(-0.0025 MPa = -25 cm) where **maximum water uptake occurs** (alpha = 1)*/
+	double h2 = -0.0025;	
+	/** Lower threshold where water uptake starts decreasing (α = 1) [Feddes Model] - h3 
+	(-0.03 MPa = -300 cm) where **water uptake starts decreasing** (alpha = 1).*/
+	double h3 = -0.03;
+	/** Lower threshold where severe drought occurs (α = 0) [Feddes Model] - h4 
+	(-1.5 MPa = -15000 cm) where **severe drought occurs** (alpha = 0).*/
+	double h4 = -1.5;
+	/**variables for describing soil water status*/
+	public double PAW_mm;   // Plant-available water above wilting (mm)
+    public double TAW_mm;   // Total available between thetaR and Wcmax (mm)
+    public double FTSW;     // 0..1
+    public double alphaW;   // Feddes alpha(h), 0..1
+
+	 /**
+     * Initializes the Soil object with layer and PlantBase information.
+     * parameter corresponding with the soil model
+		waterSaturation = Wcmax, 
+		airEntryCoef = airEntryCoef, 
+		poreSizeCoef = poreSizeCoef,
+		saturatedConductivity = Ks_soil
+		/** method signatures for getDoubleArray in the configure module
+	 * public double[] getDoubleArray(String key, double[] defaultValue) - returns defaultValue if not found
+	 * Default to empty array if not provided in phenology file.
+	 * Example usage: BUDBURST_CANE_DIFF = config.getDoubleArray("BUDBURST_CANE_DIFF", new double[0]);
+	 *
+     * @param i  The index or identifier for the soil layer.
+     * @param pb The PlantBase object associated with this soil.
+     */
+	void initiate( int i, PlantBase pb)
+	{
+		plantNumber = pb.plantNumber;
+		fieldInstanceId = pb.fieldInstanceId;
+		isReportable = pb.isReportable;
+		this.border = pb.border;
+		
+		layer = i;
+		id = i;
+		String layerName = ConfigLoader.getTableLayerName(layer);
+		
+		double depth;
+		DocumentHybridCategoryNameGroup soilParameters = ((DocumentHybridCategoryNameGroup) CONFIG.getGroup(FILE_NAME_SOIL_PARAMETERS, 
+			DocumentHybridCategoryNameGroup.class));
+
+		ParamTable soilPhysicalProperties = soilParameters.getTableStore().getTable("soilPhysicalProperties");
+
+		// Assign default values from layer_1
+
+		depth = soilPhysicalProperties.getDouble(layerName, "layerThickness", 100)/1000; //converting from mm to m
+		
+		Wcmax = soilPhysicalProperties.getDouble(layerName, "waterSaturation", 0.55);
+		thetaR = soilPhysicalProperties.getDouble(layerName, "thetaR", 0.1);
+		bulkDensity = soilPhysicalProperties.getDouble(layerName, "bulkDensity", 1);
+		poreSizeCoef = soilPhysicalProperties.getDouble(layerName, "poreSizeCoef", 1.5);
+		airEntryCoef = soilPhysicalProperties.getDouble(layerName, "airEntryCoef", 0.1);
+		
+		Ks_soil = soilPhysicalProperties.getDouble(layerName, "saturatedConductivity", 4.17) * SOILKs_HOURLY_TO_PLANTKs;
+		tortuosityCoef = soilPhysicalProperties.getDouble(layerName, "tortuosityCoef", 2.5);
+		
+		ParamTable treeModelVariables = soilParameters.getTableStore().getTable("treeModelVariables");
+
+		Ncontent = treeModelVariables.getDouble(layerName, "SOIL_N_CONTENT", 15.1);
+		FRACTION_NH4 = treeModelVariables.getDouble(layerName, "FRACTION_NH4", 0.2);
+		FRACTION_NO3 = treeModelVariables.getDouble(layerName, "FRACTION_NO3", 0.8);
+		try {
+			h1 = treeModelVariables.getDouble(layerName, "h1");
+		} catch (Exception e) {
+			println("Warning: Parameter 'h5' not found in row '" + layerName + "'. Assigning default value.");
+			h1 = -0.001; // Default value for h1
+		} 
+		try {
+			h2 = treeModelVariables.getDouble(layerName, "h2");
+		} catch (Exception e) {
+			println("Warning: Parameter 'h5' not found in row '" + layerName + "'. Assigning default value.");
+			h2 = -0.0025; // Default value for h1
+		} 
+		try {
+			h3 = treeModelVariables.getDouble(layerName, "h3");
+		} catch (Exception e) {
+			println("Warning: Parameter 'h5' not found in row '" + layerName + "'. Assigning default value.");
+			h3 = -0.03; // Default value for h1
+		} 
+		try {
+			h4 = treeModelVariables.getDouble(layerName, "h4");
+		} catch (Exception e) {
+			println("Warning: Parameter 'h5' not found in row '" + layerName + "'. Assigning default value.");
+			h4 = -1.5; // Default value for h1
+		} 
+		
+		// NEW
+		length = (double) depth; // layer thickness in meters for non-complex path
+		if (useComplexRoot == false) {
+			// classic slab for non-complex mode
+			volume = this.length * rowDistance * plantDistance;
+		} else {
+			// complex voxel mode, but we don't have an rm here: fall back to globals
+			widthX = soilGridSize;
+			// If you have a global soilGridWidth, use it; else fall back to square cells
+			widthY = (soilGridWidth > 0.0) ? soilGridWidth : widthX;
+			volume = length * widthX * widthY;
+			
+		}
+
+
+		updateSoilWaterStatus();
+		calcSoilConductivity();
+		calcSolubleN();
+		//if (printFlag) { println("Layer: " + i + " Wcmax: " + Wcmax + " poreSizeCoef " + poreSizeCoef + " a " + airEntryCoef + " Ks_soil: " + Ks_soil); }
+		 
+	}
+
+	
+	
+	void initiate(PlantBase pb, RootMeristem rm)
+	{
+		plantNumber = pb.plantNumber;
+		fieldInstanceId = pb.fieldInstanceId;
+		isReportable = pb.isReportable;
+		this.border = pb.border;
+		
+		//in the Aggregated root reader
+		layer = Math.max(0, rm.N.vLayer);
+		id = rm.N.id;
+		gridX = rm.N.gridX;
+		gridY = rm.N.gridY;
+		Wcmax = rm.N.waterSaturation;
+				
+		// Assigning values from rm.N
+		
+		waterPotential=rm.N.waterPotential;
+		Wcmax = rm.N.waterSaturation; 
+		thetaR = rm.N.thetaR;
+		bulkDensity = rm.N.bulkDensity;
+		poreSizeCoef = rm.N.poreSizeCoef;
+		airEntryCoef = rm.N.airEntryCoef;
+		
+		Ks_soil = rm.N.saturatedConductivity * SOILKs_HOURLY_TO_PLANTKs;
+		tortuosityCoef = rm.N.tortuosityCoef;
+		
+		// Assigning nitrogen-related parameters
+		Ncontent = rm.N.Ncontent;
+		FRACTION_NH4 = rm.N.FRACTION_NH4;
+		FRACTION_NO3 = rm.N.FRACTION_NO3;
+
+		
+		// NEW
+		length = rm.N.soildepth;                   // dz
+		
+		widthX = (rm.N.cellDX > 0.0) ? rm.N.cellDX : soilGridSize;      // dx
+		widthY = (rm.N.cellDY > 0.0) ? rm.N.cellDY : widthX;            // dy
+		volume = length * widthX * widthY;
+
+
+		relativeWaterContent = calcRelativeSoilWaterContent(this.waterPotential);
+		waterContent = Wcmax * relativeWaterContent;
+		inputWaterPotential = waterPotential; 
+		calcSoilConductivity(); 
+		calcSolubleN();
+		
+		if (debug) 
+		{
+			println("Soil voxel L" + layer + " @(" + gridX + "," + gridY + ")"
+				+ " dx=" + Double.valueOf(widthX)
+				+ " dy=" + Double.valueOf(widthY)
+				+ " dz=" + Double.valueOf(length)
+				+ " V="  + Double.valueOf(volume));
+		}
+
+	}
+
+	
+	/**
+	 * Calculates the water potential as a function of the volumetric water content
+	 * based on the van Genuchten equation.
+	 * 
+	 * The van Genuchten equation is given by:
+	 * θ(h) = θr + ((θs - θr) / [1 + (α|h|)^n]^m)
+	 * 
+	 * where:
+	 * θs = saturated water content,
+	 * θr = residual water content,
+	 * α, n, m = empirical parameters.
+	 * m = 1.0- 1.0/n;
+	 * 
+	 * The method rearranges the equation to solve for the pressure head (h) as follows:
+	 * 1. Subtract θr from both sides to isolate the term with h.
+	 * 2. Invert both sides to get [1 + (α|h|)^n]^m on its own.
+	 * 3. Take the m-th root to remove the exponent m.
+	 * 4. Isolate (α|h|)^n.
+	 * 5. Solve for |h| by taking the n-th root.
+	 * 6. Introduce a negative sign as h is negative under unsaturated conditions.
+	 * 
+	 * The resulting expression for h as a function of θ is:
+	 * h = -1/α * (((θs - θr) / (θ - θr))^(1/m) - 1)^(1/n)
+	 * 
+	 * The air entry value (or air entry coefficient) is often expressed as 
+	 * <code>1/α</code> in the van Genuchten equation, where <code>α</code> is one of the empirical parameters.
+	 * This parameter <code>α</code> has units of <code>kPa<sup>-1</sup></code>, making <code>1/α</code> have units of kPa,
+	 * which is pressure (or suction).
+	 * 
+	 * #Water potential calculation original function in the R code
+     * Psisoilm <- ((1 - W ^ (parahydrodyn$n / (parahydrodyn$n - 1)))^(1/parahydrodyn$n) / (parahydrodyn$al * W^(1 / (parahydrodyn$n - 1))))
+	 
+	 * @param theta Volumetric water content for which to calculate the water potential.
+	 * @param thetaS Saturated water content.
+	 * @param thetaR Residual water content.
+	 * @param alpha, 1/airEntryCoef, 1/Kpa 
+	 * @param n Pore-size distribution parameter.
+	 * @return The calculated water potential. 
+	 * see unit conversion: at the confluence page https://plantandfood.atlassian.net/wiki/x/EYCEsg
+	 * A pressure of 10^4 pascals (Pa) is equivalent to the pressure exerted by approximately 101.94 centimeters of water column.
+	 */
+	public double calcSoilWaterPotential(double relativeWaterContent) {
+		// Parameters for the soil, these could be function arguments or class members
+		/* double m = 1.0- 1.0/poreSizeCoef;
+		//this causes errors when a is negative
+		double a = Math.pow(relativeWaterContent, 1/m) - 1;
+		
+		double Psisoilm = 1.0/airEntryCoef * Math.pow(a, 1/poreSizeCoef);  //1o^4 pa */
+		//if (printFlag) { println(" m " + m + " a " + a + " Psisoilm " + Psisoilm); }
+		
+		//original equation
+		//((1 - W ^ (parahydrodyn$n / (parahydrodyn$n - 1)))^(1/parahydrodyn$n) / 
+		//(parahydrodyn$al * W^(1 / (parahydrodyn$n - 1))))
+		
+		double rwc = Math.max(1e-6, Math.min(0.999999, relativeWaterContent));
+		double A = 1- Math.pow(rwc, (poreSizeCoef/(poreSizeCoef-1)));
+		double B = Math.pow(A, 1/poreSizeCoef);
+		double C = airEntryCoef * Math.pow(rwc, (1/(poreSizeCoef-1)));
+		double Psisoilm = B/C;
+		double wp = -Psisoilm/1000;
+		if (!Double.isNaN(wp) && !Double.isInfinite(wp)) {
+			this.waterPotential = wp;
+			if (soilWaterPotentialArray != null) {
+				safeSet(soilWaterPotentialArray, layer, wp);
+			}
+		} else if (printFlag) {
+			println("Invalid WaterPotential computed: " + wp + " at layer " + layer);
+		}
+		
+		return this.waterPotential;  //converting to MPa as negative value
+		
+		
+	}
+
+	
+	/**
+	 * Calculates the relative soil water content based on the soil water potential.
+	 * 
+	 * <p>
+	 * The function uses the following equation: 
+	 * \[
+	 * \text{relativeSoilWaterContent} = \left( 1 + \left( \text{airEntryCoef} \times \text{Psisoilm} \right)^{\text{poreSizeCoef}} \right)^{\frac{1 - \text{poreSizeCoef}}{\text{poreSizeCoef}}}
+	 * \]
+	 * 
+	 * Intermediate Variables:
+	 * A = \text{airEntryCoef} \times \text{Psisoilm}
+	 * B = A^{\text{poreSizeCoef}}
+	 * C = 1 + B
+	 * 
+	 * Simplified equation with intermediate variables:
+	 * \[
+	 * \text{relativeSoilWaterContent} = C^{\frac{1 - \text{poreSizeCoef}}{\text{poreSizeCoef}}}
+	 * \]
+	 * </p>
+	 *
+	 * @param waterPotential, the soil water potential in negative MPa, 
+	 * it converts to positive 10^4 pa inside the, -waterPotential * 100.
+	 * @return The calculated relative soil water content as a double.
+	 */
+	 double calcRelativeSoilWaterContent(double waterPotential) {
+		// Parameters for the soil, these could be function arguments or class members		
+		// Intermediate variables
+		//since airEntryCoef is 1/kpa now, the result needs to convert KPa
+		double Psisoilm = -waterPotential * 1000; 
+		double A = airEntryCoef * Psisoilm;
+		double B = (double) Math.pow(A, poreSizeCoef);
+		double C = 1 + B;
+	
+		// Final calculation
+		double relativeSoilWaterContent = (double) Math.pow(C, (1 - poreSizeCoef) / poreSizeCoef);
+		
+		return relativeSoilWaterContent;
+	}
+
+
+
+	  /**
+	 * Calculates the soil hydraulic conductivity.
+	 * <p>
+	 * This function uses empirical equations to calculate the soil's hydraulic conductivity based on
+	 * its current water content and potential.
+	 * #Soil hydraulic conductivity, original function in the R code of Tardieu et al., 2015
+     * Wm1 <- 1 /(1 + (parahydrodyn$al * Psisoilm) ^ parahydrodyn$n)
+     * datamin$k1[i] <- parahydrodyn$Ks * Wm1^(parahydrodyn$p - parahydrodyn$p / parahydrodyn$n) * (1-(1 - Wm1)^(1 - 1 / parahydrodyn$n))^2
+	 * </p>
+	 * @return The calculated soil hydraulic conductivity in m2 MPa-1 s-1.
+	 * mol m-1 s-1 Mpa-1 * 18 * 1e-6  =  m2 s-1 MPa-1
+	 *see detail steps:
+	 *mol m-1 s-1 Mpa-1 = mol m-1 s-1 Mpa-1 * 18 = g m-1 s-1 MPa-1 * 1e-6 = m3 m-1 s-1 MPa-1 = m2 s-1 MPa-1
+	 *1 g = 1m3 of water× 1 × 10−6
+	 * kSoil, saturated one, m2 MPa-1 s-1, range from 1 to 1e-6 (light clay, 5.5 mol m-1 s-1 Mpa-1 * 18 * 1e-6)  
+	 * 
+	 * for connecting with the soil model, the unit of Ks_soil in the input is now mm/hour
+	 */
+	 
+	 
+   void calcSoilConductivity() 
+	{ 
+	  double Psisoilm = -this.waterPotential * 1000; // to  KPa
+	  //waterPotential = -Psisoilm/1000;   //this is MPa
+	  //Soil hydraulic conductivity
+	  double Wm = 1 /(1 + pow((airEntryCoef * Psisoilm), poreSizeCoef));
+	  Ksoil = Ks_soil * pow(Wm, tortuosityCoef - tortuosityCoef / poreSizeCoef) * pow((1- pow(1 - Wm, 1-1/poreSizeCoef)), 2);
+	  //println("Ks_soil " + Ks_soil + "Ksoil " + Ksoil);
+	}
+	
+	
+// Recommended constants (tune as appropriate)
+private static final double EPS        = 1e-9;
+private static final double FallbackPsi = -0.15;   // MPa
+private static final double RWC_MIN     = 0.0;
+private static final double RWC_MAX     = 0.999;
+
+// ---- Small helpers ---------------------------------------------------------
+private static int safeIndex(int idx, double[] arr) {
+    if (arr == null || arr.length == 0) return -1;
+    if (idx < 0) return 0;
+    if (idx >= arr.length) return arr.length - 1;
+    return idx;
+}
+private static double safeGet(double[] arr, int idx, double defVal) {
+    int i = safeIndex(idx, arr);
+    return (i < 0) ? defVal : arr[i];
+}
+private static void safeSet(double[] arr, int idx, double val) {
+    int i = safeIndex(idx, arr);
+    if (i >= 0) arr[i] = val;
+}
+private static double clamp(double v, double lo, double hi) {
+    return (v < lo) ? lo : (v > hi) ? hi : v;
+}
+private static double safeDiv(double num, double den, double defVal) {
+    if (Double.isNaN(num) || Double.isNaN(den) || Math.abs(den) < EPS) return defVal;
+    double r = num / den;
+    return Double.isFinite(r) ? r : defVal;
+}
+
+// ---- Hardened method -------------------------------------------------------
+void updateSoilWaterStatus() 
+{
+    // Guard arrays and layer indexing
+    int idxPsi  = safeIndex(layer, soilWaterPotentialArray);
+    int idxWc   = safeIndex(layer, soilWaterContentArray);
+
+    if (idxPsi < 0 || idxWc < 0) {
+        // Nothing to do safely; keep state consistent and bail
+        if (printFlag) println("Soil guards: soil arrays null/empty; skipping update for layer=" + layer);
+        this.waterPotential     = (Double.isFinite(this.waterPotential) ? this.waterPotential : FallbackPsi);
+        this.relativeWaterContent = clamp(this.relativeWaterContent, RWC_MIN, RWC_MAX);
+        this.waterContent         = clamp(this.waterContent, 0.0, Math.max(Wcmax, 0.0));
+        computeAvailableWaterForSoil(this);
+        return;
+    }
+
+    // Ensure Wcmax sane to avoid /0
+    double wcMaxSafe = (Wcmax > EPS) ? Wcmax : 0.30;  // pick a small sane default if config is broken
+
+    if (inputSoilWaterPotential == true) {
+        // Read psi from array, fall back if NaN
+        double psiIn = safeGet(soilWaterPotentialArray, idxPsi, FallbackPsi);
+        if (!Double.isFinite(psiIn)) psiIn = FallbackPsi;
+
+        this.waterPotential = psiIn;
+
+        double rwc = calcRelativeSoilWaterContent(psiIn);
+        if (!Double.isFinite(rwc)) rwc = clamp(this.relativeWaterContent, RWC_MIN, RWC_MAX);
+        this.relativeWaterContent = clamp(rwc, RWC_MIN, RWC_MAX);
+
+        this.waterContent = clamp(this.relativeWaterContent * wcMaxSafe, 0.0, wcMaxSafe);
+
+        // Write back derived WC
+        safeSet(soilWaterContentArray, idxWc, this.waterContent);
+
+    } else {
+        // Using water content as input
+        double wcIn = safeGet(soilWaterContentArray, idxWc, this.waterContent);
+        if (!Double.isFinite(wcIn)) wcIn = clamp(this.waterContent, 0.0, wcMaxSafe);
+
+        this.waterContent = clamp(wcIn, 0.0, wcMaxSafe);
+
+        // Relative water content from WC
+        double rwc = safeDiv(this.waterContent, wcMaxSafe, this.relativeWaterContent);
+        this.relativeWaterContent = clamp(rwc, RWC_MIN, RWC_MAX);
+
+        // Compute psi from RWC
+        double psi = calcSoilWaterPotential(this.relativeWaterContent);
+        if (!Double.isFinite(psi)) {
+            println("Invalid WaterPotential computed from RWC=" + this.relativeWaterContent + ", using fallback " + FallbackPsi);
+            psi = FallbackPsi;
+        }
+        this.waterPotential = psi;
+
+        // Smooth inputWaterPotential if provided; otherwise set to current psi
+        if (!Double.isFinite(inputWaterPotential)) {
+            println("Invalid inputWaterPotential: NaN or null detected. Using fallback.");
+            inputWaterPotential = FallbackPsi;
+        } else {
+            inputWaterPotential = 0.5 * (inputWaterPotential + this.waterPotential);
+        }
+
+        // Write back derived psi
+        safeSet(soilWaterPotentialArray, idxPsi, this.waterPotential);
+    }
+
+    // Final sanity clamps
+    this.relativeWaterContent = clamp(this.relativeWaterContent, RWC_MIN, RWC_MAX);
+    this.waterContent         = clamp(this.waterContent, 0.0, wcMaxSafe);
+
+    computeAvailableWaterForSoil(this);
+
+    if (printFlag && debug) {
+        println("soil layer=" + layer 
+            + " psi:" + this.waterPotential 
+            + " RWC:" + this.relativeWaterContent 
+            + " WC:" + this.waterContent);
+    }
+}
+
+
+
+// degree of saturation above wilting, 0..1
+double ftsw(double theta, double thetaR, double thetaFC) {
+    double denom = Math.max(1.0e-9, thetaFC - thetaR);
+    double num   = theta - thetaR;
+    if (num <= 0.0) return 0.0;
+    if (num >= denom) return 1.0;
+    return num / denom;
+}
+
+/** Feddes alpha from soil water potential h (MPa), thresholds h1..h4 also in MPa. */
+double feddesAlpha(double h, double h1, double h2, double h3, double h4) {
+    // Note: potentials are negative. h1 > h2 > h3 > h4 (e.g., -0.001, -0.0025, -0.03, -1.5)
+    // α = 0 for h >= h1 (waterlogging region) and for h <= h4 (severe drought)
+    if (h >= h1) return 0.0;          // too wet / anoxic
+    if (h <= h4) return 0.0;          // too dry
+    if (h <= h2 && h >= h3) return 1.0; // optimal plateau
+    // linear ramps on both sides
+    if (h < h2 && h > h3) return 1.0;   // (covered above)
+    if (h > h2 && h < h1) {             // between h2 and h1: ramp down (wet side)
+        double num = h - h1;
+        double den = h2 - h1;
+        return Math.max(0.0, Math.min(1.0, num / Math.max(1.0e-12, den)));
+    }
+    // between h4 and h3: ramp down (dry side)
+    double num = h - h4;
+    double den = h3 - h4;
+    return Math.max(0.0, Math.min(1.0, num / Math.max(1.0e-12, den)));
+}
+
+/** Simple hydraulic supply index 0..1 from conductivity. */
+double hydraulicSupplyIndex(double Ksoil, double Ks_max) {
+    if (Ks_max <= 0.0) return 1.0;
+    double r = Ksoil / Ks_max;
+    if (r < 0.0) r = 0.0;
+    if (r > 1.0) r = 1.0;
+    return r;
+}
+
+/**
+ * Compute available-water diagnostics for a single Soil object.
+ * Uses this.h1..h4 thresholds already defined on your RootSystem.
+ */
+public void computeAvailableWaterForSoil(Soil s) {
+    
+    if (s == null) return;
+
+    // Geometry
+    double len_m = (s.length > 1.0e-12) ? s.length : 1.0e-12; // m
+    double area  = (s.volume > 0.0) ? (s.volume / len_m) : 1.0; // m² (not directly used here)
+    double thickness_mm = len_m * 1000.0; // mm
+
+    // Contents
+    double theta   = s.waterContent; // m³ m⁻³
+    double thetaR  = s.thetaR;       // m³ m⁻³
+    double thetaFC = s.Wcmax;        // m³ m⁻³
+    if (thetaFC < thetaR) { double tmp = thetaFC; thetaFC = thetaR; thetaR = tmp; }
+
+    // TAW & PAW (mm)
+    TAW_mm = Math.max(0.0, (thetaFC - thetaR)) * thickness_mm;
+    PAW_mm = Math.max(0.0, (theta - thetaR))  * thickness_mm;
+
+    // FTSW (0..1)
+    FTSW = ftsw(theta, thetaR, thetaFC);
+
+    // Feddes alpha from water potential (MPa)
+    alphaW = feddesAlpha(s.waterPotential, this.h1, this.h2, this.h3, this.h4);
+
+    // Hydraulic limiter
+    double hsi = hydraulicSupplyIndex(s.Ksoil, s.Ks_soil);
+
+   //println("AvailW: " + PAW_mm);
+
+}
+
+/**
+ * Converts nitrogen content from bulk soil (g·m⁻³) to concentration in the soil solution (g·L⁻¹),
+ * using volumetric soil water content (theta).
+ *
+ * <p>
+ * The formula used is:
+ * <pre>
+ *     [N]_solution (g·L⁻¹) = (N_bulk / theta) / 1000
+ * </pre>
+ * This accounts for the conversion from cubic meters to liters (1 m³ = 1000 L).
+ * </p>
+ *
+ * <ul>
+ *   <li><code>nBulk</code>: Nitrogen content in the bulk soil (g·m⁻³)</li>
+ *   <li><code>theta</code>: Volumetric soil water content (m³ water per m³ soil),
+ *       typically between 0.25 and 0.4 for agricultural soils</li>
+ * </ul>
+ *
+ * <p>
+ * <b>Typical values:</b>
+ * <ul>
+ *   <li><b>Typical nitrate concentrations in soil solution:</b> 0.001 – 0.2 g·L⁻¹</li>
+ *   <li><b>After fertilization or in high-input systems:</b> up to 0.5 g·L⁻¹ or more</li>
+ *   <li><b>Total mineral N in bulk soil:</b> commonly 10–50 g·m⁻³</li>
+ * </ul>
+ * These values help assess whether modeled soil N values are within physiological or agronomic norms.
+ * </p>
+ *
+ * <p>
+ * <b>Example:</b>
+ * <pre>
+ * double nBulk = 15.0f;   // g·m⁻³
+ * double theta = 0.25f;   // m³ water per m³ soil
+ * double nSolution = convertToSoilSolutionConcentration(nBulk, theta); // returns 0.06 g·L⁻¹
+ * </pre>
+ * </p>
+ *
+ * @param nBulk Nitrogen content in bulk soil (g·m⁻³)
+ * @param theta Volumetric soil water content (m³ water / m³ soil)
+ * @return Nitrogen concentration in soil solution (g·L⁻¹)
+ */
+void calcSolubleN() {
+    NsolubleConc = (this.Ncontent/this.waterContent) / 1000.0f;
+}
+
+
+
+}
+==> 
+/* if(trainingSystem == 0) (Translate(0,0,-0.1) Frustum(0.1,0.05,0.05).(setLayer(soilLayer), setShader(DARK_GRAY))) 
+	else (Translate(0,0,-depth*soilLayer) Frustum(0.25,0.10,0.15).(setLayer(soilLayer), setShader(DARK_GRAY)));
+ */
+if(useComplexRoot == false) ( 
+	Box(length, plantDistance, rowDistance).(setLayer(soilLayer), setShader(DARK_GRAY))
+) else (
+	// GroIMP Box(a,b,c) maps to Length=a, Width=b, Height=c.
+	// Complex-root voxels keep CSV dimensions here: widthX=dx, widthY=dy, length=dz.
+	// RootBase frame correction is handled in addRootSoilGridFromRootData(); do not swap x/y here.
+	// but because of the flip in the local coordinates, it seems, I still need to do it like this.
+	Box(length, widthX, widthY).(setLayer(soilLayer), setShader(DARK_GRAY))
+);
+
+
+ 

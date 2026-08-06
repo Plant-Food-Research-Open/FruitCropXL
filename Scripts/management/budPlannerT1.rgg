@@ -1,0 +1,293 @@
+import static plantBase.*;
+import static budBase.*;
+import static budApple.*;
+import static shootBase.*;
+import static shoot.*;
+import static leaf.*;
+import static absOrgan.*;
+import static globalParameters.*;
+import static plantParameters.*;
+import static modelOptions.*;
+import static extraTools.*;
+import static archReader.*;
+import budPlannerConfig.*;
+import budReflectionUtils.*;
+
+/**
+ * T1 apex-potential preflight.
+ *
+ * <p>This stage does not add or remove buds. It only rescales apex-side planned
+ * node counts so the shoot generator's potential leaf area stays aligned with the
+ * same pre-prune target used by Stage-A planning.</p>
+ */
+public final class BudPlannerT1 {
+
+  private BudPlannerT1() {}
+
+  // --- T1: Apex potential stats (future use; optional) ---
+  static final class ApexPotStats_T1 {
+    int    nApex;
+    double totalNodes;
+    double potentialLA_m2;
+  }
+
+  /**
+   * T1 apex-potential adjustment.
+   *
+   * Steps:
+   *   1) If apexPotentialEnable_T1=false or target LA <= 0 → no-op.
+   *   2) Estimate current potential LA from all ApexService:
+   *        nodes_apex = mainNodesPlanned + Σ branchPlan[i][1]
+   *        LA_apex = nodes_apex × leavesPerNode × meanLeafArea × expectedPushFrac
+   *   3) rawScale = targetLA / currentPotentialLA
+   *   4) Clamp rawScale to [1 - apexPotentialMaxRelDiff, 1 + apexPotentialMaxRelDiff]
+   *   5) Apply that scale to:
+   *        mainNodesPlanned  (and phytomerNumber)
+   *        branchPlan[i][1]
+   *      with safeguards:
+   *        mainNodesPlanned >= formedNodes, mainNodesPlanned >= 1, branchLen >= 1.
+   */
+  public static void adjustApexPotential_T1(BudPlannerConfig.Cfg cfg) {
+    if (!cfg.enableApexPotentialT1) {
+      println("[BudPlanner][T1] apexPotentialEnable_T1=false → skip apex potential adjustment.");
+      return;
+    }
+
+    double targetLA = cfg.expectedPrePruneLA_m2;  // from expectedLeafArea_prePrune
+    if (targetLA <= 0.0) {
+      println("[BudPlanner][T1] expectedPrePruneLA_m2 <= 0 → no target, skip apex potential adjustment.");
+      return;
+    }
+
+    // Use same LA model as T0
+    double meanLeafArea_m2 = cfg.meanLeafArea_m2;
+    double leavesPerNode   = cfg.leavesPerNode;
+    double pushFrac        = cfg.expectedPushFrac;
+
+    double curPotLA = estimateApexPotentialLeafArea_T1(meanLeafArea_m2,
+                                                       leavesPerNode,
+                                                       pushFrac);
+
+    println("==========================================================");
+    println("[BudPlanner][T1] Apex potential adjustment");
+    println("  targetExpectedLA (cfg.expectedPrePruneLA_m2) = " + round3(targetLA) + " m^2");
+    println("  currentApexPotentialLA≈                      = " + round3(curPotLA) + " m^2");
+    println("  enableApexPotentialT1                        = " + cfg.enableApexPotentialT1);
+    println("  apexPotentialMaxRelDiff                      = " + round5(cfg.apexPotentialMaxRelDiff));
+    println("  apexPotentialScaleT1 (manual, unused)        = " + round5(cfg.apexPotentialScaleT1));
+
+    if (curPotLA <= 0.0) {
+      println("[BudPlanner][T1] currentApexPotentialLA<=0 → nothing to scale.");
+      println("==========================================================");
+      return;
+    }
+
+    double rawScale = targetLA / curPotLA;
+
+    double maxDev = cfg.apexPotentialMaxRelDiff;
+    if (maxDev <= 0.0) maxDev = 0.30;
+    if (maxDev > 0.90) maxDev = 0.90;
+    double lo = 1.0 - maxDev;
+    double hi = 1.0 + maxDev;
+
+    double scale = clamp(rawScale, lo, hi);
+    double relChange = Math.abs(scale - 1.0);
+
+    println("  rawScale=" + round3(rawScale)
+         + " | allowed ±" + round3(maxDev)
+         + " → appliedScale=" + round3(scale)
+         + " (|scale-1|=" + round3(relChange) + ")");
+
+    // Small-change gate (avoid noisy tiny tweaks)
+    if (relChange < 0.01) {
+      println("[BudPlanner][T1] |scale-1|<0.01 → skip; apex potentials remain unchanged.");
+      println("==========================================================");
+      return;
+    }
+
+    if (cfg.dryRun) {
+      println("[BudPlanner][T1] DRY-RUN: would scale apex potentials by factor "
+           + round3(scale) + " (mainNodesPlanned & branchPlan lengths).");
+      println("==========================================================");
+      return;
+    }
+
+    int nApex = scaleApexPotentials_T1(scale);
+
+    double newPotLA = estimateApexPotentialLeafArea_T1(meanLeafArea_m2,
+                                                       leavesPerNode,
+                                                       pushFrac);
+
+    println("[BudPlanner][T1] Apex potential scaling applied:");
+    println("  nApexUpdated        = " + nApex);
+    println("  oldApexPotentialLA≈ = " + round3(curPotLA) + " m^2");
+    println("  newApexPotentialLA≈ = " + round3(newPotLA) + " m^2");
+    println("==========================================================");
+  }
+
+  /**
+   * Estimate potential leaf area at T1 from all ApexService.
+   *
+   * Potential nodes per apex ≈
+   *   mainNodesPlanned + Σ branchPlan[i][1]
+   *
+   * Potential LA (m²) = Σ (nodes_apex × leavesPerNode × meanLeafArea_m2 × expectedPushFrac).
+   */
+  static double estimateApexPotentialLeafArea_T1(double meanLeafArea_m2,
+                                                 double leavesPerNode,
+                                                 double expectedPushFrac) {
+    double totalNodes = 0.0;
+
+    try {
+      for (ApexService ap : (* ApexService *)) {
+        totalNodes += (double) potentialNodesOfApex_T1(ap);
+      }
+    } catch (Throwable t) {
+      // If ApexService doesn't exist (e.g. grape run), we get 0 and T1 adjust will skip.
+    }
+
+    double perNodeLA = leavesPerNode * meanLeafArea_m2 * expectedPushFrac;
+    return totalNodes * perNodeLA;
+  }
+
+  /**
+   * Approximate total potential nodes for a single apex.
+   *
+   * We try (via reflection):
+   *   - mainNodesPlanned
+   *   - phytomerNumber   (fallback)
+   * and add branch lengths from branchPlan[i][1] if present.
+   */
+  static int potentialNodesOfApex_T1(Object ap) {
+    if (ap == null) return 0;
+
+    int mainNodes = 0;
+
+    // mainNodesPlanned or phytomerNumber
+    Integer m = BudReflectionUtils.getIntField(ap, "mainNodesPlanned");
+    if (m == null) m = BudReflectionUtils.getIntField(ap, "phytomerNumber");
+    if (m != null && m.intValue() > 0) mainNodes = m.intValue();
+
+    int branches = 0;
+    try {
+      java.lang.reflect.Field fb = ap.getClass().getField("branchPlan");
+      Object v = fb.get(ap);
+      if (v instanceof int[][]) {
+        int[][] bp = (int[][]) v;
+        for (int i = 0; i < bp.length; i++) {
+          if (bp[i] == null || bp[i].length < 2) continue;
+          int len = bp[i][1];
+          if (len > 0) branches += len;
+        }
+      }
+    } catch (Throwable t) {
+      // no branchPlan field → ignore branches
+    }
+
+    return mainNodes + branches;
+  }
+
+  /**
+   * Apply a multiplicative scale to apex potentials:
+   *
+   *   mainNodesPlanned  ← round(mainNodesPlanned × scale)
+   *   phytomerNumber    ← same as mainNodesPlanned (if present)
+   *   branchPlan[i][1]  ← round(branchPlan[i][1] × scale)
+   *
+   * Safeguards:
+   *   - mainNodesPlanned >= formedNodes (if present)
+   *   - mainNodesPlanned >= 1
+   *   - branch lengths  >= 1
+   *
+   * Returns number of apexes updated.
+   */
+  static int scaleApexPotentials_T1(double scale) {
+    int nApexUpdated = 0;
+
+    try {
+      for (ApexService ap : (* ApexService *)) {
+        Object obj = (Object) ap;
+
+        // --- MAIN NODES ---
+        Integer m = BudReflectionUtils.getIntField(obj, "mainNodesPlanned");
+        if (m == null || m.intValue() <= 0) {
+          // fallback to phytomerNumber, if mainNodesPlanned is not explicitly stored
+          m = BudReflectionUtils.getIntField(obj, "phytomerNumber");
+        }
+
+        if (m == null || m.intValue() <= 0) {
+          // nothing to scale for this apex
+          continue;
+        }
+
+        int mainNodesOld = m.intValue();
+
+        int formed = 0;
+        Integer fn = BudReflectionUtils.getIntField(obj, "formedNodes");
+        if (fn != null && fn.intValue() > 0) formed = fn.intValue();
+
+        int mainNodesNew = (int) Math.round(((double) mainNodesOld) * scale);
+        if (formed > 0 && mainNodesNew < formed) mainNodesNew = formed;
+        if (mainNodesNew < 1) mainNodesNew = 1;
+
+        // Write back mainNodesPlanned (if present)
+        try {
+          java.lang.reflect.Field fMain = obj.getClass().getField("mainNodesPlanned");
+          fMain.setInt(obj, mainNodesNew);
+        } catch (Throwable t) { /* ignore */ }
+
+        // Keep phytomerNumber in sync (if present)
+        try {
+          java.lang.reflect.Field fPhyto = obj.getClass().getField("phytomerNumber");
+          fPhyto.setInt(obj, mainNodesNew);
+        } catch (Throwable t) { /* ignore */ }
+
+        // --- BRANCH PLAN ---
+        boolean anyBranchChanged = false;
+        try {
+          java.lang.reflect.Field fb = obj.getClass().getField("branchPlan");
+          Object v = fb.get(obj);
+          if (v instanceof int[][]) {
+            int[][] bp = (int[][]) v;
+            for (int i = 0; i < bp.length; i++) {
+              if (bp[i] == null || bp[i].length < 2) continue;
+              int lenOld = bp[i][1];
+              if (lenOld <= 0) continue;
+
+              int lenNew = (int) Math.round(((double) lenOld) * scale);
+              if (lenNew < 1) lenNew = 1;
+
+              bp[i][1] = lenNew;
+              anyBranchChanged = true;
+            }
+            if (anyBranchChanged) {
+              fb.set(obj, bp);
+            }
+          }
+        } catch (Throwable t) { /* ignore */ }
+
+        nApexUpdated++;
+      }
+    } catch (Throwable t) {
+      println("[BudPlanner][T1] WARNING: scaleApexPotentials_T1 encountered an error: " + t);
+    }
+
+    return nApexUpdated;
+  }
+
+  // --- small local helpers (kept private to T1) -----------------------------
+
+  private static double clamp(double x, double lo, double hi) {
+    if (x < lo) return lo;
+    if (x > hi) return hi;
+    return x;
+  }
+
+  private static double round3(double v) {
+    return Math.round(v * 1000.0) / 1000.0;
+  }
+
+  private static double round5(double v) {
+    return Math.round(v * 100000.0) / 100000.0;
+  }
+}

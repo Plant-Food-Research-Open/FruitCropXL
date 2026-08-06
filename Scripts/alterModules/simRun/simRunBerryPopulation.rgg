@@ -1,0 +1,68 @@
+import static main.*;
+import static outputTables.*;
+import static java.lang.Math.*;
+import static extraTools.*;
+import static modelOptions.*;
+import static initialConditions.*;
+import static globalParameters.*;
+import static simRunBase.*;
+import static main.*;
+import java.io.Serializable;
+
+import java.util.Arrays;
+import java.util.ArrayList;
+import java.util.List;
+import de.grogra.pf.ui.Context;
+import de.grogra.graph.impl.GraphManager;
+import de.grogra.util.Lock;
+import de.grogra.pf.ui.util.LockProtectedCommand;
+import de.grogra.pf.ui.JobManager;
+import de.grogra.graph.impl.Edge;
+import de.grogra.persistence.Transaction;
+import de.grogra.graph.Graph;
+import de.grogra.pf.ui.Command;
+import de.grogra.imp.IMPWorkbench;
+import de.grogra.pf.registry.Registry;
+import de.grogra.pf.ui.Workbench;
+import de.grogra.pf.ui.JobManager;
+import de.grogra.rgg.Library;
+
+
+public class SimRunBerryPopulation extends SimRunService implements Serializable {
+	public void simRun() 
+	{
+		keepTable = false;	
+		mainInstance.resetGraph();
+		
+		commandLineArgs = new CommandLineArgs();
+		
+		FILE_NAME_MODEL_OPTIONS = commandLineArgs.getRawProperty("inputData");
+		
+		/* String treatment = commandLineArgs.getRawProperty("treatment");
+		String site = commandLineArgs.getRawProperty("site");
+		String year = commandLineArgs.getRawProperty("year");
+		
+		FILE_NAME_MODEL_OPTIONS = "model.options." + treatment + "." + site + "." + year + ".txt";
+		
+		if (printFlag) { println("new file name" + FILE_NAME_MODEL_OPTIONS); }
+		
+		if(treatment == null || site == null || year == null) {
+			if (printFlag) { println("no treatment"); }
+			FILE_NAME_MODEL_OPTIONS = "model.options.VSP.NZ.txt";
+		}
+		*/
+		
+		cloneX = 10;
+		cloneY = 10;	
+					
+		mainInstance.init();
+		derive();
+
+		mainInstance.runEnd();
+		
+		String name =  splitAndCombine(FILE_NAME_MODEL_OPTIONS);
+			
+		String chart0 = PATH_OUTPUT+ name + "c0.csv";
+		outputChartData(chart0, 0);
+	}
+}

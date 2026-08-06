@@ -1,0 +1,5105 @@
+import static plantBase.*;
+import static budBase.*;
+import static budApple.*;
+import static shootBase.*;
+import static shoot.*;
+import static leaf.*;
+import static absOrgan.*;
+import static globalParameters.*;
+import static plantParameters.*;
+import static modelOptions.*;
+import static extraTools.*;
+import static archReader.*;
+
+import budPlannerConfig.*;
+
+
+
+/**
+ * Stage-A apple bud planner.
+ *
+ * <p>This file owns the actual T0 graph edits: density enforcement, leaf-area /
+ * crop balancing, whole-tree and grid modes, upright 3-region mode, and the
+ * final consistency reporting after edits. Configuration resolution lives in
+ * {@code BudPlannerConfig} and T1 apex-potential scaling lives in
+ * {@code BudPlannerT1}.</p>
+ *
+ * <p>The planner is intentionally conservative about ownership: it treats bud
+ * attachment sites canonically, reserves sites before adding new buds, and uses
+ * RAW-fruit floor checks when removing floral buds.</p>
+ *
+ * <h2>Upright-region mode 8</h2>
+ * <p>{@code budPlanner.targetMode = 8} is the upright 3-region density mode
+ * for apple upright-style canopies. It uses {@code cfg.uprightOrder}
+ * (loaded from {@code budPlanner.uprightOrder} / {@code MgmtUprightOrder})
+ * to find the order-root ancestor for each internode via
+ * {@link #orderRootKey}. For every upright root, it computes the vertical
+ * Z-span from member internodes using {@link #zBase} and {@link #zTip}, splits
+ * that span into three regions (0=bottom, 1=middle, 2=top), counts buds whose
+ * attachment internode midpoint falls in each region, and sets
+ * {@code target = round(regionLengthM * budNumberPerMeter)}. Regions above
+ * target are thinned in-place, preferring vegetative buds before floral buds
+ * and protecting the RAW fruit floor for floral removals. Regions below target
+ * are filled inside the same upright-region band through {@link #stagePlacement}
+ * and {@link #safeAttachBud}, subject to placement order, main-axis, spacing,
+ * claimed-site, and {@code maxNewBudsAllow} guards. The mode prints one
+ * diagnostic line per upright region.</p>
+ *
+ * <p>Mode 8 depends on correct internode topology, {@code Internode.order},
+ * usable {@code z}/{@code endZ} geometry, and buds attached to valid internode
+ * sites. Imported architectures with unusual coordinate orientation can make
+ * the Z-based bottom/middle/top labels differ from biological position.</p>
+ */
+public final class BudPlannerT0 {
+
+  private BudPlannerT0() {}
+
+  // ------------------- T0 preflight gates & thresholds ----------------------
+  static final double T0_SCALE_GATE      = 0.08;
+  static final double T0_SHAPE_GATE_RHO  = 0.80;
+  static final double T0_MAX_SCALE_STEP  = 0.10;
+  static final int    T0_RANK_MIN        = 5;
+  static final int    T0_PREF_ORDER      = 3;
+  static final double T0_DK              = 0.3;
+  static final double T0_DT              = 0.5;
+
+  static final double WARN_20            = 0.20;
+  static final double WARN_30            = 0.30;
+  // Minimum vertical span (m) for a root to be managed as an upright-region upright.
+  static final double UPRIGHT_REGION_MIN_SPAN_M = 2.0;
+
+  // -------------------------- Run-state (raw types) -------------------------
+  static int removedFloralCount = 0, removedVegCount = 0;
+
+  static int extraFloralToAdd = 0, extraVegToAdd = 0;
+  static int placedFloral = 0, placedVeg = 0;
+  static int attempts = 0, unmetFloral = 0, unmetVeg = 0;
+  static int fruitsRemainingToAllocate = 0;
+  static int attachClaimStep = Integer.MIN_VALUE;
+  static java.util.Set claimedBudAttachSiteIds = new java.util.HashSet();
+
+  /** Map<Object uprightKey, Integer> of expected fruit per upright (RAW expectation) */
+  static java.util.Map uprightFruitMap = null;
+  // Spacing-gate acceleration cache: axisRoot -> List<Double axisPosM>.
+  static java.util.Map spacingPosByAxisCache = null;
+  static int spacingPosCacheBudCount = -1;
+
+  static final java.util.Random _rng = new java.util.Random(12345L);
+
+  // ----------------------- Small data containers ----------------------------
+  static final class BudStats {
+    int nBuds;
+    int nFloral;
+    double laExisting;
+    double laVegPlan;
+    double laFloralRosettePlan;
+    double laFloralBoursePlan;
+    int plannedLeafCount;
+    int plannedRosetteLeaves;
+    int plannedBourseLeaves;
+    int plannedVegLeaves;
+    int nBudVegetative;
+    int fruitsExistingCapped;
+    int fruitsRaw;
+  }
+
+  static final class UprightScore {
+    Object key;
+    double la;
+    int raw;
+    double ratio;
+    UprightScore(Object k, double l, int r, double q) { key=k; la=l; raw=r; ratio=q; }
+  }
+
+  static final class GammaParams {
+    double k;
+    double theta;
+    int r0;
+    GammaParams(double K, double T, int R) { k=K; theta=T; r0=R; }
+  }
+
+  static final class UprightLen {
+    Object key;
+    double lenM;
+    UprightLen(Object k, double L) { key=k; lenM=L; }
+  }
+
+  static final class Cand {
+    BudService b;
+    boolean isFloral;
+    int fexp;
+    Cand(BudService bb, boolean fl, int fe) { b=bb; isFloral=fl; fexp=fe; }
+  }
+
+  static final class RemovePriorityCand {
+    BudService b;
+    Internode site;
+    Internode axisRoot;
+    boolean isFloral;
+    int fexp;
+    boolean nonTerminalSite;
+    double axisPosM;
+    double axisDensity;
+    double nearestDistM;
+    int closeBand;
+    RemovePriorityCand(BudService bb, Internode s, Internode r,
+                       boolean fl, int fe, boolean nonTerm, double pos){
+      b = bb;
+      site = s;
+      axisRoot = r;
+      isFloral = fl;
+      fexp = fe;
+      nonTerminalSite = nonTerm;
+      axisPosM = pos;
+      axisDensity = 0.0;
+      nearestDistM = Double.POSITIVE_INFINITY;
+      closeBand = 0;
+    }
+  }
+
+  // Z-span & zoning helpers
+  static final class ZRange {
+    double min = Double.POSITIVE_INFINITY, max = Double.NEGATIVE_INFINITY;
+    int n = 0;
+    void add(double a, double b) {
+      double lo = (a<b)?a:b, hi=(a<b)?b:a;
+      if (lo < min) min = lo;
+      if (hi > max) max = hi;
+      n++;
+    }
+    double span() { return (min<=max) ? (max-min) : 0.0; }
+  }
+
+  static final int ZONES = 5;
+
+  static final class ZoneSnap {
+    Object   upKey;
+    Internode root;
+    int      zoneIdx;
+    double   zMin, zMax, lenM;
+    int      budsNow;
+    int      target;
+    int      delta;
+    ZoneSnap(Object k, Internode r, int zi, double a, double b) {
+      upKey=k; root=r; zoneIdx=zi; zMin=a; zMax=b;
+      lenM = Math.max(0.0, b-a);
+    }
+  }
+
+  static final class UprightRegionSnap {
+    Object   upKey;
+    Internode root;
+    int      uprightIdx;
+    int      regionIdx; // 0=bottom,1=middle,2=top
+    int      flatIdx;
+    double   xRow;
+    double   uprightZMin, uprightZMax;
+    double   zMin, zMax, lenM;
+    int      budsNow;
+    int      target;
+    int      delta;
+    UprightRegionSnap(Object k, Internode r, int ri, double a, double b) {
+      upKey = k; root = r; regionIdx = ri; zMin = a; zMax = b;
+      lenM = Math.max(0.0, b - a);
+      target = -1;
+    }
+  }
+
+  static final class UprightOrderSnap {
+    Internode root;
+    double zMin;
+    double zMax;
+    double xRow;
+    int n;
+  }
+
+  static final class UprightLenSnap {
+    Internode root;
+    String key;
+    double lenM;
+    int budsNow;
+    int target;
+    double relErr;
+    UprightLenSnap(Internode r, String k) { root=r; key=k; }
+  }
+
+  static final class ZoneWorst {
+    Internode root;
+    double zLo, zHi;
+    int target, now;
+    double rel;
+    ZoneWorst(Internode r, double a, double b, int t, int n, double q) {
+      root=r; zLo=a; zHi=b; target=t; now=n; rel=q;
+    }
+  }
+
+ // ------------------------------ Public T0 API -----------------------------
+
+  /**
+   * Stage-A planner on the current scene.
+   * This is exactly your old addBudsRemoveToMeetTargets_T0(BudPlannerConfig.Cfg cfg) method.
+   *
+   * Copy the full body from your original BudPlanner:
+   *   static void addBudsRemoveToMeetTargets_T0(BudPlannerConfig.Cfg cfg) { ... }
+   *
+   * Only changes needed:
+   *   - BudPlannerConfig.Cfg type is now BudPlannerConfig.BudPlannerConfig.Cfg
+   *   - calls to describebudPlannerMode(...) must be qualified:
+   *       BudPlannerConfig.describebudPlannerMode(...)
+   */
+
+
+
+
+/**
+ * Orchestrates Stage-A planning on the current scene.
+ * <ol>
+ *   <li>Scan existing buds → LA and RAW fruit.</li>
+ *   <li>If mode 0/1/6: enforce density variants on uprights and return.</li>
+ *   <li>If mode 8: enforce bottom/middle/top upright-region density and return.</li>
+ *   <li>If mode 3: enforce density, re-scan, then continue.</li>
+ *   <li>Choose pre-prune target LA and implied post-prune LA; print diagnostics.</li>
+ *   <li>If LA excess → removal path (ratio-ranked uprights, fruit floor protected).</li>
+ *   <li>If LA deficit → addition path (plan counts via Γ-mean LA per bud and
+ *       expected fruits/floral, preflight, staged placement).</li>
+ * </ol>
+ *
+ * @param cfg resolved configuration (numbers copied from plantParameters with defaults)
+ */
+
+  static void addBudsRemoveToMeetTargets_T0(BudPlannerConfig.Cfg cfg){
+    extraFloralToAdd = extraVegToAdd = 0;
+    placedFloral = placedVeg = attempts = unmetFloral = unmetVeg = 0;
+    fruitsRemainingToAllocate = 0;
+    uprightFruitMap = new java.util.HashMap();
+    invalidateSpacingPosCache();
+    cleanupArchitectureBudPlacement_T0(cfg);
+
+    BudStats st = scanExisting(cfg);
+    double targetPrePrune = pickPrePruneTargetOrFallback(cfg, st);
+
+    int fruitFloor = Math.max(0, cfg.expectedFruitNumber);
+
+    // ---------- STRATEGY DISPATCH ----------
+    switch (cfg.budTargetMode) {
+
+	 case 0:
+		  int spurRemoved0 = 0;
+		  if (cfg.enableSpurBalancer) {
+			spurRemoved0 = balanceBudsPerSpurBucket(cfg);
+			println("[BudPlanner] Spur balancer prepass (mode 0): removed=" + spurRemoved0);
+		  }
+		
+		  enforceBudDensityPerMeter_remove_perZone_mode0Priority(cfg, cfg.budNumberPerMeter, fruitFloor);
+		  int spacingRemoved0 = enforceMinBudSpacing_removeTooClose(cfg, cfg.minBudSpacingM,
+			  (fruitFloor > 0), fruitFloor, false);
+		  println("[BudPlanner] Strategy 0 complete: prioritized density remove + spacing cleanup (removed=" + spacingRemoved0 + ").");
+		
+		  finalConsistencyBanner(cfg, targetPrePrune);
+		  return;
+
+
+      case 1:
+        if (cfg.enableSpurBalancer) {
+          int spurRemoved1 = balanceBudsPerSpurBucket(cfg);
+          println("[BudPlanner] Spur balancer prepass (mode 1): removed=" + spurRemoved1);
+          densityFillAfterSpurBalancing(cfg, 1, fruitFloor);
+          finalConsistencyBanner(cfg, targetPrePrune);
+        } else {
+          runMode1FastDensityLocalRebalance(cfg, fruitFloor, targetPrePrune);
+        }
+        return;
+
+      case 6:
+        runMode6LegacyDensitySpacing(cfg, fruitFloor, targetPrePrune);
+        return;
+
+      case 8:
+        enforceBudDensityPerMeter_uprightRegions(cfg, cfg.budNumberPerMeter, fruitFloor);
+        finalConsistencyBanner(cfg, targetPrePrune);
+        return;
+
+      case 2:
+        // existing LA/fruit-only (no density step) – fall through to LA planner below
+        break;
+
+      case 3:
+        // existing: density remove-only prepass, then LA/crop
+        enforceBudDensityPerMeter_remove_perZone(cfg, cfg.budNumberPerMeter, fruitFloor);
+        break;
+
+      // --------------------------------------------------------------------
+      // NEW MODE 4: whole-tree bud target (remove-only, no LA/crop planner)
+      // --------------------------------------------------------------------
+      case 4:
+        enforceTotalBudTargetPerTree_mode4(cfg);
+        // we don't have an LA "plan" here, so pass 0 => LA dev is skipped
+        finalConsistencyBanner(cfg, 0.0);
+        return;
+
+      // --------------------------------------------------------------------
+      // NEW MODE 5: grid-based bud targets (remove-only, no LA/crop planner)
+      // --------------------------------------------------------------------
+      case 5:
+        enforceGridBudTargets_mode5(cfg);
+        finalConsistencyBanner(cfg, 0.0);
+        return;
+
+      default:
+        println("[BudManager] NOTE: Unknown budManagerOption=" + cfg.budTargetMode
+             + " → using LA/fruit mode (2).");
+        break;
+    }
+
+    // ---------- existing LA & FRUIT PLANNING PATH (modes 2 and 3) ----------
+    // ... your current LA/crop code follows here ...
+    // ---------- LA & FRUIT PLANNING PATH (modes 2 and 3) ----------
+    // (everything below is your existing LA/crop codepath, with mode-2 extended to allow add-after-remove)
+
+    double impliedPost_targetEff   = targetPrePrune * (1.0 - cfg.summerPruneFrac_eff);
+    double impliedPost_existingCfg = st.laExisting   * (1.0 - cfg.summerPruneFrac_cfg);
+    double effExistingToHitPost    = 1.0 - (cfg.targetPostPrune_m2 / Math.max(1e-9, st.laExisting));
+
+    println("==========================================================");
+    println("[BudPlanner] ===== Stage A (t=0) LA + Crop =====");
+    println("[BudPlanner] Planning target (pre-prune): " + round3(targetPrePrune) + " m^2");
+    println("[BudPlanner] EXISTING: leafArea=" + round3(st.laExisting) + " m^2 | fruitsRaw=" + st.fruitsRaw + " | fruitsCapped=" + st.fruitsExistingCapped);
+
+    println("[BudPlanner] Summer prune: cfg=" + round5(cfg.summerPruneFrac_cfg)
+      + " eff=" + round5(cfg.summerPruneFrac_eff)
+      + " → post(target,eff)≈ " + round3(impliedPost_targetEff) + " m^2"
+      + " | post(existing,cfg)≈ " + round3(impliedPost_existingCfg) + " m^2"
+      + " | eff(existing→post)≈ " + round5(effExistingToHitPost));
+
+    int fruitTarget = Math.max(0, cfg.expectedFruitNumber);
+
+    // --- 1. Optional removal if LA is above target ---
+    if (st.laExisting > targetPrePrune) {
+      double toRemoveLA = st.laExisting - targetPrePrune;
+      println("[BudPlanner] ACTION: Removal needed. ΔLA≈" + round3(toRemoveLA)
+           + " m^2 (protect RAW fruits ≥ " + fruitTarget + ")");
+
+      if (!cfg.dryRun) {
+        // random-by-bud on low-ratio uprights (your current implementation)
+        removeBudsByUprightRatio(cfg, toRemoveLA, fruitTarget);
+      }
+      println("[BudPlanner] Removal pass complete.");
+      int startBuds = st.nBuds;
+      int removed   = removedFloralCount + removedVegCount;
+      int finalBuds = (int) count((* BudService *));
+      println("[BudPlanner] Buds summary (mode=" + cfg.budTargetMode + " - " 
+             + describebudPlannerMode(cfg.budTargetMode) + "): "
+             + "start=" + startBuds + "  +added=" + 0 + "  -removed=" + removed
+             + "  => final=" + finalBuds);
+
+      // For mode 3 (and any non-2), keep old behaviour: removal-only when LA>target.
+      if (cfg.budTargetMode != 2) {
+        finalConsistencyBanner(cfg, targetPrePrune);
+        return;
+      }
+
+      // For mode 2, we now allow a follow-up ADD stage if there are deficits.
+      // If we actually removed buds, refresh the scene statistics.
+      if (!cfg.dryRun) {
+        st = scanExisting(cfg);
+      }
+    }
+
+    // --- 2. ADDITION PATH (runs for mode 2 after removal, and for both 2/3
+    //        whenever there is an LA or fruit deficit) ---
+
+    // recompute implied post-prune based on possibly updated st
+    double laDeficit   = Math.max(0.0, targetPrePrune - st.laExisting);
+
+    double perNewBudLA = perNewBudExpectedLeafArea(cfg);
+    int    totalNewByLA= (perNewBudLA > 0.0)
+                       ? (int) Math.ceil(laDeficit / perNewBudLA)
+                       : 0;
+
+    // RAW-fruit deficit and floral plan as you already have
+    int fruitsToAllocRaw  = Math.max(0, fruitTarget - st.fruitsRaw);
+    fruitsRemainingToAllocate = fruitsToAllocRaw;
+
+    double fpf         = Math.max(1.0, cfg.fruitsPerFloralExp);
+    int floralNeeded   = (fruitTarget > 0)
+                       ? (int) Math.ceil(((double) fruitsToAllocRaw) / fpf)
+                       : 0;
+
+    int totalNewPlanned = Math.max(totalNewByLA, floralNeeded);
+    if (totalNewPlanned > cfg.maxNewBudsAllow) totalNewPlanned = cfg.maxNewBudsAllow;
+
+    int floralPlan = Math.max(floralNeeded,
+                              (int) Math.round(totalNewPlanned * cfg.fBudFloral));
+    if (floralPlan > totalNewPlanned) floralPlan = totalNewPlanned;
+    int vegPlan    = totalNewPlanned - floralPlan;
+
+    println("[BudPlanner] DEFICITS: leafAreaDef=" + round3(laDeficit)
+         + " m^2 | fruitsToAllocRaw=" + fruitsRemainingToAllocate);
+    println("[BudPlanner] PLAN: totalNew=" + totalNewPlanned
+         + " (floral=" + floralPlan + ", veg=" + vegPlan + ")");
+
+    // If nothing to add, just finish with consistency banner
+    if (cfg.dryRun || totalNewPlanned <= 0) {
+      if (cfg.dryRun)
+        println("[BudPlanner] DRY-RUN: plan printed, preflight/placement skipped.");
+      finalConsistencyBanner(cfg, targetPrePrune);
+      return;
+    }
+
+    // Your existing preflight + staged placement
+    preflightAdjustAndPlace(cfg, floralPlan, vegPlan, targetPrePrune);
+    finalConsistencyBanner(cfg, targetPrePrune);
+    return;
+
+}
+
+
+  static Internode spurRootOf(Internode itn, BudPlannerConfig.Cfg cfg){
+    if (itn == null || cfg == null) return null;
+    if (itn.order == cfg.spurOrder) return itn;
+    Internode anc = first((* itn (<--)+ j:Internode, (j.order==cfg.spurOrder) *));
+    return anc;
+  }
+
+  static int axisBudCountOf(BudService b, java.util.Map axisBudCountMap){
+    if (b == null || axisBudCountMap == null) return 0;
+    Internode site = first((* b (<--)+ i:Internode *));
+    if (site == null) return 0;
+    Internode axis = axisRoot(site);
+    if (axis == null) axis = site;
+    Integer n = (Integer) axisBudCountMap.get(axis);
+    return (n == null) ? 0 : n.intValue();
+  }
+
+  static int removeFromSpurList(BudPlannerConfig.Cfg cfg, java.util.List buds, int excess, int minRawAfter, int[] globalRawBox){
+    if (cfg == null || buds == null || excess <= 0 || cfg.dryRun) return 0;
+
+    java.util.List pool = new java.util.ArrayList();
+    pool.addAll(buds);
+    try { java.util.Collections.shuffle(pool, _rng); } catch(Throwable t){}
+
+    java.util.Map axisBudCountMap = new java.util.HashMap();
+    for (int i=0; i<pool.size(); i++){
+      BudService b = (BudService) pool.get(i);
+      if (b == null) continue;
+      Internode site = first((* b (<--)+ iitn:Internode *));
+      if (site == null) continue;
+      Internode axis = axisRoot(site);
+      if (axis == null) axis = site;
+      Integer cur = (Integer) axisBudCountMap.get(axis);
+      axisBudCountMap.put(axis, Integer.valueOf((cur==null?0:cur.intValue()) + 1));
+    }
+
+    int removed = 0;
+    while (excess > 0){
+      boolean progressed = false;
+      for (int densePass = 0; densePass < 2 && excess > 0; densePass++){
+        boolean onlyDenseAxes = (densePass == 0);
+        for (int i=0; i<pool.size() && excess>0; i++){
+          BudService b = (BudService) pool.get(i);
+          if (b == null) continue;
+
+          int axisCount = axisBudCountOf(b, axisBudCountMap);
+          if (onlyDenseAxes && axisCount < 2) continue;
+
+          boolean floral = (b instanceof BudAppleService) && ((BudAppleService)b).budType==2;
+          int fexp = floral ? expectedFruitOfFloral(cfg, (BudAppleService)b) : 0;
+          if (floral && (globalRawBox[0] - fexp) < minRawAfter) continue;
+
+          Internode site = first((* b (<--)+ iitn:Internode *));
+          Internode axis = (site == null) ? null : axisRoot(site);
+          if (axis == null) axis = site;
+
+          deleteBudIfLive(cfg, b);
+          pool.set(i, null);
+          if (floral) globalRawBox[0] -= fexp;
+          if (axis != null){
+            Integer cur = (Integer) axisBudCountMap.get(axis);
+            int nv = (cur == null) ? 0 : (cur.intValue() - 1);
+            if (nv < 0) nv = 0;
+            axisBudCountMap.put(axis, Integer.valueOf(nv));
+          }
+          removed++;
+          excess--;
+          progressed = true;
+        }
+      }
+      if (!progressed) break;
+    }
+
+    return removed;
+  }
+
+  static boolean hasEnoughUprightBudsForSpurCleanup(BudPlannerConfig.Cfg cfg){
+    if (cfg == null) return true;
+    java.util.List ups = uprightLengthTargets(cfg, cfg.budNumberPerMeter);
+    int targetOnUpright = 0;
+    for (int i = 0; i < ups.size(); i++){
+      UprightLenSnap u = (UprightLenSnap) ups.get(i);
+      targetOnUpright += Math.max(0, u.target);
+    }
+
+    int currentOnUpright = 0;
+    for (BudService b : (* BudService *)){
+      Internode site = first((* b (<--)+ i:Internode *));
+      if (site == null) continue;
+      if (isOnUpright(site, cfg)) currentOnUpright++;
+    }
+
+    boolean enough = (currentOnUpright >= targetOnUpright);
+    println("[BudPlanner] Spur cleanup upright-supply gate: currentOnUpright=" + currentOnUpright
+      + " targetOnUpright=" + targetOnUpright
+      + " enough=" + enough);
+    return enough;
+  }
+
+  static int balanceBudsPerSpurBucket(BudPlannerConfig.Cfg cfg){
+    if (cfg == null || cfg.maxBudsPerSpur < 0) return 0;
+    boolean enoughUprightBuds = hasEnoughUprightBudsForSpurCleanup(cfg);
+    if (!enoughUprightBuds){
+      println("[BudPlanner] Spur bucket cleanup skipped: upright bud supply below target.");
+      return 0;
+    }
+
+    java.util.Map spur2buds4 = new java.util.HashMap();
+    java.util.Map spur2buds5 = new java.util.HashMap();
+    java.util.Set spurKeys = new java.util.HashSet();
+
+    for (BudService b : (* BudService *)){
+      Internode site = first((* b (<--)+ i:Internode *));
+      if (site == null) continue;
+      Internode spur = spurRootOf(site, cfg);
+      if (spur == null) continue;
+      spurKeys.add(spur);
+
+      if (site.order >= cfg.spurChildOrder){
+        java.util.List l5 = (java.util.List) spur2buds5.get(spur);
+        if (l5 == null){ l5 = new java.util.ArrayList(); spur2buds5.put(spur, l5); }
+        l5.add(b);
+      } else if (site.order == cfg.spurOrder){
+        java.util.List l4 = (java.util.List) spur2buds4.get(spur);
+        if (l4 == null){ l4 = new java.util.ArrayList(); spur2buds4.put(spur, l4); }
+        l4.add(b);
+      }
+    }
+
+    if (spurKeys.isEmpty()) return 0;
+
+    int minRawAfter = Math.max(0, cfg.expectedFruitNumber);
+    int[] globalRawBox = new int[]{ scanExisting(cfg).fruitsRaw };
+    int removed = 0;
+
+    java.util.Iterator it = spurKeys.iterator();
+    while (it.hasNext()){
+      Internode spur = (Internode) it.next();
+      java.util.List l4 = (java.util.List) spur2buds4.get(spur);
+      java.util.List l5 = (java.util.List) spur2buds5.get(spur);
+      int n4 = (l4==null)?0:l4.size();
+      int n5 = (l5==null)?0:l5.size();
+      int total = n4 + n5;
+      int excess = total - cfg.maxBudsPerSpur;
+      if (excess <= 0) continue;
+
+      int remHere = 0;
+      if (cfg.removeFromChildFirst){
+        remHere += removeFromSpurList(cfg, l5, excess, minRawAfter, globalRawBox);
+        excess -= remHere;
+        if (excess > 0) remHere += removeFromSpurList(cfg, l4, excess, minRawAfter, globalRawBox);
+      } else {
+        remHere += removeFromSpurList(cfg, l4, excess, minRawAfter, globalRawBox);
+        excess -= remHere;
+        if (excess > 0) remHere += removeFromSpurList(cfg, l5, excess, minRawAfter, globalRawBox);
+      }
+      removed += remHere;
+      println("[BudPlanner] Spur bucket order=" + cfg.spurOrder + " rank=" + spur.rank
+          + " node=" + spur.nodeNumber + " total=" + total + " max=" + cfg.maxBudsPerSpur
+          + " removed=" + remHere);
+    }
+
+    if (!cfg.dryRun) derive();
+    return removed;
+  }
+
+  static boolean noSpurWithin(Internode cand, BudPlannerConfig.Cfg cfg){
+    if (cand == null || cfg == null) return false;
+    if (cfg.spurSpacingM <= 0.0) return true;
+    Internode candAxis = axisRoot(cand);
+    if (candAxis == null) return true;
+    double sCand = distanceFromAxisBase_M(cand);
+    for (Internode itn : (* Internode *)){
+      if (itn == null) continue;
+      if (itn.order != cand.order) continue;
+      Internode axis = axisRoot(itn);
+      if (axis == null || axis != candAxis) continue;
+      double s = distanceFromAxisBase_M(itn);
+      if (Math.abs(sCand - s) < cfg.spurSpacingM) return false;
+    }
+    return true;
+  }
+
+  static boolean isTerminalOnSameOrder(Internode itn){
+    if (itn == null) return false;
+    Internode childSameOrder = first((* itn --> j:Internode, (j.order == itn.order) *));
+    return (childSameOrder == null);
+  }
+
+  static boolean hasInternodeChild(Internode itn){
+    if (itn == null) return false;
+    // Use transitive graph traversal to catch child branches not represented
+    // as a direct Internode->Internode edge in every architecture variant.
+    Internode ch = first((* itn (-->)+ j:Internode *));
+    if (ch != null) return true;
+    // Compatibility fallback: some paths maintain child internodes in ID lists.
+    try {
+      return (itn.getChildInternodeCount() > 0);
+    } catch (Throwable t) {
+      return false;
+    }
+  }
+
+  static boolean isTrueTerminalInternode(Internode itn){
+    return (itn != null && !hasInternodeChild(itn));
+  }
+
+  static boolean isCordonLikeWoodSite(Internode itn){
+    if (itn == null) return false;
+    if (itn instanceof Cordon) return true;
+    String type = "";
+    try { type = (itn.organType == null) ? "" : itn.organType; } catch (Throwable t) { type = ""; }
+    return type.indexOf("Cordon") >= 0
+        || type.indexOf("oldShoot") >= 0
+        || type.indexOf("OldShoot") >= 0
+        || type.indexOf("Spur") >= 0;
+  }
+
+  static Internode followingCordonOnSameAxis(Internode itn){
+    if (itn == null) return null;
+    if (!isCordonLikeWoodSite(itn)) return null;
+    Internode root = axisRoot(itn);
+    double s0 = distanceFromAxisBase_M(itn);
+    Internode best = null;
+    double bestS = Double.POSITIVE_INFINITY;
+    for (Internode down : (* itn (-->)+ q:Internode *)){
+      if (down == null || down == itn) continue;
+      if (!isCordonLikeWoodSite(down)) continue;
+      if (down.order != itn.order) continue;
+      if (axisRoot(down) != root) continue;
+      double sj = distanceFromAxisBase_M(down);
+      if (sj <= s0 + 1e-9) continue;
+      if (sj < bestS) {
+        bestS = sj;
+        best = down;
+      }
+    }
+    return best;
+  }
+
+  static boolean hasFollowingCordonOnSameAxis(Internode itn){
+    return (followingCordonOnSameAxis(itn) != null);
+  }
+
+  static Internode terminalCordonOnSameAxis(Internode itn){
+    if (itn == null) return null;
+    Internode cur = itn;
+    int guard = 0;
+    while (guard++ < 2000) {
+      Internode nxt = followingCordonOnSameAxis(cur);
+      if (nxt == null || nxt == cur) break;
+      cur = nxt;
+    }
+    return cur;
+  }
+
+  static double xTip(Organ itn){
+    try { itn.update3D(); } catch(Throwable t){}
+    Double v = getDoubleField(itn, "endX");
+    if (v == null) v = getDoubleField(itn, "tipX");
+    if (v == null) v = getDoubleField(itn, "X_end");
+    return (v != null) ? v.doubleValue() : xBase(itn);
+  }
+
+  static double yTip(Organ itn){
+    try { itn.update3D(); } catch(Throwable t){}
+    Double v = getDoubleField(itn, "endY");
+    if (v == null) v = getDoubleField(itn, "tipY");
+    if (v == null) v = getDoubleField(itn, "Y_end");
+    return (v != null) ? v.doubleValue() : yBase(itn);
+  }
+
+  static double pointToSegmentDistanceM(double px, double py, double pz,
+                                        double ax, double ay, double az,
+                                        double bx, double by, double bz){
+    double abx = bx - ax;
+    double aby = by - ay;
+    double abz = bz - az;
+    double ab2 = abx*abx + aby*aby + abz*abz;
+    if (ab2 < 1e-12) {
+      double dx = px - ax;
+      double dy = py - ay;
+      double dz = pz - az;
+      return Math.sqrt(dx*dx + dy*dy + dz*dz);
+    }
+    double apx = px - ax;
+    double apy = py - ay;
+    double apz = pz - az;
+    double t = (apx*abx + apy*aby + apz*abz) / ab2;
+    if (t < 0.0) t = 0.0;
+    if (t > 1.0) t = 1.0;
+    double qx = ax + abx * t;
+    double qy = ay + aby * t;
+    double qz = az + abz * t;
+    double dx = px - qx;
+    double dy = py - qy;
+    double dz = pz - qz;
+    return Math.sqrt(dx*dx + dy*dy + dz*dz);
+  }
+
+  static boolean hasChildContinuationCordon(Internode itn){
+    if (itn == null) return false;
+    if (!isCordonLikeWoodSite(itn)) return false;
+    double ax = xBase(itn), ay = yBase(itn), az = zBase(itn);
+    double bx = xTip(itn),  by = yTip(itn),  bz = zTip(itn);
+    double radius = Math.max(0.0, itn.diameter * 0.5);
+    double tol = Math.max(0.01, radius * 1.5);
+    for (Internode childAxis : (* itn (-->)+ q:Internode *)){
+      if (childAxis == null || childAxis == itn) continue;
+      if (!isCordonLikeWoodSite(childAxis)) continue;
+      if (childAxis.order <= itn.order) continue;
+      double d = pointToSegmentDistanceM(xBase(childAxis), yBase(childAxis), zBase(childAxis), ax, ay, az, bx, by, bz);
+      if (d <= tol) return true;
+    }
+    return false;
+  }
+
+  static boolean hasBudOnSite(java.util.Map budsBySite, Internode site){
+    if (budsBySite == null || site == null) return false;
+    java.util.List L = (java.util.List) budsBySite.get(site);
+    return (L != null && !L.isEmpty());
+  }
+
+  static Internode mostDistalBudSiteOnSameAxis(Internode site, java.util.Map budsBySite){
+    if (site == null || budsBySite == null) return null;
+    Internode root = axisRoot(site);
+    Internode best = null;
+    double bestPos = Double.NEGATIVE_INFINITY;
+    java.util.Iterator it = budsBySite.keySet().iterator();
+    while (it.hasNext()){
+      Internode cand = (Internode) it.next();
+      if (cand == null) continue;
+      if (cand.order != site.order) continue;
+      if (axisRoot(cand) != root) continue;
+      double pos = distanceFromAxisBase_M(cand);
+      if (pos > bestPos) {
+        bestPos = pos;
+        best = cand;
+      }
+    }
+    return best;
+  }
+
+  static long budCandidateDebugId(BudService b){
+    if (b == null) return -1L;
+    long id = 0L;
+    try { id = b.ID; } catch (Throwable t) { id = 0L; }
+    if (id <= 0L) {
+      try { id = b.getId(); } catch (Throwable t2) { id = -1L; }
+    }
+    return id;
+  }
+
+  static long axisDebugId(Internode site){
+    Internode root = axisRoot(site);
+    if (root == null) return -1L;
+    long id = 0L;
+    try { id = root.ID; } catch (Throwable t) { id = 0L; }
+    if (id <= 0L) {
+      try { id = root.getId(); } catch (Throwable t2) { id = -1L; }
+    }
+    return id;
+  }
+
+  static BudService preferredArchitectureBudForCrowding(BudService a, BudService b){
+    if (a == null) return b;
+    if (b == null) return a;
+
+    Internode sa = first((* a (<--)+ i:Internode *));
+    Internode sb = first((* b (<--)+ i:Internode *));
+
+    boolean aTerminal = isTerminal(sa);
+    boolean bTerminal = isTerminal(sb);
+    if (aTerminal != bTerminal) return aTerminal ? a : b;
+
+    boolean aFloral = (a instanceof BudAppleService) && ((BudAppleService)a).budType == 2;
+    boolean bFloral = (b instanceof BudAppleService) && ((BudAppleService)b).budType == 2;
+    if (aFloral != bFloral) return aFloral ? a : b;
+
+    double pa = budAxisPosM(a);
+    double pb = budAxisPosM(b);
+    if (pa > pb + 1e-9) return a;
+    if (pb > pa + 1e-9) return b;
+
+    return a;
+  }
+
+  static int cleanupArchitectureBudSpacing_T0(BudPlannerConfig.Cfg cfg){
+    if (cfg == null) return 0;
+    if (cfg.minBudSpacingM <= 0.0) return 0;
+
+    int globalRaw = scanExisting(cfg).fruitsRaw;
+    int removed = 0;
+    int blockedByFruitFloor = 0;
+
+    java.util.Map byAxis = new java.util.HashMap();
+    for (BudService b : (* BudService *)){
+      if (!(b instanceof BudAppleService)) continue;
+      Internode site = first((* b (<--)+ i:Internode *));
+      if (site == null) continue;
+      if (!isCordonLikeWoodSite(site)) continue;
+      Internode root = axisRoot(site);
+      if (root == null) continue;
+      java.util.List L = (java.util.List) byAxis.get(root);
+      if (L == null) {
+        L = new java.util.ArrayList();
+        byAxis.put(root, L);
+      }
+      L.add(b);
+    }
+
+    java.util.Iterator it = byAxis.values().iterator();
+    while (it.hasNext()){
+      java.util.List list = (java.util.List) it.next();
+      try {
+        java.util.Collections.sort(list, new java.util.Comparator(){
+          public int compare(Object a, Object b){
+            double sa = budAxisPosM((BudService)a);
+            double sb = budAxisPosM((BudService)b);
+            if (sa < sb) return -1;
+            if (sa > sb) return 1;
+            return 0;
+          }
+        });
+      } catch(Throwable t){}
+
+      BudService lastKept = null;
+      for (int i = 0; i < list.size(); i++){
+        BudService cur = (BudService) list.get(i);
+        if (lastKept == null){
+          lastKept = cur;
+          continue;
+        }
+
+        double d = Math.abs(budAxisPosM(cur) - budAxisPosM(lastKept));
+        if (d >= cfg.minBudSpacingM){
+          lastKept = cur;
+          continue;
+        }
+
+        BudService toKeep = preferredArchitectureBudForCrowding(cur, lastKept);
+        BudService toRemove = (toKeep == cur) ? lastKept : cur;
+
+        boolean removeFloral = (toRemove instanceof BudAppleService) && ((BudAppleService)toRemove).budType == 2;
+        int fexp = removeFloral ? expectedFruitOfFloral(cfg, (BudAppleService)toRemove) : 0;
+        if (cfg.expectedFruitNumber > 0 && removeFloral && ((globalRaw - fexp) < cfg.expectedFruitNumber)){
+          BudService alt = toKeep;
+          boolean altFloral = (alt instanceof BudAppleService) && ((BudAppleService)alt).budType == 2;
+          if (!altFloral){
+            toRemove = alt;
+            toKeep = (toRemove == cur) ? lastKept : cur;
+            removeFloral = false;
+            fexp = 0;
+          } else {
+            blockedByFruitFloor++;
+            lastKept = toKeep;
+            continue;
+          }
+        }
+
+        Internode site = first((* toRemove (<--)+ s:Internode *));
+        if (site != null) {
+          println("[BudPlanner][ArchBud]"
+            + " candidateId=" + budCandidateDebugId(toRemove)
+            + " axisId=" + axisDebugId(site)
+            + " cordonId=" + site.cordonNumber
+            + " siteId=" + site.ID
+            + " terminalSiteId=-1"
+            + " reason=too-close");
+        }
+
+        if (!cfg.dryRun) deleteBudIfLive(cfg, toRemove);
+        if (removeFloral) globalRaw -= fexp;
+        removed++;
+        lastKept = toKeep;
+      }
+    }
+
+    if (!cfg.dryRun && removed > 0){
+      invalidateSpacingPosCache();
+      derive();
+    }
+
+    println("[BudPlanner][ArchBud] spacing removed=" + removed
+      + " minDist=" + round3(cfg.minBudSpacingM)
+      + " blockedByFruitFloor=" + blockedByFruitFloor
+      + " dryRun=" + cfg.dryRun);
+    return removed;
+  }
+
+  static void cleanupArchitectureBudPlacement_T0(BudPlannerConfig.Cfg cfg){
+    if (cfg == null) return;
+    if (!"apple".equals(species)) return;
+    if (!("ArchReader".equals(initiation_method) || "ArchReaderGPU".equals(initiation_method))) return;
+
+    java.util.List candidates = new java.util.ArrayList();
+    java.util.Map budsBySite = new java.util.HashMap();
+
+    for (BudService b : (* BudService *)){
+      if (!(b instanceof BudAppleService)) continue;
+      Internode site = first((* b (<--)+ i:Internode *));
+      if (site == null) continue;
+      if (!isCordonLikeWoodSite(site)) continue;
+      candidates.add(b);
+      java.util.List L = (java.util.List) budsBySite.get(site);
+      if (L == null) {
+        L = new java.util.ArrayList();
+        budsBySite.put(site, L);
+      }
+      L.add(b);
+    }
+
+    if (candidates.isEmpty()) return;
+
+    java.util.List toDelete = new java.util.ArrayList();
+    int kept = 0;
+    int removed = 0;
+    int moved = 0;
+
+    for (int i = 0; i < candidates.size(); i++){
+      BudService b = (BudService) candidates.get(i);
+      Internode site = first((* b (<--)+ s:Internode *));
+      if (site == null) continue;
+
+      boolean sameAxis = hasFollowingCordonOnSameAxis(site);
+      Internode terminalSite = terminalCordonOnSameAxis(site);
+      Internode distalBudSite = mostDistalBudSiteOnSameAxis(site, budsBySite);
+      boolean terminalHasBud = (terminalSite != null && terminalSite != site && hasBudOnSite(budsBySite, terminalSite));
+      boolean childCont = hasChildContinuationCordon(site);
+
+      String reason = "kept";
+      boolean suppress = false;
+
+      if (sameAxis) {
+        suppress = true;
+        reason = terminalHasBud ? "moved-to-terminal" : "same-axis-continuation";
+      } else if (childCont) {
+        suppress = true;
+        reason = "child-cordon-continuation";
+      }
+
+      println("[BudPlanner][ArchBud]"
+        + " candidateId=" + budCandidateDebugId(b)
+        + " axisId=" + axisDebugId(site)
+        + " cordonId=" + site.cordonNumber
+        + " siteId=" + site.ID
+        + " terminalSiteId=" + (terminalSite == null ? -1L : terminalSite.ID)
+        + " reason=" + reason);
+
+      if (suppress) {
+        if (!cfg.dryRun) toDelete.add(b);
+        if ("moved-to-terminal".equals(reason)) moved++;
+        removed++;
+      } else {
+        kept++;
+      }
+    }
+
+    if (!cfg.dryRun && !toDelete.isEmpty()){
+      for (int i = 0; i < toDelete.size(); i++){
+        deleteBudIfLive(cfg, (BudService) toDelete.get(i));
+      }
+      invalidateSpacingPosCache();
+      derive();
+    }
+
+    int spacingRemoved = cleanupArchitectureBudSpacing_T0(cfg);
+
+    println("[BudPlanner][ArchBud] summary kept=" + kept
+      + " suppressed=" + removed
+      + " movedToTerminal=" + moved
+      + " tooClose=" + spacingRemoved
+      + " dryRun=" + cfg.dryRun);
+  }
+
+  static void addSiteQcAcc(Internode site, BudPlannerConfig.Cfg cfg, int[] qc){
+    if (qc == null || qc.length < 4) return;
+    qc[0] = qc[0] + 1; // added
+    if (site == null){
+      qc[1] = qc[1] + 1; // badNotTerminal
+      qc[2] = qc[2] + 1; // badOrder
+      qc[3] = qc[3] + 1; // badJunction
+      return;
+    }
+    if (!isTrueTerminalInternode(site)) qc[1] = qc[1] + 1;
+    if (site.order < cfg.spurOrder) qc[2] = qc[2] + 1;
+    Internode ch = first((* site (-->)+ j:Internode *));
+    if (ch != null) qc[3] = qc[3] + 1;
+  }
+
+  static void printAddSiteQc(String tag, int[] qc){
+    if (qc == null || qc.length < 4) return;
+    println("[BudPlanner] ADD-SITE QC: tag=" + tag
+         + " added=" + qc[0]
+         + " badNotTerminal=" + qc[1]
+         + " badOrder=" + qc[2]
+         + " badJunction=" + qc[3]);
+  }
+
+  static int addSpurUnitsAndBudsToMeetDensity(BudPlannerConfig.Cfg cfg, int addCount){
+    if (cfg == null || addCount <= 0 || cfg.dryRun) return 0;
+    if (cfg.budTargetMode != 1) return 0;
+    if (!"apple".equals(species)) return 0;
+    if (!("ArchReader".equals(initiation_method) || "ArchReaderGPU".equals(initiation_method))) return 0;
+    java.util.List zones = computeZoneSnapshots(cfg, cfg.budNumberPerMeter);
+    int[] qc = new int[]{0,0,0,0};
+
+    int placed = 0;
+    for (int i = 0; i < zones.size() && placed < addCount; i++){
+      ZoneSnap zs = (ZoneSnap) zones.get(i);
+      if (zs == null || zs.delta <= 0) continue;
+      int need = Math.min(zs.delta, addCount - placed);
+      if (need <= 0) continue;
+
+      int addedHere = addSyntheticSpurAxesOnParents(cfg, zs.root, zs.zMin, zs.zMax, need,
+          cfg.uprightOrder, false, qc, "spur-axis-main");
+      placed += addedHere;
+      need -= addedHere;
+
+      if (need > 0 && cfg.allowAddOnSecondaryAxes == 1) {
+        addedHere = addSyntheticSpurAxesOnParents(cfg, zs.root, zs.zMin, zs.zMax, need,
+            cfg.spurOrder, false, qc, "spur-axis-cordon");
+        placed += addedHere;
+        need -= addedHere;
+      }
+    }
+
+    if (placed < addCount) {
+      placed += addSyntheticSpurAxesOnParents(cfg, null, 0.0, 0.0, addCount - placed,
+          cfg.uprightOrder, true, qc, "spur-axis-main-relax");
+    }
+    if (placed < addCount && cfg.allowAddOnSecondaryAxes == 1) {
+      placed += addSyntheticSpurAxesOnParents(cfg, null, 0.0, 0.0, addCount - placed,
+          cfg.spurOrder, true, qc, "spur-axis-cordon-relax");
+    }
+
+    printAddSiteQc("spur-unit-axis-add", qc);
+    if (!cfg.dryRun && placed > 0) {
+      invalidateSpacingPosCache();
+      derive();
+    }
+    println("[BudPlanner] Spur-axis add: requested=" + addCount + " placed=" + placed
+      + " allowSecondary=" + cfg.allowAddOnSecondaryAxes);
+    return placed;
+  }
+
+  static void densityFillAfterSpurBalancing(BudPlannerConfig.Cfg cfg, int mode, int fruitFloor){
+    if (cfg == null) return;
+    enforceBudDensityPerMeter_remove_perZone(cfg, cfg.budNumberPerMeter, fruitFloor);
+    if (mode == 0){
+      int spacingRemoved0 = enforceMinBudSpacing_removeTooClose(cfg, cfg.minBudSpacingM,
+          (fruitFloor > 0), fruitFloor, false);
+      println("[BudPlanner] Strategy 0 complete: density-only remove + spacing cleanup (removed=" + spacingRemoved0 + ").");
+      return;
+    }
+
+    int addedUpright = 0;
+    if (cfg.addSpurUnitWhenAdding){
+      java.util.List zones = computeZoneSnapshots(cfg, cfg.budNumberPerMeter);
+      int deficit = 0;
+      for (int z = 0; z < zones.size(); z++){
+        ZoneSnap zs = (ZoneSnap) zones.get(z);
+        if (zs.delta > 0) deficit += zs.delta;
+      }
+      if (deficit > 0) addedUpright += addSpurUnitsAndBudsToMeetDensity(cfg, deficit);
+      if (addedUpright < deficit){
+        addedUpright += enforceBudDensityPerMeter_add_perZone(cfg, cfg.budNumberPerMeter);
+      }
+    } else {
+      addedUpright = enforceBudDensityPerMeter_add_perZone(cfg, cfg.budNumberPerMeter);
+    }
+
+    java.util.List zonesAfterAdd = computeZoneSnapshots(cfg, cfg.budNumberPerMeter);
+    int deficitAfterAdd = 0;
+    for (int z = 0; z < zonesAfterAdd.size(); z++){
+      ZoneSnap zs = (ZoneSnap) zonesAfterAdd.get(z);
+      if (zs.delta > 0) deficitAfterAdd += zs.delta;
+    }
+
+    if (deficitAfterAdd > 0){
+      if (cfg.addSpurUnitWhenAdding){
+        addedUpright += addSpurUnitsAndBudsToMeetDensity(cfg, deficitAfterAdd);
+      }
+      addedUpright += enforceBudDensityPerMeter_add_perZone(cfg, cfg.budNumberPerMeter);
+      zonesAfterAdd = computeZoneSnapshots(cfg, cfg.budNumberPerMeter);
+      deficitAfterAdd = 0;
+      for (int z = 0; z < zonesAfterAdd.size(); z++){
+        ZoneSnap zs = (ZoneSnap) zonesAfterAdd.get(z);
+        if (zs.delta > 0) deficitAfterAdd += zs.delta;
+      }
+    }
+
+    println("[BudPlanner] Strategy 1 complete: density local-rebalance (fast) | addedUpright=" + addedUpright
+        + " | residualDeficit=" + deficitAfterAdd);
+  }
+
+  static void safeDeleteBud(BudPlannerConfig.Cfg cfg, BudService b) {
+    if (b == null) return;
+    if (cfg != null && cfg.dryRun) return;
+    try{ [ b ==> ; ]; invalidateSpacingPosCache(); } catch(Throwable t){}
+  }
+
+  static int budSideSignForSite(Internode cand){
+    if (cand == null) return 1;
+    int key = cand.rank + cand.order + cand.nodeNumber + cand.cordonNumber;
+    return ((key & 1) == 0) ? 1 : -1;
+  }
+
+  static double clampUnit(double v){
+    if (v < 0.0) return 0.0;
+    if (v > 1.0) return 1.0;
+    return v;
+  }
+
+  static double budSurfaceOffsetM(Internode cand){
+    double radius = 0.0;
+    try { radius = Math.max(0.0, cand.diameter * 0.5); } catch (Throwable t) { radius = 0.0; }
+    if (radius <= 0.0 || Double.isNaN(radius) || Double.isInfinite(radius)) radius = 0.005;
+    // Bud origin starts on the parent centerline; use radius + a small clearance so the attachment reaches
+    // the wood surface without leaving the young bud intersecting the support cylinder.
+    double clearance = Math.max(8e-4, Math.min(2.0e-3, radius * 0.25));
+    return radius + clearance;
+  }
+
+  static double budAxisVerticalBlend(Internode cand){
+    if (cand == null) return 0.0;
+    double dx = xTip(cand) - xBase(cand);
+    double dy = yTip(cand) - yBase(cand);
+    double dz = zTip(cand) - zBase(cand);
+    double len = Math.sqrt(dx*dx + dy*dy + dz*dz);
+    if (len < 1e-9) return 0.0;
+    double vertical = Math.abs(dz) / len;
+    return clampUnit((vertical - 0.55) / 0.30);
+  }
+
+  static double budSurfaceLocalShiftX(Internode cand, int sign){
+    double off = budSurfaceOffsetM(cand);
+    double verticalBlend = budAxisVerticalBlend(cand);
+    // Assume the local internode frame uses Z as axial and (+Y,+/-X) as the exposed cross-section plane.
+    // Keep buds on the upper hemisphere with a small alternating +/-X spread, while near-vertical axes
+    // relax toward a more side-biased placement instead of collapsing onto one absolute top ridge.
+    double dorsalW = (1.0 - verticalBlend) * 1.00 + verticalBlend * 0.35;
+    double lateralW = (1.0 - verticalBlend) * 0.30 + verticalBlend * 0.90;
+    double norm = Math.sqrt(dorsalW*dorsalW + lateralW*lateralW);
+    if (norm < 1e-9) norm = 1.0;
+    return sign * off * (lateralW / norm);
+  }
+
+  static double budSurfaceLocalShiftY(Internode cand){
+    double off = budSurfaceOffsetM(cand);
+    double verticalBlend = budAxisVerticalBlend(cand);
+    double dorsalW = (1.0 - verticalBlend) * 1.00 + verticalBlend * 0.35;
+    double lateralW = (1.0 - verticalBlend) * 0.30 + verticalBlend * 0.90;
+    double norm = Math.sqrt(dorsalW*dorsalW + lateralW*lateralW);
+    if (norm < 1e-9) norm = 1.0;
+    return off * (dorsalW / norm);
+  }
+
+  static double budSurfaceLocalShiftZ(Internode cand){
+    return 0.0;
+  }
+
+  static Internode resolvePlannerAttachSite(BudPlannerConfig.Cfg cfg,
+                                            Internode site,
+                                            int gap,
+                                            int startMin,
+                                            int orderMin,
+                                            boolean allowMultiOnNode){
+    if (site == null) return null;
+    if (!isCordonLikeWoodSite(site)) return site;
+
+    Internode terminalSite = terminalCordonOnSameAxis(site);
+    boolean sameAxis = hasFollowingCordonOnSameAxis(site);
+    boolean childCont = hasChildContinuationCordon(site);
+
+    if (sameAxis) {
+      if (terminalSite != null && terminalSite != site
+          && eligible_AddTerminalOnly(terminalSite, cfg, gap, startMin, orderMin, allowMultiOnNode)) {
+        return terminalSite;
+      }
+      return null;
+    }
+    if (childCont) return null;
+    return site;
+  }
+
+  static void safeAttachBud(BudPlannerConfig.Cfg cfg, Internode cand, BudService b) {
+    if (cand == null || b == null) return;
+    if (cfg != null && cfg.dryRun) return;
+    BudService existingBud = firstBudOnInternodeSite(cand);
+    if (existingBud != null) {
+      if (printFlag || debug) {
+        println("[bud-attach-skip-existing] step=" + step
+          + " site=" + cand.getId()
+          + " bud=" + budCandidateDebugId(b)
+          + " existingBud=" + budCandidateDebugId(existingBud));
+      }
+      return;
+    }
+    if (!reserveBudAttachSite(cand)) {
+      if (printFlag || debug) {
+        println("[bud-attach-skip-existing] step=" + step
+          + " site=" + cand.getId()
+          + " bud=" + budCandidateDebugId(b)
+          + " existingBud=-1"
+          + " reason=siteAlreadyClaimedThisStep");
+      }
+      return;
+    }
+    try {
+      if (b instanceof BudAppleService && isCordonLikeWoodSite(cand)) {
+        int sign = budSideSignForSite(cand);
+        double sx = budSurfaceLocalShiftX(cand, sign);
+        double sy = budSurfaceLocalShiftY(cand);
+        double sz = budSurfaceLocalShiftZ(cand);
+        // Place planner-added cordon buds on the exposed top surface rather than on the lateral flank.
+        [ h:cand ==> h [Translate(sx, sy, sz) b]; ];
+      } else {
+        [ h:cand ==> h [b]; ];
+      }
+      if (printFlag || debug) {
+        println("[bud-attach] step=" + step
+          + " site=" + cand.getId()
+          + " bud=" + budCandidateDebugId(b)
+          + " budCountOnSite=" + countBudsOnInternodeSite(cand)
+          + " reserved=true");
+      }
+      invalidateSpacingPosCache();
+    } catch(Throwable t){
+      releaseBudAttachSite(cand);
+    }
+  }
+
+
+  // Fast mode 1: buds-per-meter local (zone) rebalance.
+  // Keeps per-site add eligibility checks, but skips expensive global spacing cleanup.
+  static void runMode1FastDensityLocalRebalance(BudPlannerConfig.Cfg cfg, int fruitFloor, double targetPrePrune){
+    enforceBudDensityPerMeter_remove_perZone(cfg, cfg.budNumberPerMeter, fruitFloor);
+    int addedUpright = enforceBudDensityPerMeter_add_perZone(cfg, cfg.budNumberPerMeter);
+    int addedSynthetic = 0;
+
+    java.util.List zonesAfterAdd = computeZoneSnapshots(cfg, cfg.budNumberPerMeter);
+    int deficitAfterAdd = 0;
+    for (int z = 0; z < zonesAfterAdd.size(); z++){
+      ZoneSnap zs = (ZoneSnap) zonesAfterAdd.get(z);
+      if (zs.delta > 0) deficitAfterAdd += zs.delta;
+    }
+
+    if (deficitAfterAdd > 0){
+      addedUpright += enforceBudDensityPerMeter_add_perZone(cfg, cfg.budNumberPerMeter);
+      zonesAfterAdd = computeZoneSnapshots(cfg, cfg.budNumberPerMeter);
+      deficitAfterAdd = 0;
+      for (int z = 0; z < zonesAfterAdd.size(); z++){
+        ZoneSnap zs = (ZoneSnap) zonesAfterAdd.get(z);
+        if (zs.delta > 0) deficitAfterAdd += zs.delta;
+      }
+    }
+
+    if (deficitAfterAdd > 0 && cfg.addSpurUnitWhenAdding){
+      addedSynthetic = addSpurUnitsAndBudsToMeetDensity(cfg, deficitAfterAdd);
+      zonesAfterAdd = computeZoneSnapshots(cfg, cfg.budNumberPerMeter);
+      deficitAfterAdd = 0;
+      for (int z = 0; z < zonesAfterAdd.size(); z++){
+        ZoneSnap zs = (ZoneSnap) zonesAfterAdd.get(z);
+        if (zs.delta > 0) deficitAfterAdd += zs.delta;
+      }
+    }
+
+    println("[BudPlanner] Strategy 1 complete: density local-rebalance (fast) | addedUpright=" + addedUpright
+        + " | addedSynthetic=" + addedSynthetic
+        + " | residualDeficit=" + deficitAfterAdd);
+    finalConsistencyBanner(cfg, targetPrePrune);
+  }
+
+  // Legacy (slow) density+spacing path, preserved under mode 6.
+  static void runMode6LegacyDensitySpacing(BudPlannerConfig.Cfg cfg, int fruitFloor, double targetPrePrune){
+    enforceBudDensityPerMeter_remove_perZone(cfg, cfg.budNumberPerMeter, fruitFloor);
+    int addedUpright = enforceBudDensityPerMeter_add_perZone(cfg, cfg.budNumberPerMeter);
+    int spacingRemoved = enforceMinBudSpacing_removeTooClose(cfg, cfg.minBudSpacingM,
+        (fruitFloor > 0), fruitFloor, false);
+
+    java.util.List zonesAfterSpacing = computeZoneSnapshots(cfg, cfg.budNumberPerMeter);
+    int deficitAfterSpacing = 0;
+    for (int z = 0; z < zonesAfterSpacing.size(); z++){
+      ZoneSnap zs = (ZoneSnap) zonesAfterSpacing.get(z);
+      if (zs.delta > 0) deficitAfterSpacing += zs.delta;
+    }
+
+    if (deficitAfterSpacing > 0){
+      addedUpright += enforceBudDensityPerMeter_add_perZone(cfg, cfg.budNumberPerMeter);
+      zonesAfterSpacing = computeZoneSnapshots(cfg, cfg.budNumberPerMeter);
+      deficitAfterSpacing = 0;
+      for (int z = 0; z < zonesAfterSpacing.size(); z++){
+        ZoneSnap zs = (ZoneSnap) zonesAfterSpacing.get(z);
+        if (zs.delta > 0) deficitAfterSpacing += zs.delta;
+      }
+    }
+
+    int addedSecondary = 0;
+    if (deficitAfterSpacing > 0 && cfg.allowAddOnSecondaryAxes == 1){
+      addedSecondary = addBudsSecondaryAxesRespectingSpacing(cfg, deficitAfterSpacing);
+    }
+
+    println("[BudPlanner] Strategy 6 complete: legacy density+spacing | removedBySpacing=" + spacingRemoved
+        + " | addedUpright=" + addedUpright + " | addedSecondary=" + addedSecondary);
+    finalConsistencyBanner(cfg, targetPrePrune);
+  }
+
+
+/**
+ * Mode 4: whole-tree bud target (remove-only).
+ * 
+ * - target = cfg.totalBudTargetPerTree
+ * - if current <= target → no change
+ * - if current >  target → remove (current - target) buds
+ *   using the same upright-ranked random remover as buds/m,
+ *   while protecting RAW fruit floor (cfg.expectedFruitNumber).
+ */
+ 
+ // === DENSITY: PER-METER, PER-ZONE, TOTAL-TREE, GRID =======================
+static void enforceTotalBudTargetPerTree_mode4(BudPlannerConfig.Cfg cfg){
+  int target = cfg.totalBudTargetPerTree;
+  if (target <= 0){
+    println("[BudManager] Mode 4: totalBudTargetPerTree <= 0 → skip.");
+    return;
+  }
+
+  int current = (int) count((* BudService *));
+  println("==========================================================");
+  println("[BudManager] MODE 4 (whole-tree buds)");
+  println("  targetBudsPerTree = " + target);
+  println("  currentBuds       = " + current);
+  println("==========================================================");
+
+  if (current <= target){
+    println("[BudManager] Mode 4: current <= target → no bud removal.");
+    return;
+  }
+
+  int toRemove = current - target;
+  println("[BudManager] Mode 4: need to remove " + toRemove
+       + " buds (protect RAW fruits ≥ " + cfg.expectedFruitNumber + ")");
+
+  if (cfg.dryRun){
+    println("[BudManager] Mode 4: DRY-RUN → no structural edits.");
+    return;
+  }
+
+  // Reuse the upright-ranked, random-in-upright remover (veg/floral mixed),
+  // protecting the RAW fruit floor.
+  removeBudsPerMeter_OnUprights(cfg,
+                                toRemove,
+                                (cfg.expectedFruitNumber > 0),
+                                cfg.expectedFruitNumber);
+
+  // Summary (scanExisting already prints LA & RAW)
+  BudStats fin = scanExisting(cfg);
+  println("[BudManager] Mode 4: after removal  totalBudNum=" + fin.nBuds);
+}
+
+
+/**
+ * Mode 5: grid-based bud targets (remove + add).
+ *
+ * Grid definition (local row frame):
+ *   - cfg.gridNx, cfg.gridNz
+ *   - cfg.gridXmin, cfg.gridXmax, cfg.gridZmin, cfg.gridZmax
+ *   - cfg.gridBudTargetsFlat[k] = target buds in cell k
+ *       k = iz * gridNx + ix  (row-major: z-rows, x-cols)
+ *
+ * Behavior:
+ *   - Buds outside the [xMin..xMax]×[zMin..zMax] box are untouched (reserved).
+ *   - If cell has current > target → randomly remove (current - target) buds
+ *     in that cell, skipping floral buds that would break the RAW fruit floor.
+ *   - If cell has current < target → try to add buds (type draw via FBUD_FLORAL) on eligible
+ *     internodes in that cell, up to:
+ *       * (target - current) per cell
+ *       * cfg.maxNewBudsAllow globally
+ */
+static void enforceGridBudTargets_mode5(BudPlannerConfig.Cfg cfg){
+  if (cfg.gridNx <= 0 || cfg.gridNz <= 0
+      || cfg.gridBudTargetsFlat == null
+      || cfg.gridBudTargetsFlat.length < cfg.gridNx * cfg.gridNz){
+    println("[BudPlanner] Mode 5: grid not configured correctly → skip.");
+    return;
+  }
+
+  final int cells = cfg.gridNx * cfg.gridNz;
+
+  println("==========================================================");
+  println("[BudPlanner] MODE 5 (grid-based bud targets)");
+  println("  gridNx,gridNz       = " + cfg.gridNx + ", " + cfg.gridNz);
+  println("  xMin..xMax (row)    = " + round3(cfg.gridXmin) + " .. " + round3(cfg.gridXmax));
+  println("  zMin..zMax          = " + round3(cfg.gridZmin) + " .. " + round3(cfg.gridZmax));
+  println("==========================================================");
+
+  // Current RAW fruit expectation (for fruit-floor protection)
+  BudStats st0 = scanExisting(cfg);
+  int globalRaw = st0.fruitsRaw;
+
+  int[]            countByCell = new int[cells];
+  java.util.List[] budsByCell  = new java.util.ArrayList[cells];
+  java.util.List[] sitesByCell = new java.util.ArrayList[cells];  // candidate internodes for addition
+	// 1) Bucket buds into grid cells (in local row X × local Z)
+	double localXmin = Double.POSITIVE_INFINITY, localXmax = Double.NEGATIVE_INFINITY;
+	double localZmin = Double.POSITIVE_INFINITY, localZmax = Double.NEGATIVE_INFINITY;
+	
+	for (BudService b : (* BudService *)){
+	  // Reconstruct local coordinates
+	  
+	  double xRow = xRowLocal(b); // along-row, in tree-local frame
+	  double zLoc = zBase(b);     // height; rotation about Z leaves this unchanged
+	
+	  if (xRow < localXmin) localXmin = xRow;
+	  if (xRow > localXmax) localXmax = xRow;
+	  if (zLoc < localZmin) localZmin = zLoc;
+	  if (zLoc > localZmax) localZmax = zLoc;
+	
+	  int idx = gridIndexForXZ(cfg, xRow, zLoc);
+	  if (idx < 0 || idx >= cells){
+		// outside management grid → reserved
+		continue;
+	  }
+	
+	  if (budsByCell[idx] == null) budsByCell[idx] = new java.util.ArrayList();
+	  budsByCell[idx].add(b);
+	  countByCell[idx]++;
+	}
+	
+	println("[BudPlanner] Mode 5: recovered local row X range = ["
+			+ round3(localXmin) + "," + round3(localXmax) + "], Z range = ["
+			+ round3(localZmin) + "," + round3(localZmax) + "]");
+
+
+  // 2) Bucket eligible internodes as potential addition sites per cell
+  for (Internode itn : (* Internode *)){
+    if (!eligible_AddTerminalOnly(itn, cfg, cfg.minBranchGap, cfg.startNodeMin,
+                                  (cfg.mainAxisOnly==1)?cfg.placementOrderMin:1,
+                                  /*allowMultiOnNode=*/false)) {
+      continue;
+    }
+
+    double xRow = xRowLocal(itn);
+    double zLoc = zBase(itn);     // height; rotation about Z leaves this unchanged
+    int idx = gridIndexForXZ(cfg, xRow, zLoc);
+    if (idx < 0 || idx >= cells) continue;
+
+    if (sitesByCell[idx] == null) sitesByCell[idx] = new java.util.ArrayList();
+    sitesByCell[idx].add(itn);
+  }
+
+  int[] targetByCell = new int[cells];
+  int[] removeByCell = new int[cells];
+  int[] addByCell    = new int[cells];
+
+  int totalRemoveRequested = 0;
+  int totalAddRequested    = 0;
+
+  // Cell size (for nicer debug printing)
+  double dxCell = (cfg.gridXmax - cfg.gridXmin) / (double)cfg.gridNx;
+  double dzCell = (cfg.gridZmax - cfg.gridZmin) / (double)cfg.gridNz;
+
+  // 3) Compare current vs targets + per-cell debug
+  println("[BudPlanner] Mode 5: per-cell plan (cell, ix,iz, xRange, zRange, current, target, removeReq, addReq):");
+  for (int c=0; c<cells; c++){
+    double targD = cfg.gridBudTargetsFlat[c];
+    if (targD < 0.0) targD = 0.0;
+    int target = (int) Math.round(targD);
+    if (target < 0) target = 0;
+    targetByCell[c] = target;
+
+    int current   = countByCell[c];
+    int removeReq = 0;
+    int addReq    = 0;
+
+    if (current > target) {
+      removeReq = current - target;
+      totalRemoveRequested += removeReq;
+    } else if (current < target) {
+      addReq = target - current;
+      totalAddRequested += addReq;
+    }
+    removeByCell[c] = removeReq;
+    addByCell[c]    = addReq;
+
+    int ix = c % cfg.gridNx;
+    int iz = c / cfg.gridNx;
+    double xLo = cfg.gridXmin + dxCell * (double)ix;
+    double xHi = (ix == cfg.gridNx-1) ? cfg.gridXmax : (xLo + dxCell);
+    double zLo = cfg.gridZmin + dzCell * (double)iz;
+    double zHi = (iz == cfg.gridNz-1) ? cfg.gridZmax : (zLo + dzCell);
+
+    println("  cell=" + c
+      + " (ix=" + ix + ",iz=" + iz + ")"
+      + " x=[" + round3(xLo) + "," + round3(xHi) + "]"
+      + " z=[" + round3(zLo) + "," + round3(zHi) + "]"
+      + " current=" + current
+      + " target=" + target
+      + " removeReq=" + removeReq
+      + " addReq=" + addReq);
+  }
+
+  println("[BudPlanner] Mode 5: totalRemoveRequested=" + totalRemoveRequested
+       + " | totalAddRequested=" + totalAddRequested
+       + " | RAW fruit floor=" + cfg.expectedFruitNumber);
+
+  if (cfg.dryRun){
+    println("[BudPlanner] Mode 5: DRY-RUN → no structural edits.");
+    return;
+  }
+
+  // ---------- 4) Removal pass ----------
+  int totalRemoved = 0;
+  int skippedFloralDueToFloor = 0;
+
+  for (int c=0; c<cells; c++){
+    int need = removeByCell[c];
+    if (need <= 0) continue;
+
+    java.util.List cellBuds = budsByCell[c];
+    if (cellBuds == null || cellBuds.isEmpty()) continue;
+
+    try { java.util.Collections.shuffle(cellBuds, _rng); } catch(Throwable t){}
+
+    int removedHere = 0;
+
+    for (int k=0; k<cellBuds.size() && removedHere < need; k++){
+      BudService b = (BudService) cellBuds.get(k);
+
+      boolean floral = (b instanceof BudAppleService)
+                       && ((BudAppleService)b).budType == 2;
+      int fexp = 0;
+      if (floral){
+        fexp = expectedFruitOfFloral(cfg, (BudAppleService)b);
+        if (cfg.expectedFruitNumber > 0
+            && (globalRaw - fexp) < cfg.expectedFruitNumber){
+          skippedFloralDueToFloor++;
+          continue;
+        }
+      }
+
+      deleteBudIfLive(cfg, b);;
+      removedHere++;
+      totalRemoved++;
+
+      if (floral){
+        globalRaw -= fexp;
+        removedFloralCount++;
+      } else {
+        removedVegCount++;
+      }
+    }
+
+    if (removedHere > 0){
+      println("[BudPlanner] Mode 5 REMOVE: cell=" + c
+           + " current(before)=" + countByCell[c]
+           + " target=" + targetByCell[c]
+           + " removed=" + removedHere);
+    }
+  }
+
+  if (!cfg.dryRun) derive();
+ // refresh scene after removals
+  BudStats stAfterRemove = scanExisting(cfg);
+  globalRaw = stAfterRemove.fruitsRaw;
+
+  // ---------- 5) Addition pass (bud type draw follows FBUD_FLORAL) ----------
+  int maxAdd = cfg.maxNewBudsAllow;
+  int skippedIneligible = 0;
+  if (maxAdd <= 0 || totalAddRequested <= 0){
+    println("[BudPlanner] Mode 5 ADD: skipped (maxNewBudsAllow=" + maxAdd
+         + " or totalAddRequested=" + totalAddRequested + ").");
+  } else {
+    int totalAdded = 0;
+    int[] qc = new int[]{0,0,0,0};
+
+    for (int c=0; c<cells && totalAdded < maxAdd; c++){
+      int need = addByCell[c];
+      if (need <= 0) continue;
+
+      java.util.List sites = sitesByCell[c];
+      if (sites == null || sites.isEmpty()) continue;
+
+      sites = orderDescShuffledByOrder(sites, cfg.spurOrder);
+
+      int addedHere = 0;
+
+      for (int k=0; k<sites.size() && addedHere < need && totalAdded < maxAdd; k++){
+        Internode site = (Internode) sites.get(k);
+
+        // Re-check eligibility (scene changed after removals)
+        if (!eligible_AddTerminalOnly(site, cfg, cfg.minBranchGap, cfg.startNodeMin,
+                                      (cfg.mainAxisOnly==1)?cfg.placementOrderMin:1,
+                                      /*allowMultiOnNode=*/false)) {
+          continue;
+        }
+
+        Internode attachSite = resolvePlannerAttachSite(
+            cfg, site, cfg.minBranchGap, cfg.startNodeMin,
+            (cfg.mainAxisOnly==1)?cfg.placementOrderMin:1, false);
+        if (attachSite == null) {
+          skippedIneligible++;
+          continue;
+        }
+
+        BudService b = new BudCreator(species).createBud();
+        boolean isFloralNew = false;
+        if (b instanceof BudAppleService){
+          BudAppleService ba = (BudAppleService)b;
+          ba.initiate(attachSite, (float) cfg.fBudFloral);
+          isFloralNew = (ba.budType == 2);
+        } else {
+          b.initiate(attachSite, (float) cfg.fBudFloral);
+        }
+
+        attachBudIfLive(cfg, attachSite, b);
+
+        addedHere++;
+        totalAdded++;
+        if (isFloralNew) placedFloral++;
+        else             placedVeg++;
+        addSiteQcAcc(attachSite, cfg, qc);
+      }
+
+      if (addedHere > 0){
+        println("[BudPlanner] Mode 5 ADD: cell=" + c
+             + " added=" + addedHere
+             + " (requested=" + addByCell[c] + ")");
+      }
+    }
+
+    if (!cfg.dryRun) derive();
+
+    printAddSiteQc("mode5-grid-add", qc);
+    println("[BudPlanner] Mode 5: ADD SUMMARY  totalAdded=" + totalAdded
+         + " skippedIneligible=" + skippedIneligible);
+  }
+
+  BudStats stF = scanExisting(cfg);
+
+  println("[BudPlanner] Mode 5: FINAL SUMMARY");
+  println("  totalRemoved               = " + totalRemoved);
+  println("  totalAdded                 = " + (totalAddRequested > 0 ? "see ADD SUMMARY" : "0"));
+  println("  skippedIneligible          = " + skippedIneligible);
+  println("  skippedFloralDueToFloor    = " + skippedFloralDueToFloor);
+  println("  RAW fruits after≈          = " + stF.fruitsRaw);
+  println("  totalBudNum after          = " + stF.nBuds);
+  println("----------------------------------------------------------");
+}
+
+
+
+// ---- 3D coordinate helpers (world coordinates, reflection only) ----
+static double xBase(Organ itn){
+  // Try a few likely field names, like we did for zBase
+  try { itn.update3D(); } catch(Throwable t){}
+  
+  Double v = getDoubleField(itn, "x");
+  
+  if (v == null) v = getDoubleField(itn, "X");
+  if (v == null) v = getDoubleField(itn, "xCoord");
+  if (v == null) v = getDoubleField(itn, "XCoord");
+  return (v != null) ? v.doubleValue() : 0.0;
+}
+
+static double yBase(Organ itn){
+	try { itn.update3D(); } catch(Throwable t){}
+  Double v = getDoubleField(itn, "y");
+  if (v == null) v = getDoubleField(itn, "Y");
+  if (v == null) v = getDoubleField(itn, "yCoord");
+  if (v == null) v = getDoubleField(itn, "YCoord");
+  return (v != null) ? v.doubleValue() : 0.0;
+}
+
+
+
+
+// Compute [xLo,xHi,zLo,zHi] for a given cell index (0..nx*nz-1)
+static void gridBoundsForCellIndex(BudPlannerConfig.Cfg cfg, int cellIdx, double[] out){
+  int nx = cfg.gridNx;
+  int nz = cfg.gridNz;
+  if (out == null || out.length < 4 || nx <= 0 || nz <= 0){
+    return;
+  }
+
+  int iz = cellIdx / nx;
+  int ix = cellIdx % nx;
+
+  double dx = (cfg.gridXmax - cfg.gridXmin) / (double)nx;
+  double dz = (cfg.gridZmax - cfg.gridZmin) / (double)nz;
+
+  double xLo = cfg.gridXmin + dx * ix;
+  double xHi = (ix == nx-1) ? cfg.gridXmax : (cfg.gridXmin + dx * (ix+1));
+
+  double zLo = cfg.gridZmin + dz * iz;
+  double zHi = (iz == nz-1) ? cfg.gridZmax : (cfg.gridZmin + dz * (iz+1));
+
+  out[0] = xLo; out[1] = xHi;
+  out[2] = zLo; out[3] = zHi;
+}
+
+// Eligibility for placing a bud in a given rectangular grid cell
+static boolean eligibleForGridCell(Internode itn, BudPlannerConfig.Cfg cfg,
+                                   int gap, int startMin, int orderMin,
+                                   double xLo, double xHi, double zLo, double zHi){
+  // reuse terminal-only add checks
+  if (!eligible_AddTerminalOnly(itn, cfg, gap, startMin, orderMin, /*allowMultiOnNode*/false))
+    return false;
+
+  double xb = xBase(itn);
+  double zb = zBase(itn);
+
+  if (xb < xLo || xb > xHi) return false;
+  if (zb < zLo || zb > zHi) return false;
+
+  return true;
+}
+
+// Try to add 'needAdd' buds inside one grid cell, respecting normal placement rules
+static int addBudsInGridCell(BudPlannerConfig.Cfg cfg, int needAdd,
+                             double xLo, double xHi,
+                             double zLo, double zHi){
+  if (needAdd <= 0) return 0;
+
+  int placed = 0;
+  int safety = 0;
+
+  int gap      = cfg.minBranchGap;
+  int startMin = cfg.startNodeMin;
+  int orderMin = (cfg.mainAxisOnly == 1) ? cfg.placementOrderMin : 1;
+
+  while (placed < needAdd && safety++ < 20000){
+    Internode cand = first( (* i:Internode,
+      (eligibleForGridCell(i, cfg, gap, startMin, orderMin, xLo, xHi, zLo, zHi)) *) );
+    if (cand == null) break;  // no more eligible sites in this cell
+
+    Internode attachSite = resolvePlannerAttachSite(cfg, cand, gap, startMin, orderMin, false);
+    if (attachSite == null) continue;
+
+    BudService b = new BudCreator(species).createBud();
+    if (b instanceof BudAppleService){
+      BudAppleService ba = (BudAppleService)b;
+      ba.initiate(attachSite, (float) cfg.fBudFloral);
+    } else {
+      b.initiate(attachSite, (float) cfg.fBudFloral);
+    }
+
+    attachBudIfLive(cfg, attachSite, b);
+
+    placed++;
+  }
+
+  return placed;
+}
+
+
+  // ========================= Buds-per-meter (robust) =========================
+
+  // 0) Always refresh coords before any Z-span or buds/m calculation
+  static void refresh3DForAllInternodes() {
+    try {
+      for (Internode itn : (* Internode *)) {
+        try { itn.update3D(); } catch(Throwable t) { /* ignore if not present */ }
+      }
+    } catch(Throwable t) { /* safe no-op if comprehension differs */ }
+  }
+
+  // 1) Robust Z accessors (prefer endZ tip; fallback to z base)
+  static double zStart(Internode itn) { // base
+    try {
+      return itn.z;
+    } catch (Throwable t) {
+      return 0.0;
+    }
+  }
+
+  static double zEnd(Internode itn) { // tip
+    try {
+      return itn.endZ;
+    } catch (Throwable t) {
+      try {
+        return itn.z;
+      } catch (Throwable t2) {
+        return 0.0;
+      }
+    }
+  }
+
+
+
+  // 3) Compute per-upright Z span in meters (uses start+end Z)
+  static double uprightZSpanMeters(Object upKey, int uprightOrder, BudPlannerConfig.Cfg cfg) {
+    boolean seen = false;
+    double minZ = Double.POSITIVE_INFINITY, maxZ = Double.NEGATIVE_INFINITY;
+
+    for (Internode itn : (* Internode *)) {
+      if (itn.order != uprightOrder) continue;
+      Object key = uprightKey(itn, cfg);
+      if (!key.equals(upKey)) continue;
+
+      double a = zStart(itn), b = zEnd(itn);
+      double lo = (a<b)?a:b, hi=(a>b)?a:b;
+      if (!Double.isFinite(lo) || !Double.isFinite(hi)) continue;
+      seen = true;
+      if (lo < minZ) minZ = lo;
+      if (hi > maxZ) maxZ = hi;
+    }
+    if (!seen) return 0.0;
+    return (maxZ - minZ); // meters if your coords are meters
+  }
+
+  static java.util.List collectUprightsWithLen(BudPlannerConfig.Cfg cfg) {
+    java.util.List out = new java.util.ArrayList();
+    // Build the set of upright keys
+    java.util.Set keys = new java.util.HashSet();
+    for (Internode itn : (* Internode *)) {
+      if (itn.order == cfg.uprightOrder) keys.add(uprightKey(itn, cfg));
+    }
+    java.util.Iterator it = keys.iterator();
+    while (it.hasNext()){
+      Object k = it.next();
+      double Lm = uprightZSpanMeters(k, cfg.uprightOrder, cfg);
+      out.add(new UprightLen(k, Lm));
+    }
+    return out;
+  }
+
+  static int countBudsOnUprightKey(BudPlannerConfig.Cfg cfg, Object upKey) {
+    int n=0;
+    for (BudService b : (* BudService *)) {
+      Internode site = first((* b (<--)+ i:Internode *));
+      if (site == null) continue;
+      if (!uprightKey(site, cfg).equals(upKey)) continue;
+      n++;
+    }
+    return n;
+  }
+
+  // Replace countBudsOffUprights with ancestor-at-order test
+static int countBudsOffUprights(BudPlannerConfig.Cfg cfg) {
+  int n=0;
+  for (BudService b : (* BudService *)) {
+    Internode site = first((* b (<--)+ i:Internode *));
+    if (site == null) { continue; }
+    Internode anc = first((* site (<--)+ j:Internode, (j.order == cfg.uprightOrder) *));
+    if (site.order != cfg.uprightOrder && anc == null) n++; // truly off the upright system
+  }
+  return n;
+}
+
+  // 4) Main buds-per-meter controller (length-aware & safe)
+  static void applyBudsPerMeterStrategy(BudPlannerConfig.Cfg cfg, int targetBudsPerMeter) {
+    // Refresh coords first
+    refresh3DForAllInternodes();
+
+    // Reserve off-upright buds
+    int reservedOff = countBudsOffUprights(cfg);
+
+    // Collect uprights and their lengths
+    java.util.List ups = collectUprightsWithLen(cfg);
+
+    // Sum length (meters)
+    double totalLen = 0.0;
+    for (int i=0;i<ups.size();i++){
+      UprightLen u = (UprightLen)ups.get(i);
+      totalLen += Math.max(0.0, u.lenM);
+    }
+
+    // Diagnostics
+    double[] gspan = globalZSpanMeters(); // optional global span debug
+    println("[BudPlanner] Z-SPAN: global minZ="+round3(gspan[0])+" maxZ="+round3(gspan[1])+" span="+round3(gspan[2])+" m");
+
+    // Count on-upright buds
+    int onUprightBuds = 0;
+    for (int i=0;i<ups.size();i++){
+      UprightLen u = (UprightLen)ups.get(i);
+      int n = countBudsOnUprightKey(cfg, u.key);
+      onUprightBuds += n;
+      println("  Upright["+(i+1)+"] span="+round3(u.lenM)+" m (buds="+n+")");
+    }
+    println("[BudPlanner] Buds split: onUprights="+onUprightBuds+" | offUprights(reserved)="+reservedOff);
+
+    // Safety: if no measurable length, skip to avoid unintended removals
+    if (totalLen <= 1e-6) {
+      println("[BudPlanner] Buds/m DEBUG: totalLen_m="+round3(totalLen)+" | buds/m="+targetBudsPerMeter
+        +" | (len≈0) — skip add/remove to avoid unintended actions.");
+      return;
+    }
+
+    int targetOnUpright = Math.max(0, (int)Math.round(totalLen * targetBudsPerMeter));
+    int delta = targetOnUpright - onUprightBuds;
+    
+    println("[BudPlanner] Buds/m DEBUG: totalLen_m="+round3(totalLen)+" | buds/m="+targetBudsPerMeter
+        +" | targetBuds(on-uprights)="+targetOnUpright+" | currentUprightBuds="+onUprightBuds+" | Δ="+delta
+        +" | (non-upright buds are reserved)");
+
+    if (delta == 0) {
+      println("[BudPlanner] Buds/m: already on target for uprights.");
+      return;
+    }
+
+    // In applyBudsPerMeterStrategy(...)
+if (delta > 0) {
+  int before = (int) count((* BudService *));
+  if (!cfg.dryRun) addBudsPerMeter_OnUprights(cfg, delta);
+  int after = (int) count((* BudService *));
+  int addedNow = Math.max(0, after - before);
+  println("[BudPlanner] Buds/m ADD: added≈"+addedNow+" (upright-only) | RAW fruits after≈"+scanExisting(cfg).fruitsRaw);
+} else {
+  int before = (int) count((* BudService *));
+  if (!cfg.dryRun) removeBudsPerMeter_OnUprights(cfg, -delta, /*protectRawFruits=*/true, /*minRaw=*/cfg.expectedFruitNumber);
+  int after = (int) count((* BudService *));
+  int removedNow = Math.max(0, before - after);
+  println("[BudPlanner] Buds/m REMOVE: removed≈"+removedNow+" (upright-only) | RAW fruits after≈"+scanExisting(cfg).fruitsRaw);
+}
+
+  }
+
+  // ------- helpers for global span debug (optional; uses zStart/zEnd) --------
+  static double[] globalZSpanMeters() {
+    boolean seen = false;
+    double minZ = Double.POSITIVE_INFINITY, maxZ = Double.NEGATIVE_INFINITY;
+
+    for (Internode itn : (* Internode *)) {
+      double a = zStart(itn), b = zEnd(itn);
+      double lo = (a<b)?a:b, hi=(a>b)?a:b;
+      if (!Double.isFinite(lo) || !Double.isFinite(hi)) continue;
+      seen = true;
+      if (lo < minZ) minZ = lo;
+      if (hi > maxZ) maxZ = hi;
+    }
+    if (!seen) return new double[]{0.0,0.0,0.0};
+    double span = (maxZ - minZ);
+    return new double[]{minZ, maxZ, span};
+  }
+
+  // ---------------------------- Removal by ratio -----------------------------
+/**
+ * Removal path for LA planner (option 1/2, Phase-2).
+ * <p>Ranks uprights by LA/RAW (ascending) and removes buds from the lowest-ratio
+ * uprights first. Policy variants:
+ * <ul>
+ *   <li>Vegetative-first then floral (skip floral that would violate RAW floor).</li>
+ *   <li>Randomized within upright (veg+floral mixed), still protecting RAW floor.</li>
+ * </ul>
+ * Stops when requested ΔLA is achieved or the fruit floor prevents further floral removals.
+ *
+ * @param cfg                 configuration
+ * @param removeLA_m2         target leaf area to remove (m²)
+ * @param minRawFruitsAfter   minimum RAW fruits to protect
+ */
+  
+static void removeBudsByUprightRatio(BudPlannerConfig.Cfg cfg, double removeLA_m2, int minRawFruitsAfter){
+    // per-upright LA & RAW fruits
+    java.util.Map laByUp = new java.util.HashMap();
+    java.util.Map rawByUp = new java.util.HashMap();
+
+    for (BudService b : (* BudService *)){
+      Internode site = first((* b (<--)+ i:Internode *));
+      if (site == null) continue;
+      Object upKey = uprightKey(site, cfg);
+
+      double la = laOfBud(cfg, b);
+
+      Double curLA = (Double) laByUp.get(upKey);
+      laByUp.put(upKey, Double.valueOf((curLA==null?0.0:curLA.doubleValue()) + la));
+    }
+
+    for (BudService b : (* BudService *)){
+      if (b instanceof BudAppleService){
+        BudAppleService ba = (BudAppleService)b;
+        if (ba.budType==2){
+          Internode site = first((* b (<--)+ i:Internode *));
+          if (site==null) continue;
+          Object upKey = uprightKey(site, cfg);
+
+          int flowers = (ba.flowerNumber>0) ? ba.flowerNumber : cfg.flowersPerFloral;
+          double exp  = ((double)flowers) * cfg.fruitSetProb;
+          int fruitHere = (int)Math.round(Math.max(1.0, Math.min(exp, (double)cfg.maxFruitsPerBud)));
+
+          Integer cur = (Integer) rawByUp.get(upKey);
+          rawByUp.put(upKey, Integer.valueOf((cur==null?0:cur.intValue()) + fruitHere));
+        }
+      }
+    }
+
+    // Build upright scores by ratio LA / max(1, RAW)
+    java.util.List ups = new java.util.ArrayList();
+    java.util.Iterator it = laByUp.keySet().iterator();
+    int globalRaw = sumIntMap(rawByUp);
+    while (it.hasNext()){
+      Object key = it.next();
+      double la = ((Double)laByUp.get(key)).doubleValue();
+      int raw   = ((Integer)nzIntMap(rawByUp, key, Integer.valueOf(0))).intValue();
+      double ratio = la / Math.max(1, raw);
+      ups.add(new UprightScore(key, la, raw, ratio));
+    }
+    java.util.Collections.sort(ups, new java.util.Comparator(){
+      public int compare(Object a, Object b){
+        UprightScore x=(UprightScore)a, y=(UprightScore)b;
+        if (x.ratio < y.ratio) return -1;
+        if (x.ratio > y.ratio) return 1;
+        return 0;
+      }
+    });
+
+    double removedLA = 0.0;
+    // remove buds (veg first on low-ratio uprights, then floral if fruit-safe)
+    for (int i=0; i<ups.size() && removedLA < removeLA_m2; i++){
+      UprightScore u = (UprightScore) ups.get(i);
+
+      java.util.List vegs = collectBudsOnUpright(u.key, /*floral=*/false, cfg);
+      for (int j=0; j<vegs.size() && removedLA < removeLA_m2; j++){
+        BudService b = (BudService)vegs.get(j);
+        removedLA += laOfBud(cfg, b);
+        removedVegCount++;
+        deleteBudIfLive(cfg, b);;
+      }
+      if (removedLA >= removeLA_m2) break;
+
+      java.util.List florals = collectBudsOnUpright(u.key, /*floral=*/true, cfg);
+      for (int j=0; j<florals.size() && removedLA < removeLA_m2; j++){
+        if (globalRaw <= minRawFruitsAfter) break;
+        BudService b = (BudService)florals.get(j);
+
+        int fruitHere = expectedFruitOfFloral(cfg, (BudAppleService)b);
+        if (globalRaw - fruitHere < minRawFruitsAfter) continue;
+
+        removedLA += laOfBud(cfg, b);
+        deleteBudIfLive(cfg, b);;
+        globalRaw -= fruitHere;
+        removedFloralCount++;
+      }
+    }
+    if (!cfg.dryRun) derive();
+
+    println("[BudPlanner] Removal: removedLA≈" + round3(removedLA) + " m^2 | RAW fruits after≈" + globalRaw);
+    println("[BudPlanner] Current totalBudNum is: " + count((*BudService*)));
+  }
+
+
+
+  static java.util.List collectBudsOnUpright(Object upKey, boolean floral, BudPlannerConfig.Cfg cfg){
+    java.util.List list = new java.util.ArrayList();
+    for (BudService b : (* BudService *)){
+      Internode site = first((* b (<--)+ i:Internode *));
+      if (site==null) continue;
+      if (!uprightKey(site, cfg).equals(upKey)) continue;
+      if (floral){
+        if (b instanceof BudAppleService && ((BudAppleService)b).budType==2) list.add(b);
+      } else {
+        if (!(b instanceof BudAppleService) || ((BudAppleService)b).budType!=2) list.add(b);
+      }
+    }
+    return list;
+  }
+
+  // ----------------------------- Preflight & add -----------------------------
+  static void preflightAdjustAndPlace(BudPlannerConfig.Cfg cfg, int floralPlan, int vegPlan, double targetPrePrune){
+    int N = maxRankOnMainAxis();
+    double[] eligibleByRank = histoEligibleSitesByRank_OrderMin(cfg, N,
+        Math.max(cfg.startNodeMin, T0_RANK_MIN),
+        (cfg.mainAxisOnly==1)?cfg.placementOrderMin:1);
+
+    GammaParams gp0 = new GammaParams(cfg.gammaShape, cfg.gammaScale, 0);
+    double[] wRef   = gammaWeightsDiscrete(N, gp0.k, gp0.theta, gp0.r0);
+    scaleToSum(wRef, Math.max(targetPrePrune, 1e-6));
+
+    double LA_sim0  = estimateLeafAreaFast_OrderMin(cfg);
+    boolean scaleProblem = (Math.abs((LA_sim0/Math.max(1e-6,targetPrePrune))-1.0) >= T0_SCALE_GATE)
+                        && (corr(eligibleByRank, wRef) >= T0_SHAPE_GATE_RHO);
+
+    if (scaleProblem){
+      double need = targetPrePrune / Math.max(1e-6, LA_sim0);
+      double step = clamp(need, 1.0 - T0_MAX_SCALE_STEP, 1.0 + T0_MAX_SCALE_STEP);
+      cfg.budDensityScale = step;
+      println("[BudPlanner] Preflight: scale  budScale×=" + round3(step)
+           + " (LA_sim0=" + round3(LA_sim0) + ", target=" + round3(targetPrePrune) + ")");
+      double scaled = ((double)(floralPlan + vegPlan)) * cfg.budDensityScale;
+      int newTotal  = Math.max(1, (int)Math.round(scaled));
+      int floralKeep = Math.min(newTotal, floralPlan);
+      int vegKeep    = Math.max(0, newTotal - floralKeep);
+      floralPlan = floralKeep; vegPlan = vegKeep;
+    } else {
+      GammaParams best = fitGammaToEligible(eligibleByRank, gp0, N, T0_DK, T0_DT);
+      cfg.gammaShape = best.k; cfg.gammaScale = best.theta;
+      println("[BudPlanner] Preflight: gamma  k=" + round3(best.k) + "  θ=" + round3(best.theta)
+           + "  ρ=" + round3(corr(eligibleByRank, gammaWeightsDiscrete(N,best.k,best.theta,best.r0))));
+    }
+
+    stagePlacement(cfg, floralPlan, vegPlan);
+
+    int startBudsApprox = (int) count((* BudService *)) - (placedFloral + placedVeg);
+    int finalBuds = (int) count((* BudService *));
+    int removed   = removedFloralCount + removedVegCount;
+
+    println("[BudPlanner] Buds summary (mode=" + cfg.budTargetMode + " - " 
+       + describebudPlannerMode(cfg.budTargetMode) + "): "
+       + "start≈" + startBudsApprox + "  +added=" + (placedFloral + placedVeg)
+       + "  -removed=" + removed
+       + "  => final=" + finalBuds);
+  }
+
+  static void stagePlacement(BudPlannerConfig.Cfg cfg, int floralPlan, int vegPlan) {
+    extraFloralToAdd = floralPlan;
+    extraVegToAdd = vegPlan;
+
+    boolean needMore = (extraFloralToAdd > 0 || extraVegToAdd > 0);
+    int baseGap = cfg.minBranchGap;
+    int baseStart = cfg.startNodeMin;
+    int minOrder = cfg.placementOrderMin;
+
+    // strict
+    needMore = runPlacementPass(cfg, baseGap, baseStart,
+        (cfg.mainAxisOnly == 1 ? minOrder : 1),
+        false, "strict");
+
+    // bias to order≥3
+    if (needMore) {
+      int biasMinOrder = Math.min(minOrder, T0_PREF_ORDER);
+      needMore = runPlacementPass(cfg, baseGap, baseStart,
+          (cfg.mainAxisOnly == 1 ? biasMinOrder : 1),
+          false, "bias-order>=3");
+    }
+
+    // relax spacing and basal
+    if (needMore) {
+      int maxGapPass = 2;
+      int maxBasalPass = 2;
+      for (int g = 0; g <= maxGapPass && needMore; g++) {
+        int curGap = Math.max(0, baseGap - g);
+        for (int b = 0; b <= maxBasalPass && needMore; b++) {
+          int curStart = Math.max(BudPlannerConfig.DEF_START_NODE_MIN, baseStart - b);
+          needMore = runPlacementPass(cfg, curGap, curStart,
+              (cfg.mainAxisOnly == 1 ? minOrder : 1),
+              false,
+              "relax:gap=" + curGap + ",start=" + curStart + ",order>= " + (cfg.mainAxisOnly == 1 ? minOrder : 1));
+        }
+      }
+    }
+
+    // allow multi-fruit
+    if (needMore) {
+      needMore = runPlacementPass(cfg, 0,
+          Math.max(BudPlannerConfig.DEF_START_NODE_MIN, baseStart - 2),
+          (cfg.mainAxisOnly == 1 ? minOrder : 1),
+          true, "multi-fruit");
+    }
+
+    println("[BudPlanner] placed: floral=" + placedFloral + ", veg=" + placedVeg + ", attempts=" + attempts);
+    unmetFloral = Math.max(0, extraFloralToAdd);
+    unmetVeg = Math.max(0, extraVegToAdd);
+    if (unmetFloral > 0 || unmetVeg > 0)
+      println("[BudPlanner] WARNING: unmet additions  floral=" + unmetFloral + ", veg=" + unmetVeg
+          + " (eligible sites exhausted or upright caps reached).");
+    if (fruitsRemainingToAllocate > 0)
+      println("[BudPlanner] WARNING: remaining unallocated fruits=" + fruitsRemainingToAllocate
+          + ". Consider relaxing caps or enabling secondary axes.");
+  }
+
+  // Snapshot candidates once, then re-check before each placement.
+  // This avoids repeated full-scene `first(...)` scans on large architectures.
+  static java.util.List collectPlacementCandidatesEx(BudPlannerConfig.Cfg cfg, int curGap, int curStart, int orderMin,
+                                                     boolean allowMultiOnNode){
+    java.util.List cands = new java.util.ArrayList();
+    for (Internode i : (* Internode *)){
+      if (eligible_OrderMinEx(i, cfg, curGap, curStart, orderMin, allowMultiOnNode)) cands.add(i);
+    }
+    return cands;
+  }
+
+  static java.util.List orderDescShuffledByOrder(java.util.List cands, int minOrder){
+    java.util.Map byOrder = new java.util.HashMap(); // Integer -> List
+    int maxOrd = -999999;
+    if (cands != null){
+      for (int i=0; i<cands.size(); i++){
+        Internode itn = (Internode) cands.get(i);
+        if (itn == null) continue;
+        if (itn.order < minOrder) continue;
+        Integer key = Integer.valueOf(itn.order);
+        java.util.List L = (java.util.List) byOrder.get(key);
+        if (L == null){ L = new java.util.ArrayList(); byOrder.put(key, L); }
+        L.add(itn);
+        if (itn.order > maxOrd) maxOrd = itn.order;
+      }
+    }
+    java.util.List out = new java.util.ArrayList();
+    for (int ord = maxOrd; ord >= minOrder; ord--){
+      java.util.List L = (java.util.List) byOrder.get(Integer.valueOf(ord));
+      if (L == null || L.isEmpty()) continue;
+      try { java.util.Collections.shuffle(L, _rng); } catch(Throwable t){}
+      out.addAll(L);
+    }
+    return out;
+  }
+
+  static java.util.List collectAddCandidates_TerminalOrderDesc(BudPlannerConfig.Cfg cfg,
+                                                              int curGap, int curStart, int orderMin,
+                                                              boolean allowMultiOnNode){
+    java.util.List terminalCands = new java.util.ArrayList();
+    java.util.List nonTerminalFallback = new java.util.ArrayList();
+    for (Internode i : (* Internode *)){
+      if (eligible_AddTerminalOnly(i, cfg, curGap, curStart, orderMin, allowMultiOnNode)) {
+        terminalCands.add(i);
+        continue;
+      }
+      if (i == null || i.order < cfg.spurOrder) continue;
+      if (eligible_OrderMinEx(i, cfg, curGap, curStart, orderMin, allowMultiOnNode)) {
+        nonTerminalFallback.add(i);
+      }
+    }
+
+    java.util.List ordered = orderDescShuffledByOrder(terminalCands, cfg.spurOrder);
+    java.util.List fallbackOrdered = orderDescShuffledByOrder(nonTerminalFallback, cfg.spurOrder);
+    ordered.addAll(fallbackOrdered);
+
+    if (printFlag || debug) {
+      println("[BudPlanner] candidate-priority terminal=" + terminalCands.size()
+        + " nonTerminalFallback=" + nonTerminalFallback.size()
+        + " gap=" + curGap + " startMin=" + curStart + " orderMin=" + orderMin);
+    }
+    return ordered;
+  }
+
+/**
+ * Single pass that attempts to place buds under a given constraint set.
+ * Selects candidate internodes with a comprehension that enforces:
+ * <ul>
+ *   <li>rank ≥ startNodeMin</li>
+ *   <li>axis-local spacing (MIN_BRANCH_GAP)</li>
+ *   <li>order threshold if main-axis-only</li>
+ *   <li>(optional) allow multi-bud on node or multi-fruit per floral</li>
+ * </ul>
+ * Each accepted placement creates the bud and attaches it with
+ * {@code [ h:cand ==> h [b]; ]}.
+ *
+ * @return true if there are still buds to place after this pass (i.e., more passes needed)
+ */
+  static boolean runPlacementPass(BudPlannerConfig.Cfg cfg, int curGap, int curStart, int orderMin,
+                                  boolean allowMultiFruit, String label){
+    int placedThisPass = 0;
+    int[] qc = new int[]{0,0,0,0};
+    java.util.List cands = collectAddCandidates_TerminalOrderDesc(cfg, curGap, curStart, orderMin, /*allowMultiOnNode=*/false);
+    for (int ci = 0; ci < cands.size() && (extraFloralToAdd > 0 || extraVegToAdd > 0); ci++) {
+      Internode cand = (Internode) cands.get(ci);
+      // Re-check because earlier placements in this pass can invalidate spacing/gap.
+      if (!eligible_AddTerminalOnly(cand, cfg, curGap, curStart, orderMin, /*allowMultiOnNode=*/false)) continue;
+
+      Internode attachSite = resolvePlannerAttachSite(
+          cfg, cand, curGap, curStart, orderMin, false);
+      if (attachSite == null) continue;
+
+      attempts++;
+
+      boolean placeFloral = false;
+      if (fruitsRemainingToAllocate > 0 && extraFloralToAdd > 0) {
+        Object upKey = uprightKey(attachSite, cfg);
+        int curF = getUprightFruit(upKey);
+        if (curF < cfg.maxFruitsPerUpright) placeFloral = true;
+      } else if (extraFloralToAdd > 0) {
+        Object upKey = uprightKey(attachSite, cfg);
+        int curF = getUprightFruit(upKey);
+        if (curF < cfg.maxFruitsPerUpright) placeFloral = (_rng.nextDouble() < cfg.fBudFloral);
+      }
+
+      BudService b = new BudCreator(species).createBud();
+      if (b instanceof BudAppleService) {
+        BudAppleService ba = (BudAppleService) b;
+        ba.initiate(attachSite, 0f);
+
+        if (placeFloral) {
+          ba.budType = 2;
+
+          int upRemain     = cfg.maxFruitsPerUpright - getUprightFruit(uprightKey(attachSite, cfg));
+          int globalRemain = fruitsRemainingToAllocate;
+
+          int targetHere = Math.max(1, (int)Math.round(cfg.fruitsPerFloralExp));
+          targetHere     = Math.min(targetHere, cfg.maxFruitsPerBud);
+
+          int fruitsForThisBud = 1;
+          if (allowMultiFruit) {
+            fruitsForThisBud = Math.max(1, Math.min(targetHere, Math.min(globalRemain, upRemain)));
+          }
+
+          ba.flowerNumber = sampleFlowerNumberPerFloral(cfg.flowersPerFloral);
+
+          incUprightFruit(uprightKey(attachSite, cfg), fruitsForThisBud);
+          fruitsRemainingToAllocate -= fruitsForThisBud;
+          if (fruitsRemainingToAllocate < 0) fruitsRemainingToAllocate = 0;
+
+          extraFloralToAdd--; placedFloral++; placedThisPass++;
+        } else {
+          ba.budType = 1; ba.flowerNumber = 0;
+          extraVegToAdd--; placedVeg++; placedThisPass++;
+        }
+      } else {
+        b.initiate(attachSite, 0f);
+        if (placeFloral) { extraFloralToAdd--; placedFloral++; placedThisPass++; }
+        else             { extraVegToAdd--;    placedVeg++;    placedThisPass++; }
+      }
+
+      // Attach in graph
+      attachBudIfLive(cfg, attachSite, b);
+      addSiteQcAcc(attachSite, cfg, qc);
+    }
+
+    printAddSiteQc(label, qc);
+    println("[BudPlanner] pass: " + label
+      + " | gap=" + curGap
+      + " | startNodeMin=" + curStart
+      + " | order>= " + (cfg.mainAxisOnly==1?orderMin:1)
+      + " | placed=" + placedThisPass
+      + " | remaining floral=" + extraFloralToAdd + ", veg=" + extraVegToAdd
+      + ", fruitsRemain=" + fruitsRemainingToAllocate);
+
+    return (extraFloralToAdd > 0 || extraVegToAdd > 0);
+  }
+
+  // ----------------------------- Eligibility --------------------------------
+  /**
+   * Candidate-addition eligibility on order/rank constraints with single-bud-per-site rule.
+   */
+  static boolean eligible_OrderMin(Internode itn, BudPlannerConfig.Cfg cfg, int gap, int startMin, int orderMin){
+    if (itn == null) return false;
+    if (isTerminal(itn)) return false;
+    if (itn.rank < startMin) return false;
+    if (firstBudOnInternodeSite(itn) != null) return false;
+    if (!respectGapOnAxisCustom(itn, gap)) return false;
+    if (cfg.mainAxisOnly == 1 && itn.order < orderMin) return false;
+    if (!respectMinBudSpacingOnAxis(itn, cfg)) return false;
+    return true;
+  }
+
+  /**
+   * Candidate-addition eligibility restricted to true terminal internodes.
+   */
+  static boolean eligible_AddTerminalOnly(Internode itn, BudPlannerConfig.Cfg cfg,
+                                          int gap, int startMin, int orderMin,
+                                          boolean allowMultiOnNode){
+    if (itn == null) return false;
+    if (!isTrueTerminalInternode(itn)) return false;
+    if (itn.rank < startMin) return false;
+
+    if (!allowMultiOnNode){
+      if (firstBudOnInternodeSite(itn) != null) return false;
+    }
+
+    if (!respectGapOnAxisCustom(itn, gap)) return false;
+    if (cfg.mainAxisOnly == 1 && itn.order < orderMin) return false;
+    if (!respectMinBudSpacingOnAxis(itn, cfg)) return false;
+    if (itn.order < cfg.spurOrder) return false;
+    return true;
+  }
+
+  /** Simple terminal check (any internode child means non-terminal). */
+  static boolean isTerminal(Internode itn){
+    Internode child = first((* itn (-->)+ i:Internode *));
+    return (child == null);
+  }
+
+  /** Verify no occupied bud sites exist within +/- gap nodes on the same axis order. */
+  static boolean respectGapOnAxisCustom(Internode itn, int gap){
+    if (gap <= 0) return true;
+    for (int d=1; d<=gap; d++){
+      Internode prev = first((* itn (<--)+ i:Internode, (BudPlannerConfig.abs(i.rank - itn.rank) == d && i.order == itn.order) *));
+      if (prev != null && firstBudOnInternodeSite(prev) != null) return false;
+    }
+    for (int d=1; d<=gap; d++){
+      Internode next = first((* itn (-->)+ i:Internode, (BudPlannerConfig.abs(i.rank - itn.rank) == d && i.order == itn.order) *));
+      if (next != null && firstBudOnInternodeSite(next) != null) return false;
+    }
+    return true;
+  }
+
+  // ------------------------ Scene scan & diagnostics -------------------------
+/**
+ * Scans the scene to compute:
+ * <ul>
+ *   <li>Total buds and number of floral buds</li>
+ *   <li>Estimated leaf area (bud-based)</li>
+ *   <li>RAW fruit expectation (sum of expected fruits per floral, capped per bud)</li>
+ *   <li>Per-upright RAW for diagnostics/capping</li>
+ * </ul>
+ * Also seeds the upright-fruit map used during addition/cap checks.
+ *
+ * @return a BudStats snapshot of the current scene
+ */
+  static BudStats scanExisting(BudPlannerConfig.Cfg cfg){
+    BudStats st = new BudStats();
+    st.nBuds = 0; st.nFloral = 0; st.laExisting = 0.0; st.fruitsRaw = 0;
+
+    uprightFruitMap = new java.util.HashMap();
+
+    for (BudService b : (* BudService *)){
+      st.nBuds++;
+
+      accumulateBudPlanStats(cfg, st, b);
+
+      if (b instanceof BudAppleService){
+        BudAppleService ba = (BudAppleService)b;
+        if (ba.budType==2){
+          st.nFloral++;
+          int fruitHere = expectedFruitOfFloral(cfg, ba);
+          st.fruitsRaw += fruitHere;
+
+          Internode site = first((* b (<--)+ i:Internode *));
+          if (site!=null){
+            Object upKey = uprightKey(site, cfg);
+            incUprightFruit(upKey, fruitHere);
+          }
+        }
+      }
+    }
+    st.laExisting = st.laVegPlan + st.laFloralRosettePlan + st.laFloralBoursePlan;
+
+    // compute capped sum and diagnostics
+    int cappedSum=0, overCap=0;
+    java.util.Iterator it = uprightFruitMap.entrySet().iterator();
+    while (it.hasNext()){
+      java.util.Map.Entry e = (java.util.Map.Entry) it.next();
+      Integer val=(Integer)e.getValue();
+      int v=(val==null)?0:val.intValue();
+      if (v>cfg.maxFruitsPerUpright){ cappedSum += cfg.maxFruitsPerUpright; overCap++; }
+      else                           { cappedSum += v; }
+    }
+    if (!cfg.dryRun) derive();
+
+    println("[BudPlanner] EXISTING FLORAL: nFloral=" + st.nFloral + " | uprights=" + uprightFruitMap.size());
+    println("[BudPlanner] Fruit expectation: raw=" + st.fruitsRaw + " | capped=" + cappedSum + " | overcapUprights=" + overCap);
+    println("[BudPlanner] totalBudNum is: " + st.nBuds);
+    println("[BudPlannerT0] LA plan decomposition:"
+        + " total=" + round3(st.laExisting)
+        + " veg=" + round3(st.laVegPlan)
+        + " floralRosette=" + round3(st.laFloralRosettePlan)
+        + " floralBourse=" + round3(st.laFloralBoursePlan)
+        + " plannedLeaves=" + st.plannedLeafCount
+        + " nBudTotal=" + st.nBuds
+        + " nBudFloral=" + st.nFloral
+        + " nBudVegetative=" + st.nBudVegetative);
+
+    st.fruitsExistingCapped = cappedSum;
+    return st;
+  }
+
+  // ----------------------------- Upright utils -------------------------------
+  /**
+   * Step 1 (lift to target order): If the current internode’s order is not
+   * cfg.uprightOrder, the code walks upstream (using <--) until it finds the
+   * nearest ancestor whose order == cfg.uprightOrder and treats that as the
+   * anchor.
+   * 
+   * Step 2 (roll to base): From that anchor, it keeps walking further upstream
+   * but only along the same order (again <-- with j.order == anchor.order) until
+   * there is no more parent—this “most proximal” node is returned as the upright
+   * root (the key).
+   * 
+   * So, every internode (any order ≥ 1) can be assigned to one upright by asking
+   * for its orderRootKey(…, cfg.uprightOrder). That root is what we use to:
+   * 
+   * group internodes into uprights,
+   * 
+   * compute each upright’s Z-span (minBaseZ..maxTipZ),
+   * 
+   * slice that span into five equal Z zones,
+   * 
+   * and count / target buds inside each upright×zone.
+   */
+  static Object uprightKey(Internode itn, BudPlannerConfig.Cfg cfg) {
+    return orderRootKey(itn, cfg.uprightOrder);
+  }
+
+  static Internode orderRootKey(Internode itn, int targetOrder){
+    Internode anchor = itn;
+    if (anchor.order != targetOrder){
+      Internode anc = first((* itn (<--)+ j:Internode, (j.order == targetOrder) *));
+      if (anc != null) anchor = anc;
+    }
+    Internode cur = anchor;
+    int guard = 0;
+    while (guard++ < 2000){
+      Internode prev = first((* cur (<--)+ j:Internode, (j.order == anchor.order) *));
+      if (prev == null) break;
+      cur = prev;
+    }
+    return cur;
+  }
+
+  static double distanceFromAxisBase_M(Internode itn){
+    if (itn == null) return 0.0;
+    final int ord = itn.order;
+    Internode cur = itn;
+    double L = 0.0;
+    int guard = 0;
+    while (guard++ < 20000){
+      Internode prev = first((* cur (<--)+ j:Internode, (j.order == ord) *));
+      if (prev == null) break;
+      double seg = (prev.length > 0.0) ? prev.length : 0.0; // meters
+      L += seg;
+      cur = prev;
+    }
+    return L;
+  }
+
+  static Internode axisRoot(Internode itn){
+    if (itn == null) return null;
+    return orderRootKey(itn, itn.order);
+  }
+
+  static double budAxisPosM(BudService b){
+    Internode site = first((* b (<--)+ i:Internode *));
+    if (site == null) return 0.0;
+    return distanceFromAxisBase_M(site);
+  }
+
+  // ---------- upright fruit bookkeeping ----------
+  static int getUprightFruit(Object key) {
+    if (uprightFruitMap == null)
+      return 0;
+    Integer v = (Integer) uprightFruitMap.get(key);
+    return (v == null) ? 0 : v.intValue();
+  }
+
+  static void incUprightFruit(Object key, int delta) {
+    if (uprightFruitMap == null)
+      return;
+    Integer v = (Integer) uprightFruitMap.get(key);
+    int nv = ((v == null) ? 0 : v.intValue()) + delta;
+    uprightFruitMap.put(key, Integer.valueOf(nv));
+  }
+
+  // --------------------- Bud LA / fruit expectations -------------------------
+  static void accumulateBudPlanStats(BudPlannerConfig.Cfg cfg, BudStats st, BudService b) {
+    if (st == null || cfg == null || b == null) return;
+
+    if (b instanceof BudAppleService) {
+      BudAppleService ba = (BudAppleService) b;
+      if (ba.budType == 2) {
+        int rosetteLeaves = expectedRosetteLeafCountFromBudPlan(ba);
+        int bourseLeaves = expectedBourseLeafCountFromBudPlan(ba);
+        st.plannedRosetteLeaves += rosetteLeaves;
+        st.plannedBourseLeaves += bourseLeaves;
+        st.plannedLeafCount += rosetteLeaves + bourseLeaves;
+        st.laFloralRosettePlan += leafCountToExpectedLA(cfg, rosetteLeaves);
+        st.laFloralBoursePlan += leafCountToExpectedLA(cfg, bourseLeaves);
+      } else {
+        int vegLeaves = expectedLeafCountFromShootPlanFields(ba);
+        st.nBudVegetative++;
+        st.plannedVegLeaves += vegLeaves;
+        st.plannedLeafCount += vegLeaves;
+        st.laVegPlan += leafCountToExpectedLA(cfg, vegLeaves);
+      }
+      return;
+    }
+
+    int legacyLeaves = (int) Math.round(((double) nodesForLA(cfg, b)) * Math.max(1.0, cfg.leavesPerNode));
+    st.nBudVegetative++;
+    st.plannedVegLeaves += legacyLeaves;
+    st.plannedLeafCount += legacyLeaves;
+    st.laVegPlan += leafCountToExpectedLA(cfg, legacyLeaves);
+  }
+
+  static double laOfBud(BudPlannerConfig.Cfg cfg, BudService b) {
+    return expectedLeafAreaFromBudPlan(cfg, b);
+  }
+
+  static double expectedLeafAreaFromBudPlan(BudPlannerConfig.Cfg cfg, BudService b) {
+    if (cfg == null || b == null) return 0.0;
+
+    if (b instanceof BudAppleService) {
+      BudAppleService ba = (BudAppleService) b;
+      int expectedLeaves = expectedLeafCountFromBudPlan(cfg, ba);
+      return leafCountToExpectedLA(cfg, expectedLeaves);
+    }
+
+    int nodes = nodesForLA(cfg, b);
+    return nodes * cfg.leavesPerNode * cfg.meanLeafArea_m2 * cfg.expectedPushFrac;
+  }
+
+  static double leafCountToExpectedLA(BudPlannerConfig.Cfg cfg, int expectedLeaves) {
+    if (cfg == null || expectedLeaves <= 0) return 0.0;
+    return ((double) expectedLeaves) * cfg.meanLeafArea_m2 * cfg.expectedPushFrac;
+  }
+
+  static int expectedLeafCountFromBudPlan(BudPlannerConfig.Cfg cfg, BudAppleService ba) {
+    if (ba == null) return 0;
+
+    if (ba.budType == 2) {
+      return expectedRosetteLeafCountFromBudPlan(ba) + expectedBourseLeafCountFromBudPlan(ba);
+    }
+
+    return expectedLeafCountFromShootPlanFields(ba);
+  }
+
+  static int expectedRosetteLeafCountFromBudPlan(BudAppleService ba) {
+    if (ba == null) return 0;
+    int rosette = 0;
+    try {
+      rosette = ba.rosetteLeafTarget;
+    } catch (Throwable t) {
+      rosette = 0;
+    }
+    return Math.max(0, rosette);
+  }
+
+  static int expectedBourseLeafCountFromBudPlan(BudAppleService ba) {
+    if (ba == null) return 0;
+    int bourseLeaves = 0;
+
+    AppleShootPlan[] boursePlans = null;
+    try {
+      boursePlans = ba.bourseShootPlans;
+    } catch (Throwable t) {
+      boursePlans = null;
+    }
+    if (boursePlans != null) {
+      for (int i = 0; i < boursePlans.length; i++) {
+        AppleShootPlan cp = boursePlans[i];
+        if (cp == null) continue;
+        bourseLeaves += expectedLeafCountFromShootPlan(cp);
+      }
+      if (bourseLeaves > 0) return bourseLeaves;
+    }
+
+    int[] bourseNodesLocal = null;
+    try {
+      bourseNodesLocal = ba.bourseNodes;
+    } catch (Throwable t) {
+      bourseNodesLocal = null;
+    }
+    if (bourseNodesLocal != null) {
+      for (int i = 0; i < bourseNodesLocal.length; i++) {
+        if (bourseNodesLocal[i] > 0) bourseLeaves += bourseNodesLocal[i];
+      }
+    }
+    return Math.max(0, bourseLeaves);
+  }
+
+  static int expectedLeafCountFromShootPlan(AppleShootPlan p) {
+    if (p == null) return 0;
+
+    if (p.nodeAllocation != null && p.nodeAllocation.length > 0) {
+      int sum = 0;
+      for (int i = 0; i < p.nodeAllocation.length; i++) {
+        if (p.nodeAllocation[i] > 0) sum += p.nodeAllocation[i];
+      }
+      if (sum > 0) return sum;
+    }
+
+    return Math.max(0, p.totalNodes);
+  }
+
+  static int expectedLeafCountFromShootPlanFields(BudAppleService ba) {
+    if (ba == null) return 0;
+
+    int[] allocation = null;
+    try {
+      allocation = ba.nodeAllocation;
+    } catch (Throwable t) {
+      allocation = null;
+    }
+    if (allocation != null && allocation.length > 0) {
+      int sum = 0;
+      for (int i = 0; i < allocation.length; i++) {
+        if (allocation[i] > 0) sum += allocation[i];
+      }
+      if (sum > 0) return sum;
+    }
+
+    int total = 0;
+    try {
+      total = ba.totalNodes;
+    } catch (Throwable t) {
+      total = 0;
+    }
+    return Math.max(0, total);
+  }
+
+  static int nodesForLA(BudPlannerConfig.Cfg cfg, BudService b) {
+    int nodes = 0;
+
+    if (b instanceof BudAppleService) {
+      BudAppleService ba = (BudAppleService) b;
+
+      int tn = 0;
+      try {
+        tn = ba.totalNodes;
+      } catch (Throwable t) {
+        tn = 0;
+      }
+
+      if (tn > 0) {
+        nodes = tn;
+      } else if (ba.nodeAllocation != null && ba.nodeAllocation.length > 0) {
+        int sum = 0;
+        for (int v : ba.nodeAllocation)
+          if (v > 0)
+            sum += v;
+        nodes = (sum > 0) ? sum : 0;
+      }
+    }
+
+    if (nodes <= 0)
+      nodes = (int) Math.round(chooseNodes(cfg));
+
+    return nodes;
+  }
+
+  static int expectedFruitOfFloral(BudPlannerConfig.Cfg cfg, BudAppleService ba) {
+    int flowers = (ba.flowerNumber > 0) ? ba.flowerNumber : cfg.flowersPerFloral;
+    double exp = ((double) flowers) * cfg.fruitSetProb;
+    int fruitHere = (int) Math.round(Math.max(1.0, Math.min(exp, (double) cfg.maxFruitsPerBud)));
+    return fruitHere;
+  }
+
+  // -------------------------- Preflight helpers ------------------------------
+  static double pickPrePruneTargetOrFallback(BudPlannerConfig.Cfg cfg, BudStats st) {
+    if (cfg.expectedPrePruneLA_m2 > 0.0)
+      return cfg.expectedPrePruneLA_m2;
+    return Math.max(st.laExisting, 0.0);
+  }
+
+  static double[] histoEligibleSitesByRank_OrderMin(BudPlannerConfig.Cfg cfg, int N, int minRank, int orderMin){
+    double[] h = new double[N];
+    for (Internode itn : (* Internode *)){
+      if (!eligible_OrderMin(itn, cfg, cfg.minBranchGap, Math.max(minRank, cfg.startNodeMin),
+                             (cfg.mainAxisOnly==1)?orderMin:1)) continue;
+      int r=Math.max(1, Math.min(N, itn.rank));
+      h[r-1]+=1.0;
+    }
+    smooth3(h);
+    return h;
+  }
+
+
+  static GammaParams fitGammaToEligible(double[] target, GammaParams g0, int N, double dK, double dT) {
+    double[] t = normalizeTo1(target);
+    double bestK = g0.k, bestT = g0.theta;
+    int bestR0 = g0.r0;
+    double best = Double.POSITIVE_INFINITY;
+    double[] K = new double[] { g0.k - dK, g0.k, g0.k + dK };
+    double[] T = new double[] { g0.theta - dT, g0.theta, g0.theta + dT };
+    int[] R = new int[] { g0.r0 };
+    for (int i = 0; i < K.length; i++) {
+      for (int j = 0; j < T.length; j++) {
+        for (int r = 0; r < R.length; r++) {
+          double[] w = gammaWeightsDiscrete(N, K[i], T[j], R[r]);
+          double e = sse(t, normalizeTo1(w));
+          if (e < best) {
+            best = e;
+            bestK = K[i];
+            bestT = T[j];
+            bestR0 = R[r];
+          }
+        }
+      }
+    }
+    return new GammaParams(bestK, bestT, bestR0);
+  }
+
+  static double estimateLeafAreaFast_OrderMin(BudPlannerConfig.Cfg cfg){
+    int Nsites=0;
+    for (Internode itn : (* Internode *)){
+      if (!eligible_OrderMin(itn, cfg, cfg.minBranchGap, cfg.startNodeMin,
+                             (cfg.mainAxisOnly==1)?cfg.placementOrderMin:1)) continue;
+      Nsites++;
+    }
+    return ((double) Nsites) * perNewBudExpectedLeafArea(cfg);
+  }
+  
+  public static double estimateLeafAreaFast_OrderMin_T1(BudPlannerConfig.Cfg cfg) {
+
+    double LA = 0.0;
+    int nBuds = 0;
+    for (BudService b : (* BudService *)) {
+      if (b == null) continue;
+      nBuds++;
+      LA += laOfBud(cfg, b);
+    }
+
+    println("[BudPlannerT0] estimateLeafAreaFast_OrderMin: "
+          + " perNewBudLA=" + perNewBudExpectedLeafArea(cfg)
+          + " nBuds=" + nBuds
+          + " → LA_sim0=" + LA);
+
+    return LA;
+}
+
+
+  static double perNewBudExpectedLeafArea(BudPlannerConfig.Cfg cfg) {
+    double vegLeaves = chooseNodes(cfg);
+
+    double minRosette = (double) mixedBudRosetteLeafMin;
+    double maxRosette = (double) mixedBudRosetteLeafMax;
+    if (maxRosette < minRosette) maxRosette = minRosette;
+    double rosetteMean = 0.5 * (minRosette + maxRosette);
+
+    double bourseMeanN = mixedBudBourseP1 + 2.0 * mixedBudBourseP2;
+    if (bourseMeanN < 0.0) bourseMeanN = 0.0;
+
+    double floralLeaves = rosetteMean + (bourseMeanN * vegLeaves);
+    double floralFrac = cfg.fBudFloral;
+    if (Double.isNaN(floralFrac) || Double.isInfinite(floralFrac)) floralFrac = 0.0;
+    floralFrac = Math.max(0.0, Math.min(1.0, floralFrac));
+
+    double expectedLeaves = floralFrac * floralLeaves + (1.0 - floralFrac) * vegLeaves;
+    return expectedLeaves * cfg.meanLeafArea_m2 * cfg.expectedPushFrac;
+  }
+
+  static double chooseNodes(BudPlannerConfig.Cfg cfg) {
+    double mean = cfg.gammaShape * cfg.gammaScale;
+    if (cfg.nodesMode == null || BudPlannerConfig.NODES_MODE_MEAN.equals(cfg.nodesMode))
+      return mean;
+    return mean;
+  }
+
+  // ----------------------------- Math & misc ---------------------------------
+  static double[] gammaWeightsDiscrete(int N, double k, double theta, int r0) {
+    double[] w = new double[N];
+    double s = 0.0;
+    for (int i = 0; i < N; i++) {
+      int r = i + 1 + r0;
+      if (r < 1 || r > N) {
+        w[i] = 0.0;
+        continue;
+      }
+      double v = Math.pow((double) r, k - 1.0) * Math.exp(-(double) r / theta);
+      w[i] = v;
+      s += v;
+    }
+    if (s > 0.0)
+      for (int i = 0; i < N; i++)
+        w[i] /= s;
+    return w;
+  }
+
+  static void scaleToSum(double[] x, double S) {
+    double s = sum(x);
+    if (s <= 0.0)
+      return;
+    double f = S / s;
+    for (int i = 0; i < x.length; i++)
+      x[i] *= f;
+  }
+
+  static double[] normalizeTo1(double[] x) {
+    double s = sum(x);
+    double[] y = new double[x.length];
+    if (s <= 0.0)
+      return y;
+    for (int i = 0; i < x.length; i++)
+      y[i] = x[i] / s;
+    return y;
+  }
+
+  static void smooth3(double[] a) {
+    if (a.length < 3)
+      return;
+    double[] c = new double[a.length];
+    for (int i = 0; i < a.length; i++) {
+      double v = a[i];
+      if (i > 0)
+        v += a[i - 1];
+      if (i < a.length - 1)
+        v += a[i + 1];
+      c[i] = v / ((i > 0 && i < a.length - 1) ? 3.0 : 2.0);
+    }
+    for (int i = 0; i < a.length; i++)
+      a[i] = c[i];
+  }
+
+  static double sum(double[] x) {
+    double s = 0.0;
+    for (int i = 0; i < x.length; i++)
+      s += x[i];
+    return s;
+  }
+
+  static int sumIntMap(java.util.Map m) {
+    int s = 0;
+    java.util.Iterator it = m.values().iterator();
+    while (it.hasNext()) {
+      Integer v = (Integer) it.next();
+      s += (v == null ? 0 : v.intValue());
+    }
+    return s;
+  }
+
+  static Object nzIntMap(java.util.Map m, Object key, Object def) {
+    Object v = m.get(key);
+    return (v == null ? def : v);
+  }
+
+  static double sse(double[] a, double[] b) {
+    int n = Math.min(a.length, b.length);
+    double e = 0.0;
+    for (int i = 0; i < n; i++) {
+      double d = a[i] - b[i];
+      e += d * d;
+    }
+    return e;
+  }
+
+  static double corr(double[] a, double[] b) {
+    int n = Math.min(a.length, b.length);
+    double ma = mean(a), mb = mean(b);
+    double num = 0.0, da = 0.0, db = 0.0;
+    for (int i = 0; i < n; i++) {
+      double xa = a[i] - ma, xb = b[i] - mb;
+      num += xa * xb;
+      da += xa * xa;
+      db += xb * xb;
+    }
+    double den = Math.sqrt(da * db);
+    return (den > 0.0) ? (num / den) : 0.0;
+  }
+
+  static double mean(double[] x) {
+    return sum(x) / Math.max(1, x.length);
+  }
+
+  static double clamp01(double x) {
+    if (x < 0.0)
+      return 0.0;
+    if (x > 1.0)
+      return 1.0;
+    return x;
+  }
+
+  static double clamp(double x, double lo, double hi) {
+    if (x < lo)
+      return lo;
+    if (x > hi)
+      return hi;
+    return x;
+  }
+
+  static double round3(double v) {
+    return Math.round(v * 1000.0) / 1000.0;
+  }
+
+  static double round5(double v) {
+    return Math.round(v * 100000.0) / 100000.0;
+  }
+
+  static int abs(int x) {
+    return (x < 0) ? -x : x;
+  }
+
+  static int    maxRankOnMainAxis(){ int m=1; for (Internode itn : (* Internode *)) if (itn.order==1 && itn.rank>m) m=itn.rank; return m; }
+
+  static double nz(double v, double def) {
+    return (v > 0.0) ? v : def;
+  }
+
+  static int nzi(int v, int def) {
+    return (v > 0) ? v : def;
+  }
+
+  /**
+   * budTargetMode:
+   * 0 based on budNumberPerMeter, only remove (no add)
+   *   with priority on dense zones, close-neighbor buds, and non-terminal sites
+   * 1 based on budNumberPerMeter, local remove/add rebalance in sparse/crowded zones (fast)
+   * 2 based on expected leaf area pre-prune; capped by fruit targets (pre-prune)
+   * (no density step)
+   * 3 constrained budNumberPerMeter first (remove-only), then LA & fruit
+   *  4 whole-tree total bud target per tree (remove + add anywhere in management domain)
+   *  5 grid-based bud targets (remove + add per grid cell, respecting RAW fruit floor)
+   *  6 legacy density+spacing mode (includes expensive per-bud spacing cleanup)
+   *  8 per-upright 3-region density mode (bottom/middle/top; remove+add in-region)
+   */
+
+	static String describebudPlannerMode(int opt) {
+	  switch (opt) {
+		case 0:
+		  return "density-only prioritized remove (dense/close/non-terminal)";
+		case 1:
+		  return "density remove+add local rebalance (fast)";
+		case 2:
+		  return "leaf-area target (capped by RAW fruit; no density step)";
+		case 3:
+		  return "density remove-only prepass, then LA & fruit";
+		case 4:
+		  return "whole-tree total bud target (remove+add on tree)";
+		case 5:
+		  return "grid-based bud targets (remove+add per cell, fruit floor protected)";
+		case 6:
+		  return "legacy density+spacing (slow; per-bud spacing cleanup)";
+		case 8:
+		  return "upright 3-region density (bottom/middle/top; remove+add per region)";
+		default:
+		  return "unknown";
+	  }
+	}
+
+  // ------------------------------- XL helpers --------------------------------
+  static void removeBudXL(BudService b){
+    try{
+      [
+        b ==> ;
+      ];
+    } catch(Throwable t){}
+  }
+
+  static void safeDeleteBud(BudService b) {
+    safeDeleteBud((BudPlannerConfig.Cfg)null, b);
+  }
+
+  // ----------------------- Buds/m upright-only ops ---------------------------
+  // Rank uprights by low LA/RAW, then remove RANDOM buds within each upright.
+  // Floral removals respect the fruit floor; veg/floral are not prioritized.
+/**
+ * Enforce buds-per-meter density on uprights.
+ *
+ * <p>Computes per-upright linear extent (meters), bins buds/sites by meter,
+ * and performs:
+ * <ul>
+ *   <li><b>Removal</b> if surplus: remove on uprights only; floral removals are skipped
+ *       if they would drop RAW fruit below {@code minRawFruitsAfter}.</li>
+ *   <li><b>Addition</b> if deficit: add vegetative buds on uprights in staged passes
+ *       (strict → relaxed spacing → allow multi-bud on node). New buds attach via
+ *       {@code [ h:cand ==> h [b]; ]}.</li>
+ * </ul>
+ *
+ * <p>Used standalone in option 0 and as Phase-1 in option 2.
+ *
+ * @param cfg       configuration
+ * @param budsPerM  target buds per meter
+ * @param minRawFruitsAfter minimum RAW fruit to protect during removal
+ */
+
+static void removeBudsPerMeter_OnUprights(BudPlannerConfig.Cfg cfg, int removeCount,
+                                          boolean protectRawFruits, int minRawAfter){
+  if (removeCount <= 0) return;
+
+  // Tally per-upright LA, RAW fruit, and collect random candidates
+  java.util.Map laByUp   = new java.util.HashMap(); // upKey -> Double (LA)
+  java.util.Map rawByUp  = new java.util.HashMap(); // upKey -> Integer (RAW fruit)
+  java.util.Map candByUp = new java.util.HashMap(); // upKey -> List<Cand>
+  int globalRaw = 0;
+
+  for (BudService b : (* BudService *)){
+    Internode site = first((* b (<--)+ i:Internode *));
+    if (site == null) continue;
+    Object upKey = uprightKey(site, cfg);       // anchor to the upright root
+
+    // LA per bud (for upright ranking)
+    double la = laOfBud(cfg, b);
+    Double curLA = (Double) laByUp.get(upKey);
+    laByUp.put(upKey, Double.valueOf((curLA==null?0.0:curLA.doubleValue()) + la));
+
+    // Build per-upright candidate list
+    java.util.List L = (java.util.List) candByUp.get(upKey);
+    if (L == null){ L = new java.util.ArrayList(); candByUp.put(upKey, L); }
+
+    boolean floral = (b instanceof BudAppleService) && ((BudAppleService)b).budType==2;
+    int fexp = 0;
+    if (floral){
+      fexp = expectedFruitOfFloral(cfg, (BudAppleService)b);
+      Integer cur = (Integer) rawByUp.get(upKey);
+      rawByUp.put(upKey, Integer.valueOf((cur==null?0:cur.intValue()) + fexp));
+      globalRaw += fexp;
+    }
+    L.add(new Cand(b, floral, fexp));
+  }
+
+  // Rank uprights by LA / max(1, RAW) ascending (remove from "leafy but fruit-light" first)
+  java.util.List ups = new java.util.ArrayList();
+  java.util.Iterator it = laByUp.keySet().iterator();
+  while (it.hasNext()){
+    Object key = it.next();
+    double la = ((Double)laByUp.get(key)).doubleValue();
+    int raw   = ((Integer) nzIntMap(rawByUp, key, Integer.valueOf(0))).intValue();
+    double ratio = la / Math.max(1, raw);
+    ups.add(new UprightScore(key, la, raw, ratio));
+  }
+  java.util.Collections.sort(ups, new java.util.Comparator(){
+    public int compare(Object a, Object b){
+      UprightScore x=(UprightScore)a, y=(UprightScore)b;
+      if (x.ratio < y.ratio) return -1;
+      if (x.ratio > y.ratio) return 1;
+      return 0;
+    }
+  });
+
+  // Remove randomly within each upright (veg/floral mixed), respecting fruit floor
+  int removed = 0, skippedFloralDueToFloor = 0;
+  for (int i=0; i<ups.size() && removed < removeCount; i++){
+    Object upKey = ((UprightScore)ups.get(i)).key;
+    java.util.List cands = (java.util.List) candByUp.get(upKey);
+    if (cands == null || cands.isEmpty()) continue;
+
+    try { java.util.Collections.shuffle(cands, _rng); } catch(Throwable t){}
+
+    for (int j=0; j<cands.size() && removed < removeCount; j++){
+      Cand c = (Cand) cands.get(j);
+      if (c.isFloral && protectRawFruits && (globalRaw - c.fexp) < minRawAfter) {
+        skippedFloralDueToFloor++; 
+        continue; // keep fruit floor
+      }
+      safeDeleteBud(c.b);
+      if (c.isFloral) globalRaw -= c.fexp;
+      removed++;
+    }
+  }
+
+  if (!cfg.dryRun) derive();
+
+
+  if (protectRawFruits && removed < removeCount && globalRaw <= minRawAfter) {
+    println("[BudPlanner] Buds/m RANDOM-IN-UPRIGHT REMOVE: removed=" + removed
+      + " | hit fruit floor; RAW=" + globalRaw
+      + " | skippedFloralDueToFloor=" + skippedFloralDueToFloor);
+  } else {
+    println("[BudPlanner] Buds/m RANDOM-IN-UPRIGHT REMOVE: removed=" + removed
+      + " | RAW fruits after≈" + globalRaw
+      + " | skippedFloralDueToFloor=" + skippedFloralDueToFloor);
+  }
+}
+
+  // Before: orderMin = cfg.placementOrderMin (which was 4 here)
+  // After: passOrderMin = min(placementOrderMin, uprightOrder) => 3
+  static void addBudsPerMeter_OnUprights(BudPlannerConfig.Cfg cfg, int addCount) {
+    extraVegToAdd = addCount; // vegetative by default for spacing
+    extraFloralToAdd = 0; // don’t inflate fruit in density-only mode
+
+    int placedBefore = placedVeg;
+
+    int passOrderMin = (cfg.mainAxisOnly == 1)
+        ? Math.min(cfg.placementOrderMin, cfg.uprightOrder) // => 3 in your run
+        : 1;
+
+    // PASS 1: start at rank 1 (your request), standard gap
+    runPlacementPassEx(cfg,
+        /* gap= */cfg.minBranchGap,
+        /* startNodeMin= */1,
+        passOrderMin,
+        /* allowMultiFruit= */false,
+        /* allowMultiOnNode= */false,
+        "buds/m-upright-add");
+
+    // PASS 2: relax gap by 1, still start at rank 1
+    if (extraVegToAdd > 0) {
+      runPlacementPassEx(cfg,
+          /* gap= */Math.max(0, cfg.minBranchGap - 1),
+          /* startNodeMin= */1,
+          passOrderMin,
+          /* allowMultiFruit= */false,
+          /* allowMultiOnNode= */false,
+          "buds/m-upright-add-relax");
+    }
+
+    // PASS 3: if needed, allow a second bud on the same internode (gap=0)
+    if (extraVegToAdd > 0) {
+      runPlacementPassEx(cfg,
+          /* gap= */0,
+          /* startNodeMin= */1,
+          passOrderMin,
+          /* allowMultiFruit= */false,
+          /* allowMultiOnNode= */true,
+          "buds/m-upright-add-multiOnNode");
+    }
+
+    if (!cfg.dryRun) derive();
+
+    println("[BudPlanner] Buds/m ADD upright-only: added≈" + (placedVeg - placedBefore));
+  }
+
+  // --- Safe field readers (fallbacks) ---
+  static Double getDoubleField(Object obj, String name) {
+    try {
+      if (obj == null)
+        return null;
+      java.lang.reflect.Field f = obj.getClass().getField(name);
+      Object v = f.get(obj);
+      if (v instanceof Number)
+        return Double.valueOf(((Number) v).doubleValue());
+      if (v instanceof String)
+        return Double.valueOf(Double.parseDouble((String) v));
+    } catch (Throwable t) {
+      /* ignore */ }
+    return null;
+  }
+
+  static Integer getIntField(Object obj, String name) {
+    try {
+      if (obj == null)
+        return null;
+      java.lang.reflect.Field f = obj.getClass().getField(name);
+      Object v = f.get(obj);
+      if (v instanceof Number)
+        return Integer.valueOf(((Number) v).intValue());
+      if (v instanceof String)
+        return Integer.valueOf(Integer.parseInt((String) v));
+    } catch (Throwable t) {
+      /* ignore */ }
+    return null;
+  }
+
+  // eligibility that can optionally allow multiple buds on the same internode
+/**
+ * Extended order/rank eligibility that can optionally allow multiple buds on the same node.
+ */
+static boolean eligible_OrderMinEx(Internode itn, BudPlannerConfig.Cfg cfg, int gap, int startMin, int orderMin, boolean allowMultiOnNode){
+  if (itn == null) return false;
+  // keep terminal check as-is; if you want terminals too, comment the next two lines:
+  if (isTerminal(itn)) return false;
+  if (itn.rank < startMin) return false;
+
+  // allow or forbid a second bud on the same internode
+  if (!allowMultiOnNode){
+    if (firstBudOnInternodeSite(itn) != null) return false;
+  }
+
+  if (!respectGapOnAxisCustom(itn, gap)) return false;
+  if (cfg.mainAxisOnly == 1 && itn.order < orderMin) return false;
+  if (!respectMinBudSpacingOnAxis(itn, cfg)) return false;
+  return true;
+}
+
+static boolean runPlacementPassEx(BudPlannerConfig.Cfg cfg, int curGap, int curStart, int orderMin,
+                                  boolean allowMultiFruit, boolean allowMultiOnNode, String label){
+  int placedThisPass = 0;
+  int[] qc = new int[]{0,0,0,0};
+  if (!allowMultiOnNode) {
+    java.util.List cands = collectAddCandidates_TerminalOrderDesc(cfg, curGap, curStart, orderMin, /*allowMultiOnNode=*/false);
+    for (int ci = 0; ci < cands.size() && (extraFloralToAdd > 0 || extraVegToAdd > 0); ci++) {
+      Internode cand = (Internode) cands.get(ci);
+      if (!eligible_AddTerminalOnly(cand, cfg, curGap, curStart, orderMin, false)) continue;
+
+      Internode attachSite = resolvePlannerAttachSite(
+          cfg, cand, curGap, curStart, orderMin, false);
+      if (attachSite == null) continue;
+
+      attempts++;
+
+      boolean placeFloral = false;
+      if (fruitsRemainingToAllocate > 0 && extraFloralToAdd > 0) {
+        Object upKey = uprightKey(attachSite, cfg);
+        int curF = getUprightFruit(upKey);
+        if (curF < cfg.maxFruitsPerUpright) placeFloral = true;
+      } else if (extraFloralToAdd > 0) {
+        Object upKey = uprightKey(attachSite, cfg);
+        int curF = getUprightFruit(upKey);
+        if (curF < cfg.maxFruitsPerUpright) placeFloral = (_rng.nextDouble() < cfg.fBudFloral);
+      }
+
+      BudService b = new BudCreator(species).createBud();
+      if (b instanceof BudAppleService) {
+        BudAppleService ba = (BudAppleService) b;
+        ba.initiate(attachSite, 0f);
+
+        if (placeFloral) {
+          ba.budType = 2;
+          int upRemain     = cfg.maxFruitsPerUpright - getUprightFruit(uprightKey(attachSite, cfg));
+          int globalRemain = fruitsRemainingToAllocate;
+          int targetHere   = Math.max(1, Math.min(cfg.maxFruitsPerBud, (int)Math.round(cfg.fruitsPerFloralExp)));
+          int fruitsForThisBud = allowMultiFruit ? Math.max(1, Math.min(targetHere, Math.min(globalRemain, upRemain))) : 1;
+          ba.flowerNumber = sampleFlowerNumberPerFloral(cfg.flowersPerFloral);
+          incUprightFruit(uprightKey(attachSite, cfg), fruitsForThisBud);
+          fruitsRemainingToAllocate -= fruitsForThisBud;
+          if (fruitsRemainingToAllocate < 0) fruitsRemainingToAllocate = 0;
+          extraFloralToAdd--; placedFloral++; placedThisPass++;
+        } else {
+          ba.budType = 1; ba.flowerNumber = 0;
+          extraVegToAdd--; placedVeg++; placedThisPass++;
+        }
+      } else {
+        b.initiate(attachSite, 0f);
+        if (placeFloral) { extraFloralToAdd--; placedFloral++; placedThisPass++; }
+        else             { extraVegToAdd--;    placedVeg++;    placedThisPass++; }
+      }
+
+      attachBudIfLive(cfg, attachSite, b);
+      addSiteQcAcc(attachSite, cfg, qc);
+    }
+  } else {
+    java.util.List cands = collectAddCandidates_TerminalOrderDesc(cfg, curGap, curStart, orderMin, /*allowMultiOnNode=*/true);
+    if (cands != null && !cands.isEmpty()){
+      int safety = 0;
+      int pending = Math.max(0, extraFloralToAdd + extraVegToAdd);
+      int safetyCap = Math.min(20000, Math.max(1000, pending + cands.size() * 4));
+      int passNoProgress = 0;
+      int idx = 0;
+      int n = cands.size();
+      while ((extraFloralToAdd > 0 || extraVegToAdd > 0) && safety++ < safetyCap && passNoProgress < n) {
+        Internode cand = (Internode) cands.get(idx);
+        idx++;
+        if (idx >= n) idx = 0;
+        if (!eligible_AddTerminalOnly(cand, cfg, curGap, curStart, orderMin, true)){
+          passNoProgress++;
+          continue;
+        }
+
+        Internode attachSite = resolvePlannerAttachSite(
+            cfg, cand, curGap, curStart, orderMin, true);
+        if (attachSite == null){
+          passNoProgress++;
+          continue;
+        }
+
+        attempts++;
+
+        boolean placeFloral = false;
+        if (fruitsRemainingToAllocate > 0 && extraFloralToAdd > 0) {
+          Object upKey = uprightKey(attachSite, cfg);
+          int curF = getUprightFruit(upKey);
+          if (curF < cfg.maxFruitsPerUpright) placeFloral = true;
+        } else if (extraFloralToAdd > 0) {
+          Object upKey = uprightKey(attachSite, cfg);
+          int curF = getUprightFruit(upKey);
+          if (curF < cfg.maxFruitsPerUpright) placeFloral = (_rng.nextDouble() < cfg.fBudFloral);
+        }
+
+        BudService b = new BudCreator(species).createBud();
+        if (b instanceof BudAppleService) {
+          BudAppleService ba = (BudAppleService) b;
+          ba.initiate(attachSite, 0f);
+
+          if (placeFloral) {
+            ba.budType = 2;
+            int upRemain     = cfg.maxFruitsPerUpright - getUprightFruit(uprightKey(attachSite, cfg));
+            int globalRemain = fruitsRemainingToAllocate;
+            int targetHere   = Math.max(1, Math.min(cfg.maxFruitsPerBud, (int)Math.round(cfg.fruitsPerFloralExp)));
+            int fruitsForThisBud = allowMultiFruit ? Math.max(1, Math.min(targetHere, Math.min(globalRemain, upRemain))) : 1;
+            ba.flowerNumber = sampleFlowerNumberPerFloral(cfg.flowersPerFloral);
+            incUprightFruit(uprightKey(attachSite, cfg), fruitsForThisBud);
+            fruitsRemainingToAllocate -= fruitsForThisBud;
+            if (fruitsRemainingToAllocate < 0) fruitsRemainingToAllocate = 0;
+            extraFloralToAdd--; placedFloral++; placedThisPass++;
+          } else {
+            ba.budType = 1; ba.flowerNumber = 0;
+            extraVegToAdd--; placedVeg++; placedThisPass++;
+          }
+        } else {
+          b.initiate(attachSite, 0f);
+          if (placeFloral) { extraFloralToAdd--; placedFloral++; placedThisPass++; }
+          else             { extraVegToAdd--;    placedVeg++;    placedThisPass++; }
+        }
+
+        attachBudIfLive(cfg, attachSite, b);
+        addSiteQcAcc(attachSite, cfg, qc);
+        passNoProgress = 0;
+      }
+    }
+  }
+
+  printAddSiteQc(label, qc);
+  println("[BudPlanner] pass: " + label
+    + " | gap=" + curGap
+    + " | startNodeMin=" + curStart
+    + " | order>= " + (cfg.mainAxisOnly==1?orderMin:1)
+    + " | placed=" + placedThisPass
+    + " | remaining floral=" + extraFloralToAdd + ", veg=" + extraVegToAdd
+    + ", fruitsRemain=" + fruitsRemainingToAllocate);
+
+  return (extraFloralToAdd > 0 || extraVegToAdd > 0);
+}
+
+
+  // ---- Final consistency banner (uses global WARN_20 / WARN_30) ----
+  static void finalConsistencyBanner(BudPlannerConfig.Cfg cfg, double plannedPrePruneLA) {
+    // Re-scan to get current LA and RAW
+    BudStats st = scanExisting(cfg);
+    double finalLA = st.laExisting;
+    int finalRAW = st.fruitsRaw;
+
+    // Density: mode 8 must use the same managed long-upright regions as the planner.
+    boolean uprightRegionMode = (cfg.budTargetMode == 8);
+    java.util.List ups = uprightRegionMode
+        ? uprightRegionLengthTargets(cfg, cfg.budNumberPerMeter)
+        : uprightLengthTargets(cfg, cfg.budNumberPerMeter);
+    int targetBudsSum = 0, finalOnUpright = 0;
+    double worstUprAbsRel = -1.0;
+    Internode worstUpr = null;
+    int worstUprTarget = 0, worstUprNow = 0;
+
+    for (int i = 0; i < ups.size(); i++) {
+      UprightLenSnap u = (UprightLenSnap) ups.get(i);
+      targetBudsSum += u.target;
+      finalOnUpright += u.budsNow;
+      double denom = Math.max(1.0, (double) u.target);
+      double rel = Math.abs(((double) u.budsNow - (double) u.target) / denom);
+      u.relErr = rel;
+      if (rel > worstUprAbsRel) {
+        worstUprAbsRel = rel;
+        worstUpr = u.root;
+        worstUprTarget = u.target;
+        worstUprNow = u.budsNow;
+      }
+    }
+
+    ZoneWorst zw = uprightRegionMode
+        ? computeWorstUprightRegionDeviation(cfg, cfg.budNumberPerMeter)
+        : computeWorstZoneDeviation(cfg, cfg.budNumberPerMeter);
+
+    // Relative errors
+    double laRel = (plannedPrePruneLA > 0.0) ? Math.abs(finalLA - plannedPrePruneLA) / plannedPrePruneLA : 0.0;
+    double rawRel = (cfg.expectedFruitNumber > 0)
+        ? Math.abs(finalRAW - cfg.expectedFruitNumber) / (double) cfg.expectedFruitNumber
+        : 0.0;
+    double denRel = (targetBudsSum > 0) ? Math.abs(finalOnUpright - targetBudsSum) / (double) targetBudsSum : 0.0;
+
+    // Find biggest dimension deviation
+    String worstDim = "LA";
+    double worstVal = laRel;
+    if (rawRel > worstVal) {
+      worstVal = rawRel;
+      worstDim = "RAW";
+    }
+    if (denRel > worstVal) {
+      worstVal = denRel;
+      worstDim = "DENSITY";
+    }
+
+    println("----------------------------------------------------------");
+    println("[BudPlanner] FINAL CONSISTENCY:");
+    println("[BudPlanner] management option:" + describebudPlannerMode(cfg.budTargetMode));
+    println("  LA   : planned=" + round3(plannedPrePruneLA) + "  final=" + round3(finalLA) + "  relΔ=" + round3(laRel));
+    println("  RAW  : target=" + cfg.expectedFruitNumber + "  final=" + finalRAW + "  relΔ=" + round3(rawRel));
+    println("  DENS : buds/m=" + cfg.budNumberPerMeter + "  targetBuds=" + targetBudsSum + "  finalOnUpright="
+        + finalOnUpright + "  relΔ=" + round3(denRel)
+        + (uprightRegionMode ? ("  managedUprights=" + ups.size()) : ""));
+
+    if (worstUpr != null) {
+      println("  Worst upright (density): target=" + worstUprTarget + "  final=" + worstUprNow
+          + "  relΔ=" + round3(worstUprAbsRel));
+    }
+    if (zw != null) {
+      println("  Worst zone (density): upr=" + idOf(zw.root) + " z=[" + round3(zw.zLo) + "," + round3(zw.zHi) + "]"
+          + " target=" + zw.target + " final=" + zw.now + " relΔ=" + round3(zw.rel));
+    }
+
+    // Thresholding
+    boolean warning = (worstVal >= WARN_20 && worstVal < WARN_30);
+    boolean critical = (worstVal >= WARN_30);
+
+    if (critical) {
+      println("[BudPlanner] CRITICAL: Final results deviate ≥ " + (int) (WARN_30 * 100) + "% from plan. (Worst="
+          + worstDim + ")");
+      println("[BudPlanner] STOP: Please re-check input settings (meanLeafArea_m2, leavesPerNode, expectedPushFrac,");
+      println("                        GAMMA_SHAPE/SCALE, FBUD_FLORAL, FLOWERS_PER_FLORAL, FRUIT_SET_PROB,");
+      println("                        ATTACH_START_NODE, MIN_BRANCH_GAP, MgmtPlacementOrder/UprightOrder, buds/m).");
+    } else if (warning) {
+      println("[BudPlanner] WARNING: Final results deviate ≥ " + (int) (WARN_20 * 100) + "% from plan. (Worst="
+          + worstDim + ") Consider tuning inputs.");
+    } else {
+      println("[BudPlanner] OK: Final results are within warning thresholds.");
+    }
+    println("----------------------------------------------------------");
+  }
+
+  // optional id/label helper for printing an internode succinctly
+  static String idOf(Object o) {
+    try {
+      return String.valueOf(System.identityHashCode(o));
+    } catch (Throwable t) {
+      return "?";
+    }
+  }
+
+  // ---------- Z helpers for buds-per-meter & consistency banner ----------
+
+  // Prefer tip (endZ) when present; fall back to base (z).
+  static double zBase(Organ itn) {
+    Double v = getDoubleField(itn, "z");
+    if (v == null)
+      v = getDoubleField(itn, "Z");
+    if (v == null)
+      v = getDoubleField(itn, "zCoord");
+    return (v != null) ? v.doubleValue() : 0.0;
+  }
+
+  static double zTip(Organ itn) {
+    Double v = getDoubleField(itn, "endZ");
+    if (v == null)
+      v = getDoubleField(itn, "tipZ");
+    if (v == null)
+      v = getDoubleField(itn, "Z_end");
+    if (v != null)
+      return v.doubleValue();
+    // fallback to base if no explicit tip field exists
+    return zBase(itn);
+  }
+
+
+/**
+ * Computes the total linear length used by buds-per-meter:
+ * the sum of Z-spans of each upright (order-root at cfg.uprightOrder).
+ * Also prints a diagnostic table (per upright span) and a split of buds
+ * on-uprights vs truly off-upright buds.
+ *
+ * @return sum of upright spans in meters (0.0 if none)
+ */
+static double computeTotalLinearMetersFromZ(BudPlannerConfig.Cfg cfg){
+  // keep coordinates fresh (guards zero-length glitches)
+  refresh3DForAllInternodes();
+
+  // Collect per-upright Z ranges
+  java.util.Map up2z = new java.util.HashMap(); // key: order-root Internode -> ZRange
+  double gMin = Double.POSITIVE_INFINITY, gMax = Double.NEGATIVE_INFINITY;
+
+  for (Internode itn : (* Internode *)){
+    double zb = zBase(itn), ze = zTip(itn);
+    if (zb < gMin) gMin = zb;
+    if (ze > gMax) gMax = ze;
+
+    // bucket by upright order-root
+    Internode root = orderRootKey(itn, cfg.uprightOrder);
+    ZRange zr = (ZRange) up2z.get(root);
+    if (zr == null){ zr = new ZRange(); up2z.put(root, zr); }
+    zr.add(zb, ze);
+  }
+
+  // Sum spans and print per-upright diagnostics (stable order not guaranteed)
+  double sum = 0.0; int idx = 0;
+  java.util.Iterator it = up2z.entrySet().iterator();
+  while (it.hasNext()){
+    java.util.Map.Entry e = (java.util.Map.Entry) it.next();
+    ZRange zr = (ZRange) e.getValue();
+    double s = zr.span();
+    sum += Math.max(0.0, s);
+    println("  Upright[" + (++idx) + "] span=" + round3(s) + " m (nInternodes=" + zr.n + ")");
+  }
+
+  // Buds split
+	// Buds split (use the same membership gate)
+	int onU = 0, offU = 0;
+	for (BudService b : (* BudService *)){
+	  Internode site = first((* b (<--)+ i:Internode *));
+	  if (site == null) { offU++; continue; }
+	  if (isOnUpright(site, cfg)) onU++; else offU++;
+	}
+
+  // Global span (for info only)
+  double gSpan = (gMin<=gMax) ? (gMax - gMin) : 0.0;
+  println("[BudPlanner] Z-SPAN: global minZ=" + round3(gMin) + " maxZ=" + round3(gMax) + " span=" + round3(gSpan) + " m");
+  println("[BudPlanner] Buds split: onUprights=" + onU + " | offUprights(reserved)=" + offU);
+
+  return sum; // meters (sum of per-upright spans)
+}
+
+  // ----- Zone math helpers (5 zones by default) -----
+
+ 
+  static double midZ(Internode itn) {
+    double a = zBase(itn), b = zTip(itn);
+    return 0.5 * (a + b);
+  }
+
+  static int zoneIndexForZ(double z, double uMin, double uMax) {
+    if (uMax <= uMin)
+      return 0;
+    double t = (z - uMin) / (uMax - uMin);
+    if (t <= 0.0)
+      return 0;
+    if (t >= 1.0)
+      return ZONES - 1;
+    int idx = (int) Math.floor(t * ZONES);
+    if (idx < 0)
+      idx = 0;
+    if (idx >= ZONES)
+      idx = ZONES - 1;
+    return idx;
+  }
+
+  static int zoneIndexForZCount(double z, double uMin, double uMax, int zoneCount) {
+    int n = (zoneCount > 0) ? zoneCount : 1;
+    if (uMax <= uMin) return Math.min(1, n - 1);
+    double t = (z - uMin) / (uMax - uMin);
+    if (t <= 0.0) return 0;
+    if (t >= 1.0) return n - 1;
+    int idx = (int) Math.floor(t * n);
+    if (idx < 0) idx = 0;
+    if (idx >= n) idx = n - 1;
+    return idx;
+  }
+
+static java.util.List computeZoneSnapshots(BudPlannerConfig.Cfg cfg, int budsPerM){
+  refresh3DForAllInternodes();
+
+  // per-uproot Z-span
+  java.util.Map up2min = new java.util.HashMap(); // root -> Double minZ
+  java.util.Map up2max = new java.util.HashMap(); // root -> Double maxZ
+  java.util.Map up2root= new java.util.HashMap(); // root -> root
+
+  for (Internode itn : (* Internode *)){
+    Internode root = orderRootKey(itn, cfg.uprightOrder);
+    Double mn = (Double) up2min.get(root);
+    Double mx = (Double) up2max.get(root);
+    double a = zBase(itn), b = zTip(itn);
+    double lo = (a<b)?a:b, hi = (a<b)?b:a;
+    if (mn == null || lo < mn.doubleValue()) up2min.put(root, Double.valueOf(lo));
+    if (mx == null || hi > mx.doubleValue()) up2max.put(root, Double.valueOf(hi));
+    up2root.put(root, root);
+  }
+
+  // seed zone objects
+  java.util.List zones = new java.util.ArrayList(); // List<ZoneSnap>
+  java.util.Iterator it = up2root.keySet().iterator();
+  while (it.hasNext()){
+    Internode root = (Internode) it.next();
+    double uMin = ((Double)up2min.get(root)).doubleValue();
+    double uMax = ((Double)up2max.get(root)).doubleValue();
+    double span = Math.max(0.0, uMax - uMin);
+    double dz = (span>0.0)? (span / (double)ZONES) : 0.0;
+
+    for (int zi=0; zi<ZONES; zi++){
+      double a = uMin + dz * zi;
+      double b = (zi==ZONES-1) ? uMax : (uMin + dz * (zi+1));
+      if (b < a) { double t=a; a=b; b=t; }
+      zones.add(new ZoneSnap(root, root, zi, a, b));
+    }
+  }
+
+  // count buds per zone
+  for (BudService b : (* BudService *)){
+    Internode site = first((* b (<--)+ i:Internode *));
+    if (site == null) continue;
+    Internode root = orderRootKey(site, cfg.uprightOrder);
+    Double uMinD = (Double) up2min.get(root);
+    Double uMaxD = (Double) up2max.get(root);
+    if (uMinD == null || uMaxD == null) continue;
+    int zi = zoneIndexForZ(midZ(site), uMinD.doubleValue(), uMaxD.doubleValue());
+
+    // find that zoneSnap quickly
+    for (int k=0;k<zones.size();k++){
+      ZoneSnap zs = (ZoneSnap) zones.get(k);
+      if (zs.root == root && zs.zoneIdx == zi){
+        zs.budsNow++;
+        break;
+      }
+    }
+  }
+
+  // set targets & deltas
+  for (int k=0;k<zones.size();k++){
+    ZoneSnap zs = (ZoneSnap) zones.get(k);
+    zs.target = (int) Math.round(zs.lenM * (double)budsPerM);
+    zs.delta  = zs.target - zs.budsNow;
+  }
+
+  return zones;
+}
+
+static java.util.List computeUprightRegionSnapshots(BudPlannerConfig.Cfg cfg, int budsPerM, int regionCount){
+  refresh3DForAllInternodes();
+  int nRegions = (regionCount > 0) ? regionCount : 3;
+  double eps = 1.0e-9;
+
+  java.util.Map up2min = new java.util.HashMap();
+  java.util.Map up2max = new java.util.HashMap();
+  java.util.Map up2root = new java.util.HashMap();
+  java.util.Map up2xsum = new java.util.HashMap();
+  java.util.Map up2count = new java.util.HashMap();
+  java.util.Map root2regions = new java.util.HashMap();
+
+  for (Internode itn : (* Internode *)) {
+    Internode root = orderRootKey(itn, cfg.uprightOrder);
+    if (root == null) continue;
+    Double mn = (Double) up2min.get(root);
+    Double mx = (Double) up2max.get(root);
+    Double xsum = (Double) up2xsum.get(root);
+    Integer n = (Integer) up2count.get(root);
+    double a = zBase(itn), b = zTip(itn);
+    double lo = (a < b) ? a : b;
+    double hi = (a < b) ? b : a;
+    if (mn == null || lo < mn.doubleValue()) up2min.put(root, Double.valueOf(lo));
+    if (mx == null || hi > mx.doubleValue()) up2max.put(root, Double.valueOf(hi));
+    up2xsum.put(root, Double.valueOf(((xsum != null) ? xsum.doubleValue() : 0.0) + xRowLocal(itn)));
+    up2count.put(root, Integer.valueOf(((n != null) ? n.intValue() : 0) + 1));
+    up2root.put(root, root);
+  }
+
+  java.util.List regions = new java.util.ArrayList();
+  java.util.List roots = new java.util.ArrayList();
+  java.util.Iterator it = up2root.keySet().iterator();
+  while (it.hasNext()) {
+    Internode root = (Internode) it.next();
+    UprightOrderSnap snap = new UprightOrderSnap();
+    snap.root = root;
+    snap.zMin = ((Double) up2min.get(root)).doubleValue();
+    snap.zMax = ((Double) up2max.get(root)).doubleValue();
+    if ((snap.zMax - snap.zMin) <= UPRIGHT_REGION_MIN_SPAN_M) continue;
+    Integer n = (Integer) up2count.get(root);
+    Double xsum = (Double) up2xsum.get(root);
+    snap.n = (n != null) ? n.intValue() : 0;
+    snap.xRow = (snap.n > 0 && xsum != null) ? (xsum.doubleValue() / snap.n) : xRowLocal(root);
+    roots.add(snap);
+  }
+
+  try {
+    java.util.Collections.sort(roots, new java.util.Comparator() {
+      public int compare(Object a, Object b) {
+        UprightOrderSnap x = (UprightOrderSnap) a;
+        UprightOrderSnap y = (UprightOrderSnap) b;
+        if (x.xRow < y.xRow) return -1;
+        if (x.xRow > y.xRow) return 1;
+        if (x.zMin < y.zMin) return -1;
+        if (x.zMin > y.zMin) return 1;
+        int hx = System.identityHashCode(x.root);
+        int hy = System.identityHashCode(y.root);
+        if (hx < hy) return -1;
+        if (hx > hy) return 1;
+        return 0;
+      }
+    });
+  } catch (Throwable t) {}
+
+  int ui;
+  for (ui = 0; ui < roots.size(); ui++) {
+    UprightOrderSnap snap = (UprightOrderSnap) roots.get(ui);
+    Internode root = snap.root;
+    double uMin = snap.zMin;
+    double uMax = snap.zMax;
+    double h = uMax - uMin;
+    double dz = h / (double) nRegions;
+    java.util.List rootRegions = new java.util.ArrayList();
+
+    int ri;
+    for (ri = 0; ri < nRegions; ri++) {
+      double a = (h > eps) ? (uMin + dz * ri) : uMin;
+      double b = (h > eps) ? ((ri == (nRegions - 1)) ? uMax : (uMin + dz * (ri + 1))) : uMax;
+      if (b < a) { double t = a; a = b; b = t; }
+      UprightRegionSnap rs = new UprightRegionSnap(root, root, ri, a, b);
+      rs.uprightIdx = ui;
+      rs.flatIdx = ui * nRegions + ri;
+      rs.xRow = snap.xRow;
+      rs.uprightZMin = uMin;
+      rs.uprightZMax = uMax;
+      regions.add(rs);
+      rootRegions.add(rs);
+    }
+    root2regions.put(root, rootRegions);
+  }
+
+  for (BudService b : (* BudService *)) {
+    Internode site = first((* b (<--)+ i:Internode *));
+    if (site == null) continue;
+    Internode root = orderRootKey(site, cfg.uprightOrder);
+    if (root == null) continue;
+    java.util.List rootRegions = (java.util.List) root2regions.get(root);
+    if (rootRegions == null || rootRegions.isEmpty()) continue;
+    UprightRegionSnap ref = (UprightRegionSnap) rootRegions.get(0);
+    int ri = zoneIndexForZCount(midZ(site), ref.uprightZMin, ref.uprightZMax, nRegions);
+    UprightRegionSnap rs = (UprightRegionSnap) rootRegions.get(ri);
+    rs.budsNow++;
+  }
+
+  int k;
+  for (k = 0; k < regions.size(); k++) {
+    UprightRegionSnap rs = (UprightRegionSnap) regions.get(k);
+    if (cfg.uprightRegionBudTargetsFlat != null && cfg.uprightRegionBudTargetsFlat.length > 0) {
+      if (rs.flatIdx < cfg.uprightRegionBudTargetsFlat.length) {
+        double raw = cfg.uprightRegionBudTargetsFlat[rs.flatIdx];
+        if (!(Double.isNaN(raw) || Double.isInfinite(raw) || raw < 0.0)) {
+          rs.target = (int) Math.round(raw);
+        }
+      }
+    } else {
+      rs.target = (int) Math.round(rs.lenM * (double) budsPerM);
+    }
+    rs.delta = (rs.target >= 0) ? (rs.target - rs.budsNow) : 0;
+  }
+
+  return regions;
+}
+
+/**
+ * Eligibility gate for terminal candidate adds within one upright and one vertical zone band.
+ */
+static boolean eligible_OnUprightInZone(Internode itn, BudPlannerConfig.Cfg cfg,
+                                        int gap, int startMin, int orderMin,
+                                        Internode uprightRoot,
+                                        double zLo, double zHi,
+                                        boolean allowMultiOnNode){
+  if (itn == null) return false;
+  if (!isTrueTerminalInternode(itn)) return false;
+  if (itn.rank < startMin) return false;
+  if (itn.order < cfg.spurOrder) return false;
+  if (!allowMultiOnNode){
+    if (firstBudOnInternodeSite(itn) != null) return false;
+  }
+  if (!respectGapOnAxisCustom(itn, gap)) return false;
+  if (cfg.mainAxisOnly == 1 && itn.order < orderMin) return false;
+  if (!respectMinBudSpacingOnAxis(itn, cfg)) return false;
+  if (orderRootKey(itn, cfg.uprightOrder) != uprightRoot) return false;
+
+  // zone gate: use mid-Z of this internode
+  double m = midZ(itn);
+  if (m < zLo || m > zHi) return false;
+
+  return true;
+}
+
+  static int enforceBudDensityPerMeter_add_perZone(BudPlannerConfig.Cfg cfg, int budsPerM) {
+    // seed fruit map (for caps during add if you ever switch to floral)
+    scanExisting(cfg);
+
+    java.util.List zones = computeZoneSnapshots(cfg, budsPerM);
+
+    // rank zones by density ascending (fill sparsest first)
+    try {
+      java.util.Collections.sort(zones, new java.util.Comparator() {
+        public int compare(Object a, Object b) {
+          ZoneSnap x = (ZoneSnap) a, y = (ZoneSnap) b;
+          double dx = (x.lenM > 0.0) ? (x.budsNow / x.lenM) : Double.POSITIVE_INFINITY;
+          double dy = (y.lenM > 0.0) ? (y.budsNow / y.lenM) : Double.POSITIVE_INFINITY;
+          if (dx < dy)
+            return -1;
+          if (dx > dy)
+            return 1;
+          return 0;
+        }
+      });
+    } catch (Throwable t) {
+    }
+
+    int passOrderMin = (cfg.mainAxisOnly == 1) ? Math.min(cfg.placementOrderMin, cfg.uprightOrder) : 1;
+
+    int totalAdded = 0;
+    for (int i = 0; i < zones.size(); i++) {
+      ZoneSnap zs = (ZoneSnap) zones.get(i);
+      if (zs.delta <= 0)
+        continue; // no add here
+
+      // attempt in three passes: strict, relax gap, allow multi-on-node
+      int need = zs.delta;
+      int addedHere = 0;
+
+      addedHere += runPlacementPassOnUprightZone(cfg, need, /* gap */cfg.minBranchGap, /* start */1, passOrderMin,
+          zs.root, zs.zMin, zs.zMax, /* multiFruit */false, /* multiOnNode */false, "zone-add A");
+      if (addedHere < need)
+        addedHere += runPlacementPassOnUprightZone(cfg, need - addedHere, Math.max(0, cfg.minBranchGap - 1), 1,
+            passOrderMin, zs.root, zs.zMin, zs.zMax, false, false, "zone-add B");
+      if (addedHere < need)
+        addedHere += runPlacementPassOnUprightZone(cfg, need - addedHere, 0, 1, passOrderMin, zs.root, zs.zMin, zs.zMax,
+            false, true, "zone-add C (multi)");
+
+      totalAdded += addedHere;
+    }
+
+    if (!cfg.dryRun) derive();
+
+    if(debug) println("[BudPlanner] Buds/m ADD (per-zone): added=" + totalAdded + " | RAW fruits after≈"
+        + scanExisting(cfg).fruitsRaw);
+    return totalAdded;
+  }
+
+static java.util.List collectZonePlacementCandidates(BudPlannerConfig.Cfg cfg, int curGap, int curStart, int orderMin,
+                                                     Internode uprightRoot, double zLo, double zHi,
+                                                     boolean allowMultiOnNode){
+  java.util.List cands = new java.util.ArrayList();
+  for (Internode i : (* Internode *)){
+    if (eligible_OnUprightInZone(i, cfg, curGap, curStart, orderMin, uprightRoot, zLo, zHi, allowMultiOnNode)){
+      cands.add(i);
+    }
+  }
+  return orderDescShuffledByOrder(cands, cfg.spurOrder);
+}
+
+  // returns how many placed in this call
+static int runPlacementPassOnUprightZone(BudPlannerConfig.Cfg cfg, int quota,
+                                         int curGap, int curStart, int orderMin,
+                                         Internode uprightRoot, double zLo, double zHi,
+                                         boolean allowMultiFruit, boolean allowMultiOnNode,
+                                         String label){
+  int placedThisCall = 0;
+  int[] qc = new int[]{0,0,0,0};
+  if (cfg.dryRun) return 0;
+
+  if (!allowMultiOnNode){
+    java.util.List cands = collectZonePlacementCandidates(cfg, curGap, curStart, orderMin,
+        uprightRoot, zLo, zHi, /*allowMultiOnNode=*/false);
+    for (int ci = 0; ci < cands.size() && placedThisCall < quota; ci++){
+      Internode cand = (Internode) cands.get(ci);
+      if (!eligible_OnUprightInZone(cand, cfg, curGap, curStart, orderMin, uprightRoot, zLo, zHi, false)) continue;
+
+      Internode attachSite = resolvePlannerAttachSite(
+          cfg, cand, curGap, curStart, orderMin, false);
+      if (attachSite == null) continue;
+
+      BudService b = new BudCreator(species).createBud();
+      if (b instanceof BudAppleService){
+        BudAppleService ba=(BudAppleService)b;
+        ba.initiate(attachSite, (float) cfg.fBudFloral);
+      } else {
+        b.initiate(attachSite, (float) cfg.fBudFloral);
+      }
+      attachBudIfLive(cfg, attachSite, b);
+      addSiteQcAcc(attachSite, cfg, qc);
+      placedThisCall++;
+    }
+  } else {
+    // Avoid repeated global first(...) queries (slow on large canopies):
+    // take a candidate snapshot and do bounded cyclic eligibility passes.
+    java.util.List cands = collectZonePlacementCandidates(cfg, curGap, curStart, orderMin,
+        uprightRoot, zLo, zHi, /*allowMultiOnNode=*/true);
+    if (cands != null && !cands.isEmpty()){
+      int safety = 0;
+      int safetyCap = Math.min(20000, Math.max(1000, quota + cands.size() * 4));
+      int passNoProgress = 0;
+      int idx = 0;
+      int n = cands.size();
+
+      while (placedThisCall < quota && safety++ < safetyCap && passNoProgress < n){
+        Internode cand = (Internode) cands.get(idx);
+        idx++;
+        if (idx >= n) idx = 0;
+
+        if (!eligible_OnUprightInZone(cand, cfg, curGap, curStart, orderMin, uprightRoot, zLo, zHi, true)){
+          passNoProgress++;
+          continue;
+        }
+
+        Internode attachSite = resolvePlannerAttachSite(
+            cfg, cand, curGap, curStart, orderMin, true);
+        if (attachSite == null){
+          passNoProgress++;
+          continue;
+        }
+
+        BudService b = new BudCreator(species).createBud();
+        if (b instanceof BudAppleService){
+          BudAppleService ba=(BudAppleService)b;
+          ba.initiate(attachSite, (float) cfg.fBudFloral);
+        } else {
+          b.initiate(attachSite, (float) cfg.fBudFloral);
+        }
+        attachBudIfLive(cfg, attachSite, b);
+        addSiteQcAcc(attachSite, cfg, qc);
+        placedThisCall++;
+        passNoProgress = 0;
+      }
+    }
+  }
+
+  printAddSiteQc(label, qc);
+  if(debug) println("[BudPlanner] pass: " + label + " | placed=" + placedThisCall
+        + " | zone=["+round3(zLo)+","+round3(zHi)+"]");
+  return placedThisCall;
+}
+
+static int closeBandBySpacing(double nearestDistM, double minSpacingM){
+  if (minSpacingM <= 0.0) return 0;
+  if (nearestDistM < minSpacingM) return 2;
+  if (nearestDistM < (1.5 * minSpacingM)) return 1;
+  return 0;
+}
+
+static String uprightRegionName(int idx) {
+  if (idx == 0) return "low";
+  if (idx == 1) return "mid";
+  if (idx == 2) return "upper";
+  return "region" + idx;
+}
+
+static void annotateMode0PriorityMetrics(java.util.List cands, BudPlannerConfig.Cfg cfg){
+  if (cands == null || cands.isEmpty()) return;
+
+  java.util.Map byAxis = new java.util.HashMap();
+  for (int i=0; i<cands.size(); i++){
+    RemovePriorityCand c = (RemovePriorityCand) cands.get(i);
+    java.util.List list = (java.util.List) byAxis.get(c.axisRoot);
+    if (list == null){
+      list = new java.util.ArrayList();
+      byAxis.put(c.axisRoot, list);
+    }
+    list.add(c);
+  }
+
+  java.util.Iterator it = byAxis.values().iterator();
+  while (it.hasNext()){
+    java.util.List list = (java.util.List) it.next();
+    if (list == null || list.isEmpty()) continue;
+
+    try {
+      java.util.Collections.sort(list, new java.util.Comparator(){
+        public int compare(Object a, Object b){
+          RemovePriorityCand x = (RemovePriorityCand)a;
+          RemovePriorityCand y = (RemovePriorityCand)b;
+          if (x.axisPosM < y.axisPosM) return -1;
+          if (x.axisPosM > y.axisPosM) return 1;
+          return 0;
+        }
+      });
+    } catch(Throwable t){}
+
+    int n = list.size();
+    double minPos = ((RemovePriorityCand)list.get(0)).axisPosM;
+    double maxPos = ((RemovePriorityCand)list.get(n-1)).axisPosM;
+    double span = Math.max(0.2, maxPos - minPos);
+    double axisDensity = ((double)n) / span;
+
+    for (int k=0; k<n; k++){
+      RemovePriorityCand c = (RemovePriorityCand) list.get(k);
+      c.axisDensity = axisDensity;
+
+      double dPrev = Double.POSITIVE_INFINITY;
+      double dNext = Double.POSITIVE_INFINITY;
+      if (k > 0){
+        RemovePriorityCand p = (RemovePriorityCand) list.get(k-1);
+        dPrev = Math.abs(c.axisPosM - p.axisPosM);
+      }
+      if (k < n-1){
+        RemovePriorityCand q = (RemovePriorityCand) list.get(k+1);
+        dNext = Math.abs(q.axisPosM - c.axisPosM);
+      }
+      c.nearestDistM = Math.min(dPrev, dNext);
+      c.closeBand = closeBandBySpacing(c.nearestDistM, cfg.minBudSpacingM);
+    }
+  }
+}
+
+static void enforceBudDensityPerMeter_remove_perZone_mode0Priority(BudPlannerConfig.Cfg cfg, int budsPerM, int minRawFruitsAfter){
+  BudStats st0 = scanExisting(cfg);
+  int globalRaw = st0.fruitsRaw;
+
+  java.util.List zones = computeZoneSnapshots(cfg, budsPerM);
+  java.util.List surplus = new java.util.ArrayList();
+  for (int i=0; i<zones.size(); i++){
+    ZoneSnap zs = (ZoneSnap) zones.get(i);
+    if (zs.delta < 0) surplus.add(zs);
+  }
+
+  // Densest zones first.
+  try {
+    java.util.Collections.sort(surplus, new java.util.Comparator(){
+      public int compare(Object a, Object b){
+        ZoneSnap x = (ZoneSnap)a, y = (ZoneSnap)b;
+        double dx = (x.lenM>0.0) ? (x.budsNow / x.lenM) : -Double.POSITIVE_INFINITY;
+        double dy = (y.lenM>0.0) ? (y.budsNow / y.lenM) : -Double.POSITIVE_INFINITY;
+        if (dx > dy) return -1;
+        if (dx < dy) return 1;
+        return 0;
+      }
+    });
+  } catch(Throwable t){}
+
+  int totalRemoved = 0, skippedFloral = 0;
+  int removedClose = 0, removedNonTerminal = 0;
+
+  for (int i=0; i<surplus.size(); i++){
+    ZoneSnap zs = (ZoneSnap) surplus.get(i);
+    int need = -zs.delta;
+    if (need <= 0) continue;
+
+    // Collect candidates in this zone with structural and spacing metadata.
+    java.util.List cands = new java.util.ArrayList();
+    for (BudService b : (* BudService *)){
+      Internode site = first((* b (<--)+ Internode *));
+      if (site == null) continue;
+      if (orderRootKey(site, cfg.uprightOrder) != zs.root) continue;
+      double m = midZ(site);
+      if (m < zs.zMin || m > zs.zMax) continue;
+
+      boolean floral = (b instanceof BudAppleService) && ((BudAppleService)b).budType==2;
+      int fexp = floral ? expectedFruitOfFloral(cfg, (BudAppleService)b) : 0;
+      Internode root = axisRoot(site);
+      if (root == null) continue;
+      boolean nonTerm = !isTerminal(site);
+      double pos = distanceFromAxisBase_M(site);
+
+      cands.add(new RemovePriorityCand(b, site, root, floral, fexp, nonTerm, pos));
+    }
+
+    annotateMode0PriorityMetrics(cands, cfg);
+
+    // Priority: non-terminal site, close-neighbor buds, then higher local buds/m.
+    try {
+      java.util.Collections.sort(cands, new java.util.Comparator(){
+        public int compare(Object a, Object b){
+          RemovePriorityCand x = (RemovePriorityCand)a;
+          RemovePriorityCand y = (RemovePriorityCand)b;
+
+          if (x.nonTerminalSite != y.nonTerminalSite){
+            return x.nonTerminalSite ? -1 : 1;
+          }
+          if (x.closeBand != y.closeBand){
+            return (x.closeBand > y.closeBand) ? -1 : 1;
+          }
+          if (x.axisDensity > y.axisDensity) return -1;
+          if (x.axisDensity < y.axisDensity) return 1;
+          if (x.nearestDistM < y.nearestDistM) return -1;
+          if (x.nearestDistM > y.nearestDistM) return 1;
+          return 0;
+        }
+      });
+    } catch(Throwable t){}
+
+    int removedHere = 0;
+    for (int j=0; j<cands.size() && removedHere < need; j++){
+      RemovePriorityCand c = (RemovePriorityCand) cands.get(j);
+      if (c.isFloral && minRawFruitsAfter>0 && (globalRaw - c.fexp) < minRawFruitsAfter){
+        skippedFloral++;
+        continue;
+      }
+      if (!cfg.dryRun){
+        safeDeleteBud(c.b);
+      }
+      if (c.isFloral){
+        globalRaw -= c.fexp;
+        removedFloralCount++;
+      } else {
+        removedVegCount++;
+      }
+      if (c.closeBand > 0) removedClose++;
+      if (c.nonTerminalSite) removedNonTerminal++;
+      removedHere++;
+      totalRemoved++;
+    }
+  }
+
+  if (!cfg.dryRun) derive();
+
+  println("[BudPlanner] Buds/m REMOVE (per-zone, mode0 priority): removed=" + totalRemoved
+        + " | closeNbrRemoved=" + removedClose
+        + " | nonTerminalRemoved=" + removedNonTerminal
+        + " | RAW fruits after≈" + globalRaw
+        + " | skippedFloralDueToFloor=" + skippedFloral);
+}
+
+static void enforceBudDensityPerMeter_remove_perZone(BudPlannerConfig.Cfg cfg, int budsPerM, int minRawFruitsAfter){
+  BudStats st0 = scanExisting(cfg);
+  int globalRaw = st0.fruitsRaw;
+
+  java.util.List zones = computeZoneSnapshots(cfg, budsPerM);
+
+  // we’ll build a worklist of only surplus zones (delta < 0)
+  java.util.List surplus = new java.util.ArrayList();
+  for (int i=0;i<zones.size();i++){
+    ZoneSnap zs = (ZoneSnap) zones.get(i);
+    if (zs.delta < 0) surplus.add(zs);
+  }
+
+  // rank surplus zones by density descending (trim densest first)
+  try {
+    java.util.Collections.sort(surplus, new java.util.Comparator(){
+      public int compare(Object a, Object b){
+        ZoneSnap x=(ZoneSnap)a, y=(ZoneSnap)b;
+        double dx = (x.lenM>0.0) ? (x.budsNow / x.lenM) : -Double.POSITIVE_INFINITY;
+        double dy = (y.lenM>0.0) ? (y.budsNow / y.lenM) : -Double.POSITIVE_INFINITY;
+        if (dx > dy) return -1; if (dx < dy) return 1; return 0;
+      }
+    });
+  } catch(Throwable t){}
+
+  int totalRemoved = 0, skippedFloral = 0;
+
+  for (int i=0;i<surplus.size();i++){
+    ZoneSnap zs = (ZoneSnap) surplus.get(i);
+    int need = -zs.delta;
+
+    // collect candidates in this zone
+    java.util.List cands = new java.util.ArrayList(); // List<Cand>
+    for (BudService b : (* BudService *)){
+      Internode site = first((* b (<--)+ Internode *));
+      if (site == null) continue;
+      if (orderRootKey(site, cfg.uprightOrder) != zs.root) continue;
+      double m = midZ(site);
+      if (m < zs.zMin || m > zs.zMax) continue;
+
+      boolean floral = (b instanceof BudAppleService) && ((BudAppleService)b).budType==2;
+      int fexp = floral ? expectedFruitOfFloral(cfg, (BudAppleService)b) : 0;
+      cands.add(new Cand(b, floral, fexp));
+    }
+
+    try { java.util.Collections.shuffle(cands, _rng); } catch(Throwable t){}
+
+    int removedHere = 0;
+    for (int j=0;j<cands.size() && removedHere < need; j++){
+      Cand c = (Cand) cands.get(j);
+      if (c.isFloral && minRawFruitsAfter>0 && (globalRaw - c.fexp) < minRawFruitsAfter) {
+        skippedFloral++; continue;
+      }
+       if (!cfg.dryRun) {
+        safeDeleteBud(c.b);
+      }
+      if (c.isFloral){ globalRaw -= c.fexp; removedFloralCount++; }
+      else { removedVegCount++; }
+      removedHere++; totalRemoved++;
+    }
+  }
+
+  
+    if (!cfg.dryRun) derive();
+
+ 
+  println("[BudPlanner] Buds/m REMOVE (per-zone): removed=" + totalRemoved
+        + " | RAW fruits after≈" + globalRaw
+        + " | skippedFloralDueToFloor=" + skippedFloral);
+}
+
+static void enforceBudDensityPerMeter_uprightRegions(BudPlannerConfig.Cfg cfg, int budsPerM, int minRawFruitsAfter) {
+  BudStats st0 = scanExisting(cfg);
+  int globalRaw = st0.fruitsRaw;
+  java.util.List regions = computeUprightRegionSnapshots(cfg, budsPerM, 3);
+  boolean explicitMode = (cfg.uprightRegionBudTargetsFlat != null && cfg.uprightRegionBudTargetsFlat.length > 0);
+  if (regions == null || regions.isEmpty()) {
+    println("[BudPlanner] WARN uprightRegion: no uprights found; skipping.");
+    return;
+  }
+  if (explicitMode) {
+    int expectedTargets = regions.size();
+    int actualTargets = cfg.uprightRegionBudTargetsFlat.length;
+    println("[BudPlanner] Upright-region explicit target mode:"
+        + " uprightCount=" + (expectedTargets / 3)
+        + " regionCount=3"
+        + " expectedTargets=" + expectedTargets
+        + " actualTargets=" + actualTargets);
+    if (actualTargets < expectedTargets) {
+      println("[BudPlanner] WARN explicit upright-region targets shorter than expected; missing bins left unchanged.");
+    } else if (actualTargets > expectedTargets) {
+      println("[BudPlanner] WARN explicit upright-region targets longer than expected; extra values ignored.");
+    }
+  }
+  int removed = 0;
+  int added = 0;
+
+  int i;
+  for (i = 0; i < regions.size(); i++) {
+    UprightRegionSnap rs = (UprightRegionSnap) regions.get(i);
+    if (rs.delta >= 0) continue;
+    int need = -rs.delta;
+    java.util.List veg = new java.util.ArrayList();
+    java.util.List floral = new java.util.ArrayList();
+
+    for (BudService b : (* BudService *)) {
+      Internode site = first((* b (<--)+ Internode *));
+      if (site == null) continue;
+      if (orderRootKey(site, cfg.uprightOrder) != rs.root) continue;
+      double m = midZ(site);
+      if (m < rs.zMin || m > rs.zMax) continue;
+      boolean isFl = (b instanceof BudAppleService) && ((BudAppleService) b).budType == 2;
+      if (isFl) floral.add(b);
+      else veg.add(b);
+    }
+
+    try { java.util.Collections.shuffle(veg, _rng); } catch (Throwable t) {}
+    try { java.util.Collections.shuffle(floral, _rng); } catch (Throwable t) {}
+
+    int j;
+    for (j = 0; j < veg.size() && need > 0; j++) {
+      BudService b = (BudService) veg.get(j);
+      if (!cfg.dryRun) safeDeleteBud(b);
+      removedVegCount++;
+      removed++;
+      need--;
+    }
+    for (j = 0; j < floral.size() && need > 0; j++) {
+      BudAppleService b = (BudAppleService) floral.get(j);
+      int fexp = expectedFruitOfFloral(cfg, b);
+      if (minRawFruitsAfter > 0 && (globalRaw - fexp) < minRawFruitsAfter) continue;
+      if (!cfg.dryRun) safeDeleteBud(b);
+      globalRaw -= fexp;
+      removedFloralCount++;
+      removed++;
+      need--;
+    }
+  }
+
+  if (!cfg.dryRun && removed > 0) derive();
+
+  regions = computeUprightRegionSnapshots(cfg, budsPerM, 3);
+  int passOrderMin = (cfg.mainAxisOnly == 1) ? Math.min(cfg.placementOrderMin, cfg.uprightOrder) : 1;
+  for (i = 0; i < regions.size(); i++) {
+    UprightRegionSnap rs = (UprightRegionSnap) regions.get(i);
+    if (rs.delta <= 0) continue;
+    int need = rs.delta;
+    int addedHere = 0;
+    addedHere += runPlacementPassOnUprightZone(cfg, need, cfg.minBranchGap, 1, passOrderMin,
+        rs.root, rs.zMin, rs.zMax, false, false, "uprightRegion-add A");
+    if (addedHere < need) {
+      addedHere += runPlacementPassOnUprightZone(cfg, need - addedHere, Math.max(0, cfg.minBranchGap - 1), 1, passOrderMin,
+          rs.root, rs.zMin, rs.zMax, false, false, "uprightRegion-add B");
+    }
+    if (addedHere < need) {
+      addedHere += runPlacementPassOnUprightZone(cfg, need - addedHere, Math.max(0, cfg.minBranchGap - 2), 1, passOrderMin,
+          rs.root, rs.zMin, rs.zMax, false, true, "uprightRegion-add C");
+    }
+    added += addedHere;
+  }
+
+  if (!cfg.dryRun && added > 0) derive();
+
+  java.util.List after = computeUprightRegionSnapshots(cfg, budsPerM, 3);
+  println("[BudPlanner] Upright-3region density: removed=" + removed + " added=" + added
+      + " | RAW fruits after≈" + scanExisting(cfg).fruitsRaw
+      + " | regions=" + after.size());
+  for (i = 0; i < after.size(); i++) {
+    UprightRegionSnap rs = (UprightRegionSnap) after.get(i);
+    println("  [BudPlanner] idx=" + rs.flatIdx
+        + " upright=" + rs.uprightIdx
+        + " region=" + uprightRegionName(rs.regionIdx)
+        + " xRow=" + round3(rs.xRow)
+        + " z=[" + round3(rs.zMin) + "," + round3(rs.zMax) + "]"
+        + " now=" + rs.budsNow + " target=" + rs.target + " delta=" + rs.delta);
+  }
+}
+
+static java.util.List uprightLengthTargets(BudPlannerConfig.Cfg cfg, int budsPerM){
+  java.util.Map key2min = new java.util.HashMap(); // String -> Double
+  java.util.Map key2max = new java.util.HashMap(); // String -> Double
+  java.util.Map key2root= new java.util.HashMap(); // String -> Internode
+  java.util.Map key2buds= new java.util.HashMap(); // String -> Integer
+
+  for (Internode itn : (* Internode *)){
+    Internode root = uprightRootOf(itn, cfg);
+    if (root == null) continue;
+    String key = uprightStableKey(root);
+    Double mn = (Double) key2min.get(key);
+    Double mx = (Double) key2max.get(key);
+    double a = zBase(itn), b = zTip(itn);
+    double lo = (a<b)?a:b, hi = (a<b)?b:a;
+    if (mn == null || lo < mn.doubleValue()) key2min.put(key, Double.valueOf(lo));
+    if (mx == null || hi > mx.doubleValue()) key2max.put(key, Double.valueOf(hi));
+    key2root.put(key, root);
+  }
+
+  for (BudService b : (* BudService *)){
+    Internode site = first((* b (<--)+ i:Internode *));
+    if (site == null) continue;
+    String key = uprightKeyOf(site, cfg);
+    if (key == null) continue;
+    Integer nb = (Integer) key2buds.get(key);
+    key2buds.put(key, Integer.valueOf((nb==null?0:nb.intValue())+1));
+  }
+
+  java.util.List rows = new java.util.ArrayList();
+  java.util.Iterator it = key2root.keySet().iterator();
+  while (it.hasNext()){
+    String key = (String) it.next();
+    Internode root = (Internode) key2root.get(key);
+    Double mn = (Double) key2min.get(key);
+    Double mx = (Double) key2max.get(key);
+    int budsNow = ((Integer) nzIntMap(key2buds, key, Integer.valueOf(0))).intValue();
+    double len = (mn!=null && mx!=null) ? Math.max(0.0, mx.doubleValue()-mn.doubleValue()) : 0.0;
+    UprightLenSnap row = new UprightLenSnap(root, key);
+    row.lenM = len;
+    row.budsNow = budsNow;
+    row.target  = (int) Math.round(len * (double)budsPerM);
+    rows.add(row);
+  }
+  return rows;
+}
+
+static java.util.List uprightRegionLengthTargets(BudPlannerConfig.Cfg cfg, int budsPerM){
+  java.util.List regions = computeUprightRegionSnapshots(cfg, budsPerM, 3);
+  java.util.Map key2row = new java.util.HashMap(); // String -> UprightLenSnap
+  java.util.List rows = new java.util.ArrayList();
+
+  for (int i = 0; i < regions.size(); i++) {
+    UprightRegionSnap rs = (UprightRegionSnap) regions.get(i);
+    if (rs == null || rs.root == null) continue;
+    if (rs.target < 0) continue; // explicit target mode can leave missing bins unmanaged
+    String key = uprightStableKey(rs.root);
+    UprightLenSnap row = (UprightLenSnap) key2row.get(key);
+    if (row == null) {
+      row = new UprightLenSnap(rs.root, key);
+      key2row.put(key, row);
+      rows.add(row);
+    }
+    row.lenM += rs.lenM;
+    row.budsNow += rs.budsNow;
+    row.target += rs.target;
+  }
+
+  return rows;
+}
+
+  static ZoneWorst computeWorstZoneDeviation(BudPlannerConfig.Cfg cfg, int budsPerM) {
+    try {
+      java.util.List zones = computeZoneSnapshots(cfg, budsPerM);
+      ZoneWorst best = null;
+      for (int i = 0; i < zones.size(); i++) {
+        ZoneSnap z = (ZoneSnap) zones.get(i);
+        double denom = Math.max(1.0, (double) z.target);
+        double rel = Math.abs(((double) z.budsNow - (double) z.target) / denom);
+        if (best == null || rel > best.rel)
+          best = new ZoneWorst(z.root, z.zMin, z.zMax, z.target, z.budsNow, rel);
+      }
+      return best;
+    } catch (Throwable t) {
+      return null;
+    }
+  }
+
+  static ZoneWorst computeWorstUprightRegionDeviation(BudPlannerConfig.Cfg cfg, int budsPerM) {
+    try {
+      java.util.List regions = computeUprightRegionSnapshots(cfg, budsPerM, 3);
+      ZoneWorst best = null;
+      for (int i = 0; i < regions.size(); i++) {
+        UprightRegionSnap rs = (UprightRegionSnap) regions.get(i);
+        if (rs == null || rs.target < 0) continue;
+        double denom = Math.max(1.0, (double) rs.target);
+        double rel = Math.abs(((double) rs.budsNow - (double) rs.target) / denom);
+        if (best == null || rel > best.rel)
+          best = new ZoneWorst(rs.root, rs.zMin, rs.zMax, rs.target, rs.budsNow, rel);
+      }
+      return best;
+    } catch (Throwable t) {
+      return null;
+    }
+  }
+
+  // 1) Stable upright key (do not rely on object identity across methods)
+  static String uprightStableKey(Internode root) {
+    // Prefer a persistent id if you have one; otherwise identityHashCode is good
+    // enough
+    return "upr#" + System.identityHashCode(root);
+  }
+
+  // 2) Single source of truth: map any Internode to its upright root AND key
+  static Internode uprightRootOf(Internode itn, BudPlannerConfig.Cfg cfg) {
+    return orderRootKey(itn, cfg.uprightOrder);
+  }
+
+  static String uprightKeyOf(Internode itn, BudPlannerConfig.Cfg cfg) {
+    Internode r = uprightRootOf(itn, cfg);
+    return (r == null) ? null : uprightStableKey(r);
+  }
+
+  // 3) Single membership check
+  static boolean isOnUpright(Internode site, BudPlannerConfig.Cfg cfg) {
+    return uprightRootOf(site, cfg) != null;
+  }
+
+// --- 3D coordinate helper for Y (analog of xBase/zBase) ---
+
+// --- Helpers to read bud-local coordinates (tree frame) ---
+// Try bud fields first (x,z), then fall back to its parent Internode.
+
+/**
+ * Local "along-row" coordinate X_row of an internode, reconstructed from
+ * world coordinates using tx, ty and rowOrientation.
+ *
+ * Assumes:
+ *   - Axiom has: Translate(tx,ty,0); RH(rowOrientation);
+ *   - local X axis is along the row.
+ */
+static double xRowLocal(Organ itn){
+  double xw = xBase(itn);   // world X
+  double yw = yBase(itn);   // world Y
+
+  // shift to row origin (trunk base in world)
+  double dx = xw - tx;
+  double dy = yw - ty;
+
+  // rowOrientation is in degrees; convert to radians
+  double theta = rowOrientation * Math.PI / 180.0;
+  double cosT  = Math.cos(theta);
+  double sinT  = Math.sin(theta);
+  // project onto row direction r = (cosθ, sinθ)
+  return dx * cosT + dy * sinT;
+}
+
+/**
+ * Returns cell index k (0..gridNx*gridNz-1) for a given local (X_row, Z),
+ * or -1 if outside the management box.
+ *
+ * Cells are row-major:
+ *   k = iz * gridNx + ix
+ *   iz = 0..gridNz-1 (bottom to top in Z)
+ *   ix = 0..gridNx-1 (left to right in X_row)
+ */
+static int gridIndexForXZ(BudPlannerConfig.Cfg cfg, double xRow, double zLocal){
+  if (xRow < cfg.gridXmin || xRow > cfg.gridXmax
+      || zLocal < cfg.gridZmin || zLocal > cfg.gridZmax){
+    return -1;
+  }
+  double dx = (cfg.gridXmax - cfg.gridXmin) / (double)cfg.gridNx;
+  double dz = (cfg.gridZmax - cfg.gridZmin) / (double)cfg.gridNz;
+  if (dx <= 0.0 || dz <= 0.0) return -1;
+
+  int ix = (int)Math.floor((xRow   - cfg.gridXmin) / dx);
+  int iz = (int)Math.floor((zLocal - cfg.gridZmin) / dz);
+
+  // right/top edge inclusion
+  if (ix == cfg.gridNx) ix = cfg.gridNx - 1;
+  if (iz == cfg.gridNz) iz = cfg.gridNz - 1;
+
+  if (ix < 0 || ix >= cfg.gridNx || iz < 0 || iz >= cfg.gridNz) return -1;
+  return iz * cfg.gridNx + ix;
+}
+
+
+
+static boolean respectMinBudSpacingOnAxis(Internode cand, BudPlannerConfig.Cfg cfg){
+  if (cand == null || cfg == null) return false;
+  if (cfg.minBudSpacingM <= 0.0) return true;
+
+  Internode candRoot = axisRoot(cand);
+  if (candRoot == null) return true;
+  double sCand = distanceFromAxisBase_M(cand);
+
+  java.util.Map byAxis = getSpacingPosByAxisCache();
+  java.util.List posList = (java.util.List) byAxis.get(candRoot);
+  if (posList == null || posList.isEmpty()) return true;
+
+  for (int i=0; i<posList.size(); i++){
+    double sB = ((Double)posList.get(i)).doubleValue();
+    if (Math.abs(sCand - sB) < cfg.minBudSpacingM) return false;
+  }
+  return true;
+}
+
+static void invalidateSpacingPosCache(){
+  spacingPosByAxisCache = null;
+  spacingPosCacheBudCount = -1;
+}
+
+static java.util.Map getSpacingPosByAxisCache(){
+  int budCountNow = 0;
+  try { budCountNow = (int) count((* BudService *)); } catch(Throwable t){ budCountNow = -1; }
+
+  if (spacingPosByAxisCache != null && spacingPosCacheBudCount == budCountNow){
+    return spacingPosByAxisCache;
+  }
+
+  java.util.Map byAxis = new java.util.HashMap();
+  for (BudService b : (* BudService *)){
+    Internode site = first((* b (<--)+ i:Internode *));
+    if (site == null) continue;
+    Internode root = axisRoot(site);
+    if (root == null) continue;
+    java.util.List L = (java.util.List) byAxis.get(root);
+    if (L == null){
+      L = new java.util.ArrayList();
+      byAxis.put(root, L);
+    }
+    L.add(Double.valueOf(distanceFromAxisBase_M(site)));
+  }
+
+  spacingPosByAxisCache = byAxis;
+  spacingPosCacheBudCount = budCountNow;
+  return spacingPosByAxisCache;
+}
+
+static int enforceMinBudSpacing_removeTooClose(BudPlannerConfig.Cfg cfg, double minM,
+    boolean protectRaw, int minRawAfter, boolean onlyUprights){
+  if (cfg == null || minM <= 0.0) return 0;
+  int globalRaw = scanExisting(cfg).fruitsRaw;
+  int removed = 0;
+  int blockedByFruitFloor = 0;
+
+  java.util.Map byAxis = new java.util.HashMap();
+  for (BudService b : (* BudService *)){
+    Internode site = first((* b (<--)+ i:Internode *));
+    if (site == null) continue;
+    if (onlyUprights && orderRootKey(site, cfg.uprightOrder) == null) continue;
+    Internode root = axisRoot(site);
+    if (root == null) continue;
+    java.util.List list = (java.util.List) byAxis.get(root);
+    if (list == null){ list = new java.util.ArrayList(); byAxis.put(root, list); }
+    list.add(b);
+  }
+
+  java.util.Iterator it = byAxis.values().iterator();
+  while(it.hasNext()){
+    java.util.List list = (java.util.List) it.next();
+    try {
+      java.util.Collections.sort(list, new java.util.Comparator(){
+        public int compare(Object a, Object b){
+          double sa = budAxisPosM((BudService)a);
+          double sb = budAxisPosM((BudService)b);
+          if (sa < sb) return -1;
+          if (sa > sb) return 1;
+          return 0;
+        }
+      });
+    } catch(Throwable t){}
+
+    BudService lastKept = null;
+    for (int i=0; i<list.size(); i++){
+      BudService cur = (BudService) list.get(i);
+      if (lastKept == null){ lastKept = cur; continue; }
+      double d = Math.abs(budAxisPosM(cur) - budAxisPosM(lastKept));
+      if (d >= minM){ lastKept = cur; continue; }
+
+      BudService toRemove = cur;
+      BudService toKeep = lastKept;
+      boolean lastFloral = (lastKept instanceof BudAppleService) && ((BudAppleService)lastKept).budType == 2;
+      boolean curFloral = (cur instanceof BudAppleService) && ((BudAppleService)cur).budType == 2;
+      if (curFloral && !lastFloral){ toKeep = cur; toRemove = lastKept; }
+
+      boolean removeFloral = (toRemove instanceof BudAppleService) && ((BudAppleService)toRemove).budType == 2;
+      int fexp = removeFloral ? expectedFruitOfFloral(cfg, (BudAppleService)toRemove) : 0;
+      if (protectRaw && removeFloral && ((globalRaw - fexp) < minRawAfter)){
+        BudService alt = (toRemove == cur) ? lastKept : cur;
+        boolean altFloral = (alt instanceof BudAppleService) && ((BudAppleService)alt).budType == 2;
+        if (!altFloral){
+          toRemove = alt;
+          toKeep = (toRemove == cur) ? lastKept : cur;
+          removeFloral = false;
+          fexp = 0;
+        } else {
+          blockedByFruitFloor++;
+          lastKept = toKeep;
+          continue;
+        }
+      }
+
+      deleteBudIfLive(cfg, toRemove);
+      removed++;
+      if (removeFloral) globalRaw -= fexp;
+      lastKept = toKeep;
+    }
+  }
+
+  if (!cfg.dryRun) derive();
+  println("[BudPlanner] SPACING: removed=" + removed + " (minDist=" + round3(minM) + "m) blockedByFruitFloor=" + blockedByFruitFloor);
+  return removed;
+}
+
+  static int addBudsSecondaryAxesRespectingSpacing(BudPlannerConfig.Cfg cfg, int addCount){
+  if (cfg == null || addCount <= 0 || cfg.dryRun) return 0;
+  java.util.List cands = new java.util.ArrayList();
+  int[] qc = new int[]{0,0,0,0};
+  for (Internode itn : (* Internode *)){
+    if (itn == null) continue;
+    if (!isTrueTerminalInternode(itn)) continue;
+    if (itn.rank < 1) continue;
+    if (itn.order < cfg.spurOrder) continue;
+    if (first((* itn (-->)+ b:BudService *)) != null) continue;
+    if (!respectGapOnAxisCustom(itn, cfg.minBranchGap)) continue;
+    if (!respectMinBudSpacingOnAxis(itn, cfg)) continue;
+    Internode upAnc = first((* itn (<--)+ j:Internode, (j.order == cfg.uprightOrder) *));
+    if (upAnc == null) continue;
+    if (itn.order == cfg.uprightOrder) continue;
+    cands.add(itn);
+  }
+  cands = orderDescShuffledByOrder(cands, cfg.spurOrder);
+  int placed = 0;
+  for (int i=0; i<cands.size() && placed<addCount; i++){
+    Internode cand = (Internode) cands.get(i);
+    if (!respectMinBudSpacingOnAxis(cand, cfg)) continue;
+    Internode attachSite = resolvePlannerAttachSite(
+        cfg, cand, cfg.minBranchGap, 1, cfg.spurOrder, false);
+    if (attachSite == null) continue;
+    BudService b = new BudCreator(species).createBud();
+    if (b instanceof BudAppleService){
+      BudAppleService ba = (BudAppleService)b;
+      ba.initiate(attachSite, (float) cfg.fBudFloral);
+    } else {
+      b.initiate(attachSite, (float) cfg.fBudFloral);
+    }
+    attachBudIfLive(cfg, attachSite, b);
+    addSiteQcAcc(attachSite, cfg, qc);
+    placed++;
+  }
+  printAddSiteQc("secondary-axes-add", qc);
+  if (!cfg.dryRun) derive();
+  return placed;
+}
+
+static int addSyntheticSpurAxesOnParents(BudPlannerConfig.Cfg cfg,
+                                         Internode uprightRoot,
+                                         double zLo,
+                                         double zHi,
+                                         int quota,
+                                         int parentOrder,
+                                         boolean relaxZone,
+                                         int[] qc,
+                                         String label) {
+  if (cfg == null || quota <= 0) return 0;
+  java.util.List parents = collectSyntheticSpurParentCandidates(cfg, uprightRoot, zLo, zHi, parentOrder, relaxZone);
+  int placed = 0;
+  for (int i = 0; i < parents.size() && placed < quota; i++) {
+    Internode parent = (Internode) parents.get(i);
+    if (!eligibleSyntheticSpurParent(parent, cfg, uprightRoot, zLo, zHi, parentOrder, relaxZone)) continue;
+
+    Cordon spurAxis = createSyntheticSpurAxis(parent, cfg);
+    if (spurAxis == null) continue;
+    BudService bud = createVegetativeDensityBud(spurAxis);
+    if (bud == null) continue;
+
+    attachSyntheticSpurAxisWithBud(cfg, parent, spurAxis, bud);
+    addSiteQcAcc(spurAxis, cfg, qc);
+    placed++;
+  }
+
+  if (debug && placed > 0) {
+    println("[BudPlanner] pass: " + label
+      + " | placed=" + placed
+      + " | parentOrder=" + parentOrder
+      + " | relaxZone=" + relaxZone);
+  }
+  return placed;
+}
+
+static java.util.List collectSyntheticSpurParentCandidates(BudPlannerConfig.Cfg cfg,
+                                                           Internode uprightRoot,
+                                                           double zLo,
+                                                           double zHi,
+                                                           int parentOrder,
+                                                           boolean relaxZone) {
+  java.util.List cands = new java.util.ArrayList();
+  for (Internode parent : (* Internode *)) {
+    if (eligibleSyntheticSpurParent(parent, cfg, uprightRoot, zLo, zHi, parentOrder, relaxZone)) {
+      cands.add(parent);
+    }
+  }
+
+  final double zoneMid = 0.5 * (zLo + zHi);
+  final boolean relaxZoneFinal = relaxZone;
+  try {
+    java.util.Collections.sort(cands, new java.util.Comparator() {
+      public int compare(Object a, Object b) {
+        Internode ia = (Internode) a;
+        Internode ib = (Internode) b;
+
+        double da = relaxZoneFinal ? distanceFromAxisBase_M(ia) : Math.abs(midZ(ia) - zoneMid);
+        double db = relaxZoneFinal ? distanceFromAxisBase_M(ib) : Math.abs(midZ(ib) - zoneMid);
+        if (da < db) return -1;
+        if (da > db) return 1;
+
+        double sa = distanceFromAxisBase_M(ia);
+        double sb = distanceFromAxisBase_M(ib);
+        if (sa > sb) return -1;
+        if (sa < sb) return 1;
+        return 0;
+      }
+    });
+  } catch (Throwable t) {}
+  return cands;
+}
+
+static boolean eligibleSyntheticSpurParent(Internode parent,
+                                           BudPlannerConfig.Cfg cfg,
+                                           Internode uprightRoot,
+                                           double zLo,
+                                           double zHi,
+                                           int parentOrder,
+                                           boolean relaxZone) {
+  if (parent == null || cfg == null) return false;
+  if (!isCordonLikeWoodSite(parent)) return false;
+  if (parent.order != parentOrder) return false;
+  if (parentOrder < cfg.uprightOrder) return false;
+  if (parentOrder > cfg.spurChildOrder) return false;
+  if (cfg.mainAxisOnly == 1 && parent.order < Math.min(cfg.placementOrderMin, cfg.uprightOrder)) return false;
+  if (uprightRoot != null && orderRootKey(parent, cfg.uprightOrder) != uprightRoot) return false;
+  if (!relaxZone) {
+    double m = midZ(parent);
+    if (m < zLo || m > zHi) return false;
+  }
+  if (hasFollowingCordonOnSameAxis(parent)) return false;
+  if (hasChildContinuationCordon(parent)) return false;
+  if (!respectSyntheticSpurSpacing(parent, cfg)) return false;
+  return true;
+}
+
+static boolean respectSyntheticSpurSpacing(Internode parent, BudPlannerConfig.Cfg cfg) {
+  if (parent == null || cfg == null) return false;
+  if (cfg.spurSpacingM <= 0.0) return true;
+  Internode parentAxis = axisRoot(parent);
+  if (parentAxis == null) return true;
+  double sParent = distanceFromAxisBase_M(parent);
+  for (Internode other : (* Internode *)) {
+    if (other == null || other == parent) continue;
+    if (other.order != parent.order) continue;
+    if (axisRoot(other) != parentAxis) continue;
+    if (!hasChildContinuationCordon(other)) continue;
+    double sOther = distanceFromAxisBase_M(other);
+    if (Math.abs(sParent - sOther) < cfg.spurSpacingM) return false;
+  }
+  return true;
+}
+
+static Cordon createSyntheticSpurAxis(Internode parent, BudPlannerConfig.Cfg cfg) {
+  if (parent == null || cfg == null) return null;
+  PlantIdentifier pi = first((* p:PlantIdentifier, (p.plantNumber == parent.plantNumber) *));
+  PlantBase pb = first((* p:PlantBase, (p.plantNumber == parent.plantNumber) *));
+  if (pi == null && pb == null) return null;
+
+  double lengthM = syntheticSpurLengthM(parent);
+  double diameterM = syntheticSpurDiameterM(parent);
+  int childOrder = syntheticSpurChildOrder(parent, cfg);
+  if (childOrder <= parent.order) return null;
+
+  Cordon spurAxis = new Cordon();
+  if (pi != null) {
+    spurAxis.initiate_pi(pi, (float) lengthM, (float) diameterM);
+  } else {
+    spurAxis.initiate_pb(pb, parent.nodeNumber, parent.cordonNumber);
+    spurAxis.length = lengthM;
+    spurAxis.diameter = diameterM;
+    spurAxis.potLength = lengthM;
+    spurAxis.area = Math.PI * (diameterM * diameterM / 4.0);
+    spurAxis.biomass = Math.PI * (diameterM * diameterM / 4.0) * lengthM * spurAxis.density;
+    spurAxis.initCN_content(spurAxis.biomass);
+  }
+
+  spurAxis.storeParentId(parent);
+  spurAxis.plantBaseID = parent.plantBaseID;
+  spurAxis.border = parent.border;
+  spurAxis.order = childOrder;
+  spurAxis.rank = 1;
+  spurAxis.nodeNumber = parent.nodeNumber;
+  spurAxis.cordonNumber = parent.cordonNumber;
+  spurAxis.axis2ID = parent.axis2ID;
+  spurAxis.axis3ID = parent.axis3ID;
+  spurAxis.axis4ID = parent.axis4ID;
+  spurAxis.axis5ID = parent.axis5ID;
+  spurAxis.axis6ID = parent.axis6ID;
+  if (childOrder == 4) spurAxis.axis4ID = Math.max(1, parent.rank);
+  if (childOrder == 5) spurAxis.axis5ID = Math.max(1, parent.rank);
+  if (childOrder >= 6) spurAxis.axis6ID = Math.max(1, parent.rank);
+  spurAxis.cpn = spurAxis.axis2ID + spurAxis.axis3ID + spurAxis.axis4ID
+      + spurAxis.axis5ID + spurAxis.axis6ID + spurAxis.rank;
+  if (pb != null) {
+    spurAxis.assignAge(pb, spurAxis.cpn);
+  } else {
+    spurAxis.age = parent.age;
+    spurAxis.ageD = parent.ageD;
+    spurAxis.ageTd = parent.ageTd;
+    spurAxis.ageGdd = parent.ageGdd;
+  }
+  spurAxis.syllepticOrder = 0;
+  spurAxis.ID = syntheticSpurAxisId(parent, childOrder);
+  spurAxis.organType = "Spur";
+  return spurAxis;
+}
+
+static BudService createVegetativeDensityBud(Internode site) {
+  if (site == null) return null;
+  BudService bud = new BudCreator(species).createBud();
+  bud.initiate(site, 0f);
+  bud.syllepticOrder = 0;
+  if (bud instanceof BudAppleService) {
+    BudAppleService appleBud = (BudAppleService) bud;
+    appleBud.budType = 1;
+    appleBud.flowerNumber = 0;
+    appleBud.shootType = "VB";
+  }
+  return bud;
+}
+
+static void attachSyntheticSpurAxisWithBud(BudPlannerConfig.Cfg cfg, Internode parent, Cordon spurAxis, BudService bud) {
+  if (cfg == null || parent == null || spurAxis == null || bud == null) return;
+  if (cfg.dryRun) return;
+  int sign = budSideSignForSite(parent);
+  double sx = budSurfaceLocalShiftX(spurAxis, sign);
+  double sy = budSurfaceLocalShiftY(spurAxis);
+  double sz = budSurfaceLocalShiftZ(spurAxis);
+  double pitchDeg = syntheticSpurPitchDeg(parent, sign);
+  double rollDeg = syntheticSpurRollDeg(parent, sign);
+  try {
+    [ h:parent ==> h [RU(pitchDeg) RL(rollDeg) spurAxis [Translate(sx, sy, sz) bud]]; ];
+    invalidateSpacingPosCache();
+  } catch (Throwable t) {}
+}
+
+static int syntheticSpurChildOrder(Internode parent, BudPlannerConfig.Cfg cfg) {
+  if (parent == null || cfg == null) return 0;
+  if (parent.order < cfg.spurOrder) return cfg.spurOrder;
+  if (parent.order < cfg.spurChildOrder) return parent.order + 1;
+  return parent.order + 1;
+}
+
+static double syntheticSpurLengthM(Internode parent) {
+  if (parent == null) return 0.02;
+  double base = Math.max(0.015, Math.min(0.05, parent.length * 0.45));
+  if (parent.order <= 3) {
+    base = Math.max(base, 0.025);
+  }
+  return base;
+}
+
+static double syntheticSpurDiameterM(Internode parent) {
+  if (parent == null) return 0.004;
+  double base = parent.diameter * 0.55;
+  if (Double.isNaN(base) || Double.isInfinite(base) || base <= 0.0) base = 0.004;
+  if (base < 0.003) base = 0.003;
+  if (base > parent.diameter) base = parent.diameter;
+  return base;
+}
+
+static long syntheticSpurAxisId(Internode parent, int childOrder) {
+  if (parent == null) return childOrder;
+  long base = parent.ID;
+  if (base <= 0) base = parent.getId();
+  if (base <= 0) base = Math.abs(System.identityHashCode(parent));
+  return base * 100L + childOrder;
+}
+
+static double syntheticSpurPitchDeg(Internode parent, int sign) {
+  if (parent == null) return sign * 75.0;
+  if (parent.order <= 3) return sign * 80.0;
+  return sign * 75.0;
+}
+
+static double syntheticSpurRollDeg(Internode parent, int sign) {
+  if (parent == null) return sign * 40.0;
+  if (parent.order <= 3) return sign * 40.0;
+  return sign * 35.0;
+}
+
+public static int seedImportedArchitectureBuds_T0(BudPlannerConfig.Cfg cfg) {
+  if (cfg == null) return 0;
+  if (!"apple".equals(species)) return 0;
+  if (!("ArchReader".equals(initiation_method) || "ArchReaderGPU".equals(initiation_method))) return 0;
+
+  cleanupArchitectureBudPlacement_T0(cfg);
+
+  int passOrderMin = (cfg.mainAxisOnly == 1)
+      ? Math.min(cfg.placementOrderMin, cfg.uprightOrder)
+      : 1;
+
+  int[] qc = new int[]{0,0,0,0};
+  java.util.Map seenSites = new java.util.HashMap();
+  int placed = 0;
+  int skippedNoSite = 0;
+  int skippedDuplicateSite = 0;
+  int skippedIneligible = 0;
+
+  for (ShootMeristem shootMeristem : (* sm:ShootMeristem *)) {
+    if (shootMeristem == null) continue;
+
+    Internode candidateSite = resolveImportedBudSiteForShootMeristem(shootMeristem);
+    if (candidateSite == null) {
+      skippedNoSite++;
+      continue;
+    }
+
+    Internode attachSite = resolvePlannerAttachSite(
+        cfg, candidateSite, cfg.minBranchGap, 1, passOrderMin, false);
+    if (attachSite == null) {
+      skippedIneligible++;
+      continue;
+    }
+
+    Long siteKey = Long.valueOf(attachSite.getId());
+    if (seenSites.containsKey(siteKey)) {
+      skippedDuplicateSite++;
+      continue;
+    }
+    seenSites.put(siteKey, Boolean.TRUE);
+
+    if (!eligible_AddTerminalOnly(attachSite, cfg, cfg.minBranchGap, 1, passOrderMin, false)) {
+      skippedIneligible++;
+      continue;
+    }
+
+    BudService bud = new BudCreator(species).createBud();
+    bud.initiate(attachSite, (float) cfg.fBudFloral);
+    bud.syllepticOrder = 0;
+    attachBudIfLive(cfg, attachSite, bud);
+    addSiteQcAcc(attachSite, cfg, qc);
+    placed++;
+  }
+
+  printAddSiteQc("archreader-shoot-meristem-seed", qc);
+  if (!cfg.dryRun && placed > 0) {
+    invalidateSpacingPosCache();
+    derive();
+  }
+
+  println("[BudPlanner][ArchBud] ShootMeristem seed"
+    + " placed=" + placed
+    + " skippedNoSite=" + skippedNoSite
+    + " skippedDuplicateSite=" + skippedDuplicateSite
+    + " skippedIneligible=" + skippedIneligible
+    + " dryRun=" + cfg.dryRun);
+  return placed;
+}
+
+static Internode resolveImportedBudSiteForShootMeristem(ShootMeristem shootMeristem) {
+  if (shootMeristem == null) return null;
+
+  Internode directSite = first((* shootMeristem (<--)+ parentI:Internode *));
+  if (directSite != null) return directSite;
+
+  Internode bestSite = null;
+  int bestNodeDelta = Integer.MAX_VALUE;
+  int bestOrder = Integer.MIN_VALUE;
+  int bestRank = Integer.MIN_VALUE;
+
+  for (Internode candidateSite : (* cand:Internode *)) {
+    if (!matchesImportedShootMeristemAxisTag(shootMeristem, candidateSite)) continue;
+
+    int nodeDelta = Math.abs(candidateSite.nodeNumber - shootMeristem.nodeNumber);
+    if (bestSite == null
+        || nodeDelta < bestNodeDelta
+        || (nodeDelta == bestNodeDelta && candidateSite.order > bestOrder)
+        || (nodeDelta == bestNodeDelta && candidateSite.order == bestOrder && candidateSite.rank > bestRank)) {
+      bestSite = candidateSite;
+      bestNodeDelta = nodeDelta;
+      bestOrder = candidateSite.order;
+      bestRank = candidateSite.rank;
+    }
+  }
+
+  return bestSite;
+}
+
+static boolean matchesImportedShootMeristemAxisTag(ShootMeristem shootMeristem, Internode candidateSite) {
+  if (shootMeristem == null || candidateSite == null) return false;
+
+  if (shootMeristem.plantNumber > 0 && candidateSite.plantNumber > 0
+      && shootMeristem.plantNumber != candidateSite.plantNumber) {
+    return false;
+  }
+  if (shootMeristem.cordonNumber <= 0 || candidateSite.cordonNumber <= 0) return false;
+  if (shootMeristem.nodeNumber <= 0 || candidateSite.nodeNumber <= 0) return false;
+  if (shootMeristem.cordonNumber != candidateSite.cordonNumber) return false;
+  return Math.abs(shootMeristem.nodeNumber - candidateSite.nodeNumber) <= 1;
+}
+
+static boolean isDry(BudPlannerConfig.Cfg cfg) {
+  return (cfg != null && cfg.dryRun);
+}
+
+static void resetAttachClaimCacheIfNeeded() {
+  if (attachClaimStep == step) return;
+  attachClaimStep = step;
+  claimedBudAttachSiteIds = new java.util.HashSet();
+}
+
+static boolean reserveBudAttachSite(Internode site) {
+  if (site == null) return false;
+  resetAttachClaimCacheIfNeeded();
+  Long siteKey = Long.valueOf(site.getId());
+  if (claimedBudAttachSiteIds.contains(siteKey)) return false;
+  claimedBudAttachSiteIds.add(siteKey);
+  return true;
+}
+
+static void releaseBudAttachSite(Internode site) {
+  if (site == null) return;
+  resetAttachClaimCacheIfNeeded();
+  claimedBudAttachSiteIds.remove(Long.valueOf(site.getId()));
+}
+
+// Safe wrappers so you never forget the dry-run gate
+static void deleteBudIfLive(BudPlannerConfig.Cfg cfg, BudService b) {
+  if (b == null) return;
+  if (isDry(cfg)) return;
+  safeDeleteBud(b);
+}
+
+static void attachBudIfLive(BudPlannerConfig.Cfg cfg, Internode cand, BudService b) {
+  if (cand == null || b == null) return;
+  if (isDry(cfg)) return;
+  safeAttachBud(cfg, cand, b);
+}
+
+
+
+}

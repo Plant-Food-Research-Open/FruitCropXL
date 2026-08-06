@@ -1,0 +1,339 @@
+import static plantBase.*;
+import static budBase.*;
+import static budApple.*;
+import static shootBase.*;
+import static shoot.*;
+import static leaf.*;
+import static absOrgan.*;
+import static globalParameters.*;
+import static plantParameters.*;
+import static modelOptions.*;
+import static extraTools.*;
+import static archReader.*;
+import static budPlannerConfig.*;
+import static budPlannerT0.*;
+import static budPlannerT1.*;
+import static budReflectionUtils.*;
+
+/**
+ * BudPlanner — Stage-A canopy/bud planning + T1 apex preflight for FruitCropXL.
+ *
+ * <p>This class collects all logic that:
+ * <ul>
+ *   <li>At <b>T0</b> (start of the simulation season) reconciles pre-season management
+ *       targets for leaf area and crop load by adding/removing buds;</li>
+ *   <li>At <b>T1</b> (twinning preflight) adjusts apex “growth potential” so that the
+ *       shoot generator’s planned node numbers are consistent with the same leaf-area
+ *       target used at T0.</li>
+ * </ul>
+ * It is designed to be Java-1.5 compatible (no generics/diamonds) and to be callable
+ * from XL rules in GroIMP.</p>
+ *
+ * <h2>High-level responsibilities</h2>
+ *
+ * <ol>
+ *   <li>Read all management knobs from {@code plantParameters.*} and
+ *       {@code modelOptions.*} and build a resolved {@link Cfg}:
+ *       <ul>
+ *         <li>Leaf-area targets: expected pre-prune and desired post-prune LA,
+ *             pruning fraction and any derived effective prune fraction.</li>
+ *         <li>Fruit targets: expected RAW fruit count or desired crop load.</li>
+ *         <li>Per-bud LA model: gamma-distributed nodes per bud, leaves per node,
+ *             mean leaf area, expected push fraction.</li>
+ *         <li>Floral expectations: fraction of buds that are floral, flowers per floral
+ *             bud, fruit-set probability, per-bud and per-upright caps.</li>
+ *         <li>Placement constraints: starting rank, minimum branch gap, main-axis-only,
+ *             placement order thresholds.</li>
+ *         <li>Upright grouping: at which order we define “uprights” for density
+ *             calculations.</li>
+ *         <li>Safety and strategy: {@code budTargetMode}, {@code budNumberPerMeter},
+ *             maximum number of new buds, and (optionally) whole-tree and grid targets
+ *             for advanced modes.</li>
+ *         <li>Twinning/apex preflight knobs: DOYs for T0/T1/T2, apex-potential
+ *             enable flag, scale bounds and maximum relative deviation for T1.</li>
+ *       </ul>
+ *   </li>
+ *   <li>Scan the current scene and compute {@link BudStats}:
+ *       <ul>
+ *         <li>Total bud count and floral bud count.</li>
+ *         <li>Estimated existing leaf area based on bud type and node allocation
+ *             (with pseudo leaves for floral buds).</li>
+ *         <li>RAW fruit expectation per bud and per upright, respecting per-bud and
+ *             per-upright caps for diagnostics.</li>
+ *       </ul>
+ *   </li>
+ *   <li>Dispatch to the selected bud-management strategy
+ *       ({@code budTargetMode 0..6 or 8}) at T0:
+ *       <ul>
+ *         <li><b>Mode 0</b> – density-only (remove to buds/m target; no addition):<br>
+ *             enforce buds-per-meter along uprights (per-zone) with RAW-fruit
+ *             protection; then stop.</li>
+ *         <li><b>Mode 1</b> – density remove+add:<br>
+ *             remove to buds/m target (per-zone), then add vegetative buds to
+ *             reach the target density; no LA/crop planning.</li>
+ *         <li><b>Mode 2</b> – leaf-area/crop only:<br>
+ *             skip density step and apply only the LA/crop planner.</li>
+ *         <li><b>Mode 3</b> – density pre-pass + LA/crop:<br>
+ *             do a remove-only buds/m pass on uprights (per-zone), then run the
+ *             LA/crop planner.</li>
+ *         <li><b>Mode 4</b> – whole-tree total-bud target:<br>
+ *             remove buds anywhere on the tree to reach
+ *             {@code totalBudTargetPerTree}, while protecting a RAW fruit floor;
+ *             no LA/crop planner.</li>
+ *         <li><b>Mode 5</b> – grid-based bud targets:<br>
+ *             interpret the canopy in a local row frame (X<sub>row</sub>, Z), bucket buds and
+ *             candidate internodes into grid cells, and for each cell remove or add
+ *             buds to meet {@code gridBudTargetsFlat[cell]}, with RAW fruit floor
+ *             protection and {@code maxNewBudsAllow} as a global cap.</li>
+ *         <li><b>Mode 6</b> – legacy density+spacing:<br>
+ *             run the slower historical density path with explicit per-bud spacing
+ *             cleanup and optional secondary-axis refill.</li>
+ *         <li><b>Mode 8</b> – upright 3-region density:<br>
+ *             identify each upright by {@code cfg.uprightOrder}, compute its
+ *             vertical Z-span from {@code zBase}/{@code zTip}, split it into
+ *             bottom/middle/top regions, set
+ *             {@code target = round(regionLengthM * budNumberPerMeter)}, remove
+ *             excess buds inside the same region (vegetative before floral where
+ *             possible, with RAW fruit-floor protection), then add missing buds
+ *             back inside that same upright-region band subject to placement and
+ *             spacing guards.</li>
+ *       </ul>
+ *   </li>
+ *   <li>For modes 2 and 3, run the <b>Stage-A leaf-area / crop planner</b>:
+ *       <ol type="a">
+ *         <li>Choose a pre-prune LA target
+ *             (prefer {@code expectedLeafArea_prePrune}, otherwise fall back to
+ *             current LA).</li>
+ *         <li>Compute implied post-prune LA with the effective prune fraction
+ *             and compare to the configured post-prune target.</li>
+ *         <li>Compare existing LA with target LA:
+ *           <ul>
+ *             <li>If existing LA &gt; target → <b>removal path</b>:
+ *               <ol>
+ *                 <li>Compute per-upright LA and expected RAW fruit.</li>
+ *                 <li>Rank uprights by LA/RAW (leafiness per fruit).</li>
+ *                 <li>Remove buds from low-ratio uprights first via
+ *                     {@link #removeBudsByUprightRatio}:
+ *                     veg buds are removed first; floral buds only if RAW fruit
+ *                     remains above the configured floor.</li>
+ *               </ol>
+ *             </li>
+ *             <li>If existing LA &lt; target → <b>addition path</b>:
+ *               <ol>
+ *                 <li>Compute LA deficit and convert to a required number of new
+ *                     buds using the gamma-based expected nodes per bud, leaves
+ *                     per node, mean leaf area and expected push fraction.</li>
+ *                 <li>Compute RAW-fruit deficit and derive how many floral buds
+ *                     are needed from {@code flowersPerFloral × fruitSetProb}
+ *                     (capped per bud and per upright).</li>
+ *                 <li>Plan total new buds as
+ *                     {@code max(newByLA, floralNeeded)}, split into floral and
+ *                     vegetative counts using {@code fBudFloral}, and cap by
+ *                     {@code maxNewBudsAllow}.</li>
+ *                 <li>Run {@link #preflightAdjustAndPlace}:
+ *                   <ul>
+ *                     <li>Compare a fast LA estimate from eligible sites with the
+ *                         LA target; if mismatched and shape correlation is high,
+ *                         scale total additions by {@code budDensityScale}.</li>
+ *                     <li>Otherwise fit a gamma distribution to the eligible-site
+ *                         histogram to better reflect actual site availability.</li>
+ *                   </ul>
+ *                 </li>
+ *                 <li>Call {@link #stagePlacement} to place buds in staged passes:
+ *                   <ul>
+ *                     <li>Strict pass: enforce configured gap, start rank, and
+ *                         order constraints.</li>
+ *                     <li>Preference pass: bias placement to higher orders
+ *                         (e.g. order≥3) if allowed.</li>
+ *                     <li>Relaxation passes: progressively relax spacing and basal
+ *                         rank, while respecting minimum rank and branch-gap
+ *                         constraints.</li>
+ *                     <li>Final multi-fruit pass: allow multi-fruit florals if still
+ *                         needed and upright caps are not exceeded.</li>
+ *                   </ul>
+ *                 </li>
+ *               </ol>
+ *             </li>
+ *           </ul>
+ *         </li>
+ *       </ol>
+ *   </li>
+ *   <li>Run a <b>final consistency banner</b> after each strategy:
+ *       <ul>
+ *         <li>Re-scan the scene for final LA and RAW fruit.</li>
+ *         <li>Recompute per-upright length (Z-span), target buds per upright
+ *             (buds/m × length), and actual buds per upright.</li>
+ *         <li>Optionally compute per-upright vertical zones and target/actual
+ *             buds per zone.</li>
+ *         <li>Report relative deviations:
+ *           <ul>
+ *             <li>LA: final vs. planned pre-prune target.</li>
+ *             <li>RAW: final vs. expected fruit number.</li>
+ *             <li>Density: final on-upright buds vs. sum of upright targets.</li>
+ *             <li>Worst-case upright / zone deviations.</li>
+ *           </ul>
+ *         </li>
+ *         <li>Emit warnings when any dimension deviates ≥20% and critical
+ *             diagnostics when ≥30%, pointing at the most likely causes
+ *             (leaf-area model, gamma shape/scale, floral fractions, etc.).</li>
+ *       </ul>
+ *   </li>
+ *   <li>At T1, adjust <b>apex growth potential</b> (twinning preflight):
+ *       <ul>
+ *         <li>Read T1-specific knobs from {@link Cfg}:
+ *             {@code enableApexPotentialT1}, manual scale, maximum relative
+ *             deviation.</li>
+ *         <li>Estimate current apex potential LA using {@link ApexService}:
+ *           <ul>
+ *             <li>For each apex, approximate potential nodes as
+ *                 {@code mainNodesPlanned + Σ branchPlan[i][1]} (with reflection
+ *                 to also accept {@code phytomerNumber}).</li>
+ *             <li>Convert node counts to potential LA using the same per-node
+ *                 LA model used at T0 (leaves per node, mean leaf area and
+ *                 expected push fraction).</li>
+ *           </ul>
+ *         </li>
+ *         <li>Compute a raw scale factor
+ *             {@code scale = expectedPrePruneLA / currentPotentialLA}, clamp
+ *             to {@code [1 − apexPotentialMaxRelDiff, 1 + apexPotentialMaxRelDiff]},
+ *             and ignore tiny adjustments (|scale−1| &lt; 0.01).</li>
+ *         <li>If {@code dryRun==true}, log what would be scaled and return.</li>
+ *         <li>Otherwise call {@link #scaleApexPotentials_T1}:
+ *           <ul>
+ *             <li>Scale {@code mainNodesPlanned} and (if present)
+ *                 {@code phytomerNumber} by the chosen factor, with safeguards:
+ *                 never below {@code formedNodes} and never below 1.</li>
+ *             <li>Scale branch lengths {@code branchPlan[i][1]} similarly with a
+ *                 minimum length of 1.</li>
+ *           </ul>
+ *         </li>
+ *         <li>Re-estimate apex potential LA and report old/new values and the
+ *             number of updated apices.</li>
+ *       </ul>
+ *   </li>
+ * </ol>
+ *
+ * <h2>Coordinate frames and spatial targets</h2>
+ *
+ * <p>BudPlanner uses several helper conventions to relate the graph to spatial
+ * targets:</p>
+ * <ul>
+ *   <li><b>Upright definition</b> – An “upright” is defined as the order-root ancestor
+ *       at {@code cfg.uprightOrder}. For any internode, {@link #orderRootKey}
+ *       walks upstream along same-order parents to find a stable root. This key
+ *       is used to:
+ *       <ul>
+ *         <li>Group internodes and buds into uprights.</li>
+ *         <li>Compute per-upright Z-span based on {@code zBase} and {@code zTip}.</li>
+ *         <li>Slice each upright into vertical zones for density control:
+ *             legacy density uses five zones; upright-region mode 8 uses three
+ *             named regions (0=bottom, 1=middle, 2=top).</li>
+ *       </ul>
+ *   </li>
+ *   <li><b>Buds/m enforcement</b> – Per-meter density is enforced only on uprights:
+ *       <ul>
+ *         <li>All non-upright buds are “reserved” and never touched by density
+ *             operations.</li>
+ *         <li>Length basis is either per-upright Z-span or per-zone spans, with
+ *             special handling for zero-length cases.</li>
+ *         <li>Removal and addition are done upright-only, with RAW floor
+ *             protection during removal.</li>
+ *       </ul>
+ *   </li>
+ *   <li><b>Row-local grid (mode 5)</b> – For grid-based management:
+ *       <ul>
+ *         <li>World coordinates are mapped into a local row frame using the
+ *             scene’s row translation {@code tx, ty} and {@code rowOrientation}:
+ *             {@link #xRowLocal} gives along-row X, {@link #zBase} gives height Z.</li>
+ *         <li>Buds and candidate internodes are bucketed into cells defined by
+ *             {@code gridNx, gridNz, gridXmin..Xmax, gridZmin..Zmax}.</li>
+ *         <li>Each grid cell enforces its own target bud count, with buds outside
+ *             the grid box left untouched.</li>
+ *       </ul>
+ *   </li>
+ * </ul>
+ *
+ * <h2>Public entry points and typical call order</h2>
+ *
+ * <ul>
+ *   <li>{@link #runFromProjectParams(boolean)} – T0 entry point.
+ *       <ol type="a">
+ *         <li>Build a {@link Cfg} from the current {@code plantParameters} and
+ *             {@code modelOptions}.</li>
+ *         <li>Run the Stage-A strategy for T0 based on {@code budTargetMode}:
+ *             modes 0–6 and 8 as described above.</li>
+ *       </ol>
+ *   </li>
+ *   <li>{@link #runApexPotentialT1FromProjectParams(boolean)} – T1 entry point.
+ *       <ol type="a">
+ *         <li>Build the same {@link Cfg}, tagged with {@code twinningStage=1}.</li>
+ *         <li>Run apex-potential adjustment against the configured pre-prune LA
+ *             target, respecting the T1 apex knobs in {@link Cfg}.</li>
+ *       </ol>
+ *   </li>
+ *   <li>{@link #run_T1_adjustApexPotential(boolean)} – convenience alias matching
+ *       the TwinningPlanner naming (calls {@code runApexPotentialT1FromProjectParams}).</li>
+ * </ul>
+ *
+ * <h2>Design notes</h2>
+ *
+ * <ul>
+ *   <li><b>Java 1.5 compatibility</b> – Uses only raw collections ({@code Map, List, Set}),
+ *       {@code Double.valueOf(..)}, no generics/diamonds.</li>
+ *   <li><b>Graph edits</b> – All structural edits are routed through:
+ *       <ul>
+ *         <li>{@link #safeDeleteBud(BudService)} (via XL pattern {@code [ b ==> ; ]})
+ *             for removals.</li>
+ *         <li>Placement passes that create a new {@code BudService} and attach
+ *             it with XL patterns such as {@code [ h:cand ==> h [b]; ]}.</li>
+ *       </ul>
+ *   </li>
+ *   <li><b>Run-state counters</b> – Global static counters (removedFloralCount, etc.)
+ *       are reset per call and used for logging and final summaries.</li>
+ *   <li><b>Scene queries</b> – All scene traversal uses XL comprehensions
+ *       ({@code (* Internode *), (* BudService *), (* ApexService *)}) to stay
+ *       agnostic to species-specific implementations, and reflection is used for
+ *       optional fields (e.g. {@code mainNodesPlanned, branchPlan, totalNodes}).</li>
+ * </ul>
+ *
+ * <p>In summary, BudPlanner acts as the “Stage-A and T1 supervisor” over buds
+ * and apices: it reads a compact set of model options and plant parameters,
+ * infers consistent LA and crop targets, then applies a two-stage logic:
+ * (i) structural bud add/remove operations at T0 to support pre-prune LA and
+ * crop load goals, and (ii) apex-potential scaling at T1 to keep the shoot
+ * generator’s planned node numbers consistent with those same LA targets.</p>
+ */
+
+public class BudPlanner {
+
+  /**
+   * Run Stage-A bud planning from the current project parameters.
+   *
+   * @param dryRun when {@code true}, log planned edits without mutating the graph
+   */
+  public static void runFromProjectParams(boolean dryRun) {
+    BudPlannerConfig.Cfg cfg =
+        BudPlannerConfig.buildCfgFromProjectParams(dryRun, /*twinningStage=*/0);
+    BudPlannerT0.addBudsRemoveToMeetTargets_T0(cfg);
+  }
+
+  /**
+   * Run the T1 apex-potential adjustment from the current project parameters.
+   *
+   * @param dryRun when {@code true}, log planned edits without mutating the graph
+   */
+  public static void runApexPotentialT1FromProjectParams(boolean dryRun) {
+    BudPlannerConfig.Cfg cfg =
+        BudPlannerConfig.buildCfgFromProjectParams(dryRun, /*twinningStage=*/1);
+    BudPlannerT1.adjustApexPotential_T1(cfg);
+  }
+
+  /**
+   * Compatibility alias for the T1 apex-potential entry point.
+   *
+   * @param dryRun when {@code true}, log planned edits without mutating the graph
+   */
+  public static void run_T1_adjustApexPotential(boolean dryRun) {
+    runApexPotentialT1FromProjectParams(dryRun);
+  }
+}

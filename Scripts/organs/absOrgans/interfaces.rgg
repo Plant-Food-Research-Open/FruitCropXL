@@ -1,0 +1,261 @@
+import static absOrgan.*;
+import static budBase.*;
+import static plantBase.*;
+import static globalParameters.*;
+import static modelOptions.*;
+import static initialConditions.*;
+import static shoot.*;
+// Jackson Writer
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.dataformat.csv.CsvMapper;
+import com.fasterxml.jackson.databind.MappingIterator;
+import com.fasterxml.jackson.dataformat.csv.CsvSchema;
+/* interface Iinit {
+	void initiateTransforms();
+	void loadShootData();
+	void addLeaves();
+	void initArchitecture();
+} */
+
+/**
+ * This is rgg file defines the Interface or abstract classes for initiation, bud, Apex, Soil, Fruit to extend 
+ * It sometimes uses abstract class as it is easier to extend the methods and the child class is like a child organ
+ * rather than descrip a functional differences.
+ * some aspects, like photosynthesis, or nitrogen assimilation can be added as interfaces but currently not implemented.
+ *
+ * Use interfaces for defining constants (public static final variables) and method signatures.
+ * Use abstract classes for shared properties (instance variables) and
+ * methods that can be inherited and potentially overridden by subclasses.
+ */
+
+
+/** 
+ * interface for bud 
+ */
+interface IBud {
+
+	/**
+     * Initializes a bud for shoot growing. 
+     * used in the XEG reader
+     * @param pb PlantIdentifier object containing plant identification information.
+     * @param length_ Initial length of the bud.
+     * @param diameter_ Initial diameter of the bud.
+     * @return The initialized Bud object.
+     */
+    BudService initiate_pi(PlantIdentifier pi, String budShootType);
+		
+
+	/**
+     * Initializes a bud for shoot growing based on an Internode object.
+     * 
+     * @param itn Internode object containing node information.
+     * @param float FBUD_FLORAL add FBUD_FLORAL as a input to make it possible to control bud type if sometime a desired type is required 
+     */
+	void initiate(Internode itn, float FBUD_FLORAL);
+	
+	/**
+     * Determines if the bud should break.
+     * 
+     * @return true if the bud should break, false otherwise.
+     */
+	boolean shouldBreak();
+	
+	/**
+	* Methods used for grapevine secondary shoot
+    * Updates the parameters related to organogenesis (bud development) based on thermal time and soil water potential.
+    * This method is specifically used for determining when the bud should produce a secondary shoot.
+    */
+	void updateOrganogenesisParams();
+	 
+	
+	/**
+     * Determines if the bud should produce a rosette.
+     * 
+     * @return true if the bud should produce a rosette, false otherwise.
+     */
+	boolean shouldProduceRosette();
+
+
+}
+
+
+/** 
+ * interface for apex 
+ */
+interface IApex {
+	/**
+	 * Initiates from PlantBase at initiation.
+	 * @param pb PlantBase object
+	 * @param i Parameter i
+	 * @param k Parameter k
+	 * @param l Parameter l
+	 */
+	void initiate_pb(PlantBase pb, int i, int k, int l);
+	
+	/**
+	 * Initiates from Bud.
+	 * @param b Bud object
+	 */
+	void initiate(BudService b);
+	
+	/**
+	 * Initiates the apex with parameters from apex object.
+	 *
+	 * @param an apex object containing bud information.
+	 */
+	void initiate(ApexService a);
+	
+	/**
+	 * Updates water potential.
+	 */
+	void updateWaterPotential();
+	
+	/**
+	 * Increases in IDENTIFIERS after phytomer creation.
+	 */
+	void increment();
+	
+	/**
+	 * Gets branching angle.
+	 * @return Branching angle.
+	 */
+	double getAngle();
+}
+
+
+/** 
+ * interface for flower 
+ */
+interface IFlower {
+	/**
+	 * Initiates from apex.
+	 * @param a ApexService object
+	 */
+	void initiate(ApexService a,int color, float rH, float rL);
+	
+}
+
+// ********************************************** //
+// 		Fruit Module
+// ********************************************** //
+
+/**  
+ * The virtual Fruit model in the jar file is from INRAe Avignon, 
+ * contact Pierre Valsesia regarding to the code
+ * The Fruit module interface.
+ * @author  James Bristow, Junqi Zhu
+ * @version 1.0
+ * @since   22-03-2023
+ */
+
+
+ interface IFruit {
+
+	/**
+	 * Execute one time step of the simulation.
+	 */
+	void step();
+	
+	/**
+	 * Get raw output values.
+	 * 
+	 * @return The raw output values.
+	 */
+	double[] getRawValues();
+
+	/**
+	 * Get JSON output values.
+	 * 
+	 * @return The output values in JSON format.
+	 */
+	ObjectNode getJsonValues();
+
+	/**
+	 * Synchronise the fruit input values to the input row.
+	 * 
+	 * @param age The age of the fruit.
+	 * @param fruitRow The input row.
+	 */
+	void updateInput(int age, JsonNode fruitRow);
+
+	/**
+	 * Convert an input row into a JFruit2 Input object.
+	 * 
+	 * @param age The age of the fruit.
+	 * @param fruitRow The input row.
+	 */
+	void fromArray(int age, JsonNode fruitRow);
+	
+	/**
+	 * Synchronise the output from JFruit2 output values to the state variables in the fruit module.
+	 * 
+	 * @param see the Abstractfruit module
+	 */
+	void syncOutputs(ObjectNode node);
+	
+
+	}
+
+	/**
+	 * Minimal contract for organs that participate in light interception.
+	 */
+	interface ILightInterceptable {
+		void calcLight();
+	}
+
+
+/**
+ * The Configurable interface is implemented by classes/modules which load parameters
+ * they require for initialization from the Config Module.
+ */
+interface Configurable {
+	void loadParameters();
+}
+
+/** 
+ * interface for soil 
+ */
+interface ISoil {}
+
+
+
+interface TransportOrgan {
+/*     void updateFlux();
+    void updateCarbonPotential();
+    void lineariseSinkSource();
+    void updateResistance(double carbon);
+    void updateMunchEffect(); */
+    /*
+    double getCpTop();
+	double getCpBottom();
+	void setCpTop(double cpt);
+	void setCpBottom(double cpb);
+	double getLength();
+	double getArea(); */
+
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

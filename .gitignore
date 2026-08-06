@@ -1,0 +1,92 @@
+!.gitignore
+# Groimp
+
+**/config.properties.txt
+**/*.gsz~
+**/*.xl~
+**/*.rgg~
+**/*.sif
+**/core.*
+**/etc.hosts
+**/resolv.conf
+**/mlruns
+**/mlartifacts
+**/*.db
+
+**/*.local.yaml
+**/*.local.yml
+
+batchSim_*.*
+
+
+# R
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+*.rds
+slurmr-job-*
+
+# Python
+**/__pycache__/
+env/*
+
+# General
+.vscode/settings.json
+Model_visualization/*.png
+Model_documents/softdoc/groimp-javadoc/
+**/.env
+*.log
+local_runs/
+
+# MacOS
+.DS_Store
+
+# Sphinx
+**/*_static
+**/*_templates
+!Model_scenarios/_templates/
+!Model_scenarios/_templates/*.json
+!Model_scenarios/_templates/README.md
+**/source/api
+
+# Slurm
+**/slurm-*.out
+*.properties.txt
+
+# Config
+config.override.json
+simple_run_r*.sl
+batchSim_*.sh
+run*.sl
+.nfs*****
+
+# R
+**/*_cache/*
+
+# Projects
+grapevine_multifactor_batch_sims*
+Model_scenarios/properties/modPara_*.properties
+Model_scenarios/modPara_*.properties
+Scenario_file_generation/1_scenario_and_parameters_excels/.~lock.model_input_data_list_latest.xlsx#
+Model_scenarios/modPara.properties
+tests/dhs_integration/java_submodel/DHS_Demo6_JavaSubModel.class
+java_submodel.log
+Scenario_file_generation/5_output_tables/.~lock.Heads of the output table.xlsx#
+
+.fakeScripts/project.gs
+
+# Large model visualization exports
+/Model_visualization/*.obj
+/Model_visualization/*.ply
+
+# Large model visualization exports
+/Model_visualization/*.obj
+/Model_visualization/*.ply
+
+# Large model visualization exports
+/Model_visualization/*.obj
+/Model_visualization/*.ply
+/Model_visualization/*.tiff
+/Model_visualization/*.tif
+/Model_visualization/Model-cards_original_vectorized_high_detail.svg
