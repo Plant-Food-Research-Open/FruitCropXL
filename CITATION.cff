@@ -1,0 +1,23 @@
+cff-version: 1.2.0
+message: "If you use FruitCropXL, please cite the software and the relevant model publications."
+title: FruitCropXL
+type: software
+license: GPL-3.0-only
+repository-code: "https://github.com/Plant-Food-Research-Open/FruitCropXL"
+authors:
+  - family-names: Zhu
+    given-names: Junqi
+  - family-names: Bristow
+    given-names: James
+  - family-names: Chuang
+    given-names: Ou-An
+  - family-names: Yang
+    given-names: Xiumei
+  - family-names: Liang
+    given-names: Yongqi
+  - family-names: Rampadarath
+    given-names: Anand
+  - family-names: Heidsieck
+    given-names: Gaetan 
+  - family-names: Rojo
+    given-names: Francisco

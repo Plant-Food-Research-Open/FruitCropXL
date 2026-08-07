@@ -20,15 +20,17 @@ FruitCropXL, a generic functional–structural model tailored for Fruit Crops, w
   
 - **Organ Growth**: Organ growth can be controlled by several options: temerature, water potential and carbohydrate. Nitrogen effect is under development.
 
-[![Validation testing](https://github.com/PlantandFoodResearch/functional-structural-fruit-crop-model/actions/workflows/validation-test.yml/badge.svg)](https://github.com/PlantandFoodResearch/functional-structural-fruit-crop-model/actions/workflows/validation-test.yml)
+[![Public model smoke test](https://github.com/Plant-Food-Research-Open/FruitCropXL/actions/workflows/model-tests.yaml/badge.svg)](https://github.com/Plant-Food-Research-Open/FruitCropXL/actions/workflows/model-tests.yaml)
 
-## model documentation
+## Model documentation
 
-Documentation for the model can be found in the confluence page. This contains the description of each main module following the ODD (Overview, Design concepts, Details) protocol for agent-based models, model input preparation, model output variables, and general  instructions for running the model:
-<https://plantandfood.atlassian.net/wiki/spaces/MAS/pages/2608988221/Model+documents>
+Public technical documentation is maintained in this repository:
 
-In addition, more details of the code structure, classes and methods can be found at auto-generated documentation:
-<https://ubiquitous-memory-3f497b35.pages.github.io/inherits.html>
+- [Project knowledge index](Model_documents/project_knowledge/README.md) — architecture, physiology, configuration, inputs, outputs, testing, and implementation references.
+- [Execution guide](Model_documents/config-execution/execution.md) — headless GroIMP commands, scenario selection, runtime options, and archive-backed runs.
+- [Test guide](tests/README.md) — portable smoke, validation, diagnostic, and GSZ test entry points.
+
+Code-structure documentation can be generated locally or published through the repository's Doxygen workflow; see [Auto-documentation](#auto-documentation).
 
 ## Updating Model Settings and Simulation Scenarios
 
@@ -219,6 +221,14 @@ bash Model_documents/FruitCropXL_doc_bash/module_replace.sh
 
 The generated entry point is `Model_documents/FruitCropXL_doc/index.html`. In the public repository, the manually triggered `Build FruitCropXL Documentation` GitHub Actions workflow builds the same sources and deploys them to the `gh-pages` branch for later GitHub Pages publication.
 
+## Licence, copyright, and citation
+
+FruitCropXL source code owned by New Zealand Institute for Bioeconomy Science Limited (trading as Bioeconomy Science Institute) is licensed under the GNU General Public License version 3 only (`GPL-3.0-only`), except where otherwise identified. See [`LICENSE`](LICENSE) and [`COPYRIGHT.md`](COPYRIGHT.md).
+
+Third-party components remain subject to their respective licences. The public Git export does not currently bundle standalone JAR or Apptainer image files; known runtime dependencies and the unresolved JFruit2 licence are documented in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+
+For the project-provided software author list and machine-readable citation metadata, see [`CITATION.cff`](CITATION.cff). Authorship credit is separate from legal copyright ownership.
+
 #### Defining Scenarios
 
 - Scenarios are outlined within an Excel file located in `Scenario_file_generation/1_scenario_and_parameters_excels`.
@@ -243,10 +253,10 @@ The overall directory is categorized into two main groups: folders essential for
 
 - **Model_input**: Stores all model input files, separating data from code to facilitate input adjustments and configuration testing.
 
-- **Model_scenario**: Contains files for various modeling scenarios, each specifying unique conditions or parameters for simulation, enabling exploration of different outcomes without altering the model's core structure.
+- **Model_scenarios**: Contains files for various modeling scenarios, each specifying unique conditions or parameters for simulation, enabling exploration of different outcomes without altering the model's core structure.
 
 - **ext**: Contains extra java packages for loading into GroIMP, extending the model's functionality with additional features, customizations, or integrations.
-- **images**: Contains the apptainer image for running the application in a isolated system environment. The image is quite large, thus it is recommended to directly commit the image in github. It is stored in the github container, and can be pulled to the local drive through the apptainer_pull.sh in the bash script folder.
+- **images**: Stores the locally downloaded Apptainer image. The large `*.sif` file is ignored and must not be committed; populate it with `bash bash_scripts/apptainer_pull.sh`.
 
 ### Complementary Folders
 
@@ -281,14 +291,18 @@ Follow these instructions to set up the model for execution on your local machin
   - Locate the `config.properties.txt` file in the `Util` folder and place it into your GroIMP folder.
   - Modify the path in the `.txt` file to reflect the location of your model. (Upon running GroIMP, the model generates a file with a default address; however, you'll need to update this address to match your specific path.) Without this file, the model cannot be opened.
 
-### Setup for running through apptainer image in the Windows sub-linux system
+### Setup for running through an Apptainer image in Windows Subsystem for Linux
 
-- see details in the: <https://plantandfood.atlassian.net/wiki/spaces/MAS/pages/2629304347/Running+GroIMP+using+Apptainer>
+1. Install Apptainer in the Linux environment.
+2. From the repository root, run `bash bash_scripts/apptainer_pull.sh` to download `images/groimp.sif`.
+3. Run `bash groimp_run.sh` to launch the model with the downloaded image.
+
+For headless commands and scenario options, see the [execution guide](Model_documents/config-execution/execution.md).
 
 ### Opening the Model
 
 - Launch the GroIMP interface.
-- Navigate to `File` > `Open` to select the `project.cs` file from the `scripts` folder.
+- Navigate to `File` > `Open` to select `Scripts/project.gs`.
 - To initialize, click `Save` or `Reset`. To view results from reading digitization data, click `Run once`.
 
 ### Archiving the Model

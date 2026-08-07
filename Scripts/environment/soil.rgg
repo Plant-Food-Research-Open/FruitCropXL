@@ -359,8 +359,7 @@ module Soil extends M(length)
 	 * @param alpha, 1/airEntryCoef, 1/Kpa 
 	 * @param n Pore-size distribution parameter.
 	 * @return The calculated water potential. 
-	 * see unit conversion: at the confluence page https://plantandfood.atlassian.net/wiki/x/EYCEsg
-	 * A pressure of 10^4 pascals (Pa) is equivalent to the pressure exerted by approximately 101.94 centimeters of water column.
+	 * Unit conversion: a pressure of 10^4 pascals (Pa) is equivalent to the pressure exerted by approximately 101.94 centimeters of water column.
 	 */
 	public double calcSoilWaterPotential(double relativeWaterContent) {
 		// Parameters for the soil, these could be function arguments or class members
