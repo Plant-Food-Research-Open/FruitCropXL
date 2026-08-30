@@ -1,0 +1,15 @@
+# Runtime-only dependencies for the FastAPI serving container.
+# Deliberately excludes training-time deps from pyproject.toml that
+# main.py never imports: torch, scikit-activeml, plotly, seaborn, boto3.
+# Versions pinned to match poetry.lock exactly.
+
+fastapi==0.136.0
+uvicorn[standard]==0.45.0
+pydantic==2.13.3
+python-multipart==0.0.32
+numpy==1.26.4
+pandas==2.3.3
+scikit-learn==1.4.2
+joblib==1.5.3
+mlflow==2.16.0
+urllib3==2.6.3
