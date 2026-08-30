@@ -1,0 +1,9 @@
+services:
+  plant-surrogate:
+    build: .
+    image: fruitcropxl-surrogate:local
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    # Models are baked into the image at build time — no volumes or
+    # secrets needed at runtime.

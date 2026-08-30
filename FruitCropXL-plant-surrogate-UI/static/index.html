@@ -1,0 +1,2259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Plant Surrogate Model Explorer</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500;1,300&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,300&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --surface2: #21262d;
+    --border: #30363d;
+    --text: #e6edf3;
+    --muted: #7d8590;
+    --accent: #3fb950;
+    --accent2: #58a6ff;
+    --accent3: #f78166;
+    --accent4: #d2a8ff;
+    --track: #21262d;
+    --thumb: #3fb950;
+  }
+
+  [data-theme="light"] {
+    --bg: #ffffff;
+    --surface: #ffffff;
+    --surface2: #ffffff;
+    --border: #c8c8c8;
+    --text: #1f2328;
+    --muted: #636c76;
+    --track: #d0d7de;
+    --thumb: #2da44e;
+  }
+  /* Larger, publication-friendly fonts in light mode (screenshots for paper) */
+  [data-theme="light"] body { font-size: 17px; }
+  [data-theme="light"] header h1 { font-size: 24px; }
+  [data-theme="light"] header p { font-size: 16px; }
+  [data-theme="light"] .feat-name,
+  [data-theme="light"] .input-row .feat-name { font-size: 16px; }
+  [data-theme="light"] .feat-num-input,
+  [data-theme="light"] .input-row .feat-num-input { font-size: 15px; }
+  [data-theme="light"] .feat-unit,
+  [data-theme="light"] .input-row .feat-unit { font-size: 14px; }
+  [data-theme="light"] .m-label,
+  [data-theme="light"] .m-unit { font-size: 15px; }
+  [data-theme="light"] .m-value { font-size: 20px; }
+  [data-theme="light"] .c-title,
+  [data-theme="light"] .charts-label,
+  [data-theme="light"] .batch-panel-title { font-size: 22px; font-weight: 500; }
+  [data-theme="light"] .batch-table,
+  [data-theme="light"] .batch-status,
+  [data-theme="light"] .met-status { font-size: 15px; }
+  [data-theme="light"] .info-banner { font-size: 15px; }
+  /* Add subtle borders so white-on-white panels remain visually separated */
+  [data-theme="light"] .chart-card,
+  [data-theme="light"] .metric-card,
+  [data-theme="light"] .batch-panel,
+  [data-theme="light"] .met-section,
+  [data-theme="light"] .daylight-section {
+    border: 1px solid var(--border);
+  }
+  [data-theme="light"] .info-banner {
+    background: #dafbe1;
+    border-color: #b7e4c7;
+    color: #1a7f37;
+  }
+  [data-theme="light"] .model-tab.active {
+    background: #dafbe1;
+  }
+  [data-theme="light"] .model-tab.active.water {
+    background: #ddf4ff;
+    border-color: var(--accent2);
+    color: var(--accent2);
+  }
+  [data-theme="light"] input[type=range]::-webkit-slider-thumb {
+    background: var(--thumb);
+  }
+  [data-theme="light"] .feat-num-input.out-of-range {
+    background: #fff8e1;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'DM Sans', sans-serif;
+    font-size: 13px;
+    min-height: 100vh;
+  }
+
+  header {
+    border-bottom: 1px solid var(--border);
+    padding: 16px 28px;
+    display: flex;
+    align-items: baseline;
+    gap: 16px;
+  }
+  header h1 {
+    font-family: 'DM Mono', monospace;
+    font-size: 15px;
+    font-weight: 500;
+    color: var(--accent);
+    letter-spacing: -0.01em;
+  }
+  header p { font-size: 12px; color: var(--muted); }
+
+  .info-banner {
+    background: #132b1f;
+    border-bottom: 1px solid #1e4030;
+    padding: 10px 28px;
+    font-size: 12px;
+    color: #7ee8a2;
+    line-height: 1.6;
+  }
+
+  .layout {
+    display: grid;
+    grid-template-columns: 300px 1fr;
+    height: calc(100vh - 90px);
+    overflow: hidden;
+  }
+
+  /* Sidebar */
+  .sidebar {
+    border-right: 1px solid var(--border);
+    overflow-y: auto;
+    padding: 16px;
+  }
+  .sidebar::-webkit-scrollbar { width: 4px; }
+  .sidebar::-webkit-scrollbar-track { background: transparent; }
+  .sidebar::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  /* Model selector */
+  .model-selector {
+    margin-bottom: 16px;
+    padding-bottom: 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  .model-selector .sel-label {
+    font-family: 'DM Mono', monospace;
+    font-size: 10px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 6px;
+  }
+  .model-tabs {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+  }
+  .model-tab {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--muted);
+    border-radius: 6px;
+    padding: 7px 10px;
+    font-family: 'DM Mono', monospace;
+    font-size: 11px;
+    cursor: pointer;
+    text-align: center;
+    transition: all .15s;
+    user-select: none;
+  }
+  .model-tab:hover { border-color: #444d56; color: var(--text); }
+  .model-tab.active {
+    background: #132b1f;
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  .model-tab.active.water {
+    background: #0d1f35;
+    border-color: var(--accent2);
+    color: var(--accent2);
+  }
+
+  .section-label {
+    font-family: 'DM Mono', monospace;
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin: 16px 0 8px;
+    padding-bottom: 4px;
+    border-bottom: 1px solid var(--border);
+  }
+  .section-label:first-child { margin-top: 0; }
+
+  .input-row { margin-bottom: 12px; }
+  .input-row label {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 4px;
+  }
+  .input-row .feat-name { color: var(--text); font-size: 12px; }
+  .input-row .feat-val {
+    font-family: 'DM Mono', monospace;
+    font-size: 11px;
+    color: var(--accent);
+    min-width: 52px;
+    text-align: right;
+  }
+  .input-row .feat-val.water { color: var(--accent2); }
+  .input-row .feat-unit { font-size: 10px; color: var(--muted); margin-left: 3px; }
+
+  input[type=range] {
+    width: 100%;
+    height: 3px;
+    appearance: none;
+    background: var(--track);
+    border-radius: 2px;
+    outline: none;
+    cursor: pointer;
+  }
+  input[type=range]::-webkit-slider-thumb {
+    appearance: none;
+    width: 12px; height: 12px;
+    border-radius: 50%;
+    background: var(--accent);
+    cursor: pointer;
+    transition: transform .1s;
+  }
+  input[type=range].water::-webkit-slider-thumb { background: var(--accent2); }
+  input[type=range]::-webkit-slider-thumb:hover { transform: scale(1.3); }
+
+  /* Sweep selector */
+  .sweep-box {
+    margin-top: 16px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+  }
+  select {
+    width: 100%;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 6px 8px;
+    border-radius: 6px;
+    font-family: 'DM Sans', sans-serif;
+    font-size: 12px;
+    margin-bottom: 10px;
+    cursor: pointer;
+    outline: none;
+  }
+  select:focus { border-color: var(--accent); }
+
+  .run-btn {
+    width: 100%;
+    background: var(--accent);
+    color: #0d1117;
+    border: none;
+    border-radius: 6px;
+    padding: 8px;
+    font-family: 'DM Mono', monospace;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    letter-spacing: 0.03em;
+    transition: opacity .15s, transform .1s;
+  }
+  .run-btn.water { background: var(--accent2); }
+  .run-btn:hover { opacity: .85; }
+  .run-btn:active { transform: scale(0.98); }
+  .run-btn:disabled { opacity: .4; cursor: not-allowed; }
+
+  /* Main */
+  .main { overflow-y: auto; padding: 20px 24px; }
+  .main::-webkit-scrollbar { width: 4px; }
+  .main::-webkit-scrollbar-track { background: transparent; }
+  .main::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  .metrics-grid {
+    display: grid;
+    gap: 10px;
+    margin-bottom: 20px;
+  }
+  .metric-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 14px;
+    transition: border-color .2s;
+  }
+  .metric-card:hover { border-color: #444d56; }
+  .metric-card .m-label { font-size: 10px; color: var(--muted); margin-bottom: 6px; line-height: 1.3; }
+  .metric-card .m-value { font-family: 'DM Mono', monospace; font-size: 17px; font-weight: 400; color: var(--text); }
+  .metric-card .m-unit { font-size: 10px; color: var(--muted); margin-top: 2px; }
+
+  .charts-label {
+    font-family: 'DM Mono', monospace;
+    font-size: 11px;
+    color: var(--muted);
+    margin-bottom: 12px;
+  }
+  .charts-label span { color: var(--accent2); }
+
+  .charts-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+  .chart-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px;
+    cursor: pointer;
+    transition: border-color .15s;
+  }
+  .chart-card:hover { border-color: #58a6ff; }
+  .chart-card .c-title { font-size: 10px; color: var(--muted); margin-bottom: 8px; line-height: 1.3; }
+  .chart-card canvas { display: block; }
+
+  /* Modal */
+  .modal-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.75);
+    z-index: 100;
+    align-items: center;
+    justify-content: center;
+  }
+  .modal-overlay.open { display: flex; }
+  .modal-box {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px 24px;
+    width: 720px;
+    max-width: 92vw;
+  }
+  .modal-header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 16px; }
+  .modal-title { font-family: 'DM Mono', monospace; font-size: 13px; color: var(--text); }
+  .modal-close { background: none; border: none; color: var(--muted); font-size: 18px; cursor: pointer; line-height: 1; padding: 0 4px; }
+  .modal-close:hover { color: var(--text); }
+
+  .download-row { margin-top: 16px; display: flex; justify-content: flex-end; }
+  .dl-btn {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    border-radius: 6px;
+    padding: 6px 14px;
+    font-family: 'DM Mono', monospace;
+    font-size: 11px;
+    cursor: pointer;
+    transition: border-color .15s, color .15s;
+  }
+  .dl-btn:hover { border-color: var(--accent2); color: var(--accent2); }
+
+  #status {
+    font-family: 'DM Mono', monospace;
+    font-size: 10px;
+    color: var(--muted);
+    margin-top: 6px;
+    min-height: 14px;
+  }
+
+  /* Number input beside sliders */
+  .slider-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .slider-row input[type=range] {
+    flex: 1;
+  }
+  .feat-num-input {
+    width: 80px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 4px;
+    padding: 3px 6px;
+    font-family: 'DM Mono', monospace;
+    font-size: 11px;
+    text-align: right;
+    outline: none;
+    transition: border-color .15s;
+  }
+  .feat-num-input:focus { border-color: var(--accent); }
+  .feat-num-input.water:focus { border-color: var(--accent2); }
+  .feat-num-input.out-of-range {
+    border-color: #f0a500 !important;
+    background: #1e1800;
+  }
+  .range-warning {
+    font-size: 9px;
+    color: #f0a500;
+    font-family: 'DM Mono', monospace;
+    margin-top: 2px;
+    min-height: 12px;
+    display: none;
+  }
+  .range-warning.visible { display: block; }
+
+  /* Batch upload section */
+  .batch-section {
+    margin-top: 16px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+  }
+  .upload-btn {
+    width: 100%;
+    background: var(--surface2);
+    border: 1px dashed var(--border);
+    color: var(--muted);
+    border-radius: 6px;
+    padding: 8px;
+    font-family: 'DM Mono', monospace;
+    font-size: 11px;
+    cursor: pointer;
+    text-align: center;
+    transition: border-color .15s, color .15s;
+  }
+  .upload-btn:hover { border-color: var(--accent2); color: var(--accent2); }
+  .batch-status {
+    font-family: 'DM Mono', monospace;
+    font-size: 10px;
+    margin-top: 6px;
+    min-height: 14px;
+    color: var(--muted);
+  }
+  .batch-status.ok  { color: #3fb950; }
+  .batch-status.err { color: #f78166; }
+  .feat-locked {
+    opacity: 0.45;
+    pointer-events: none;
+  }
+  .locked-badge {
+    font-family: 'DM Mono', monospace;
+    font-size: 9px;
+    color: var(--accent2);
+    margin-left: 4px;
+  }
+
+  /* Batch results panel */
+  .batch-panel {
+    margin-top: 28px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+    display: none;
+  }
+  .batch-panel.visible { display: block; }
+  .batch-panel-title {
+    font-family: 'DM Mono', monospace;
+    font-size: 11px;
+    color: var(--muted);
+    margin-bottom: 12px;
+  }
+  .batch-panel-title span { color: var(--accent2); }
+  .batch-charts-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+    margin-bottom: 12px;
+  }
+  .batch-table-wrap {
+    overflow-x: auto;
+    margin-bottom: 10px;
+  }
+  .batch-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: 'DM Mono', monospace;
+    font-size: 10px;
+  }
+  .batch-table th {
+    background: var(--surface2);
+    color: var(--muted);
+    padding: 5px 8px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  .batch-table td {
+    padding: 4px 8px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text);
+    white-space: nowrap;
+  }
+  .batch-table tr:last-child td { border-bottom: none; }
+  .batch-table td.pred { color: var(--accent2); }
+  .download-row { gap: 6px; }
+
+  /* Met file section */
+  .met-section {
+    margin-top: 16px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+  }
+  .met-file-label {
+    display: block;
+    width: 100%;
+    background: var(--surface2);
+    border: 1px dashed var(--border);
+    color: var(--muted);
+    border-radius: 6px;
+    padding: 8px;
+    font-family: 'DM Mono', monospace;
+    font-size: 11px;
+    cursor: pointer;
+    text-align: center;
+    transition: border-color .15s, color .15s;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .met-file-label:hover { border-color: var(--accent2); color: var(--accent2); }
+  .met-options {
+    display: none;
+    margin-top: 10px;
+  }
+  .met-grid-2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    margin-bottom: 6px;
+  }
+  .met-field-label {
+    font-size: 10px;
+    color: var(--muted);
+    display: block;
+    margin-bottom: 3px;
+  }
+  .met-input {
+    width: 100%;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 4px;
+    padding: 4px 6px;
+    font-family: 'DM Mono', monospace;
+    font-size: 11px;
+    outline: none;
+    transition: border-color .15s;
+  }
+  .met-input:focus { border-color: var(--accent2); }
+  .met-parse-btn {
+    width: 100%;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--accent2);
+    border-radius: 6px;
+    padding: 7px;
+    font-family: 'DM Mono', monospace;
+    font-size: 11px;
+    cursor: pointer;
+    transition: border-color .15s, opacity .15s;
+    margin-top: 4px;
+  }
+  .met-parse-btn:hover { border-color: var(--accent2); opacity: .85; }
+  .met-parse-btn:disabled { opacity: .4; cursor: not-allowed; }
+  .met-status {
+    font-family: 'DM Mono', monospace;
+    font-size: 10px;
+    margin-top: 6px;
+    min-height: 14px;
+    color: var(--muted);
+    white-space: pre-line;
+    line-height: 1.5;
+  }
+  .met-status.ok   { color: #3fb950; }
+  .met-status.warn { color: #f0a500; }
+  .met-status.err  { color: #f78166; }
+  .met-badge {
+    font-family: 'DM Mono', monospace;
+    font-size: 9px;
+    padding: 1px 4px;
+    border-radius: 3px;
+    background: rgba(88,166,255,0.12);
+    color: var(--accent2);
+    margin-left: 5px;
+    vertical-align: middle;
+  }
+  .met-locked input[type=range],
+  .met-locked input[type=number] {
+    opacity: 0.35;
+    pointer-events: none;
+  }
+  .met-checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 10px;
+    color: var(--muted);
+    margin: 8px 0 2px;
+    cursor: pointer;
+  }
+  .met-checkbox-label input { cursor: pointer; }
+  .met-extend-note {
+    font-size: 9px;
+    color: #f0a500;
+    font-family: 'DM Mono', monospace;
+    margin-bottom: 6px;
+    line-height: 1.4;
+    display: none;
+  }
+  .met-extend-note.visible { display: block; }
+
+  /* Daylight window (manual sunrise/sunset lock) */
+  .daylight-section {
+    margin-top: 16px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+  }
+  .sun-locked input[type=range],
+  .sun-locked input[type=number] {
+    opacity: 0.35;
+    pointer-events: none;
+  }
+  .sun-badge {
+    font-family: 'DM Mono', monospace;
+    font-size: 9px;
+    padding: 1px 4px;
+    border-radius: 3px;
+    background: rgba(240,165,0,0.12);
+    color: #f0a500;
+    margin-left: 5px;
+    vertical-align: middle;
+  }
+
+  /* ------------------------------------------------------------------
+     Print / screenshot styles
+     Forces a true-white background and larger, print-legible fonts.
+     Applies to browser Print, Print-to-PDF, and print-preview
+     screenshots regardless of the on-screen theme (dark or light).
+     ------------------------------------------------------------------ */
+  @media print {
+    /* Make browsers keep our backgrounds/colors instead of stripping them */
+    *, *::before, *::after {
+      -webkit-print-color-adjust: exact !important;
+      print-color-adjust: exact !important;
+      color-adjust: exact !important;
+    }
+
+    /* Force white surfaces regardless of active theme */
+    :root,
+    [data-theme="light"],
+    [data-theme="dark"] {
+      --bg: #ffffff !important;
+      --surface: #ffffff !important;
+      --surface2: #ffffff !important;
+      --border: #b0b0b0 !important;
+      --text: #000000 !important;
+      --muted: #333333 !important;
+      --track: #cccccc !important;
+    }
+
+    html, body {
+      background: #ffffff !important;
+      color: #000000 !important;
+    }
+
+    /* Bump base font size for print legibility */
+    body { font-size: 15px !important; }
+    header h1 { font-size: 20px !important; }
+    header p { font-size: 13px !important; }
+
+    /* Small mono labels/values — bump so they're readable in figures */
+    .feat-name, .input-row .feat-name { font-size: 14px !important; }
+    .feat-num-input, .input-row .feat-num-input { font-size: 13px !important; }
+    .feat-unit, .input-row .feat-unit { font-size: 12px !important; }
+    .m-label, .m-unit { font-size: 12px !important; }
+    .m-value { font-size: 16px !important; }
+    .c-title, .charts-label, .batch-panel-title { font-size: 14px !important; }
+    .batch-table, .batch-status, .met-status { font-size: 12px !important; }
+    .info-banner { font-size: 13px !important; }
+
+    /* Panels/cards: white fill, light border so they don't read as grey blocks */
+    .chart-card, .metric-card, .batch-panel, .modal-box,
+    .met-section, .daylight-section, .info-banner {
+      background: #ffffff !important;
+      border-color: #b0b0b0 !important;
+      box-shadow: none !important;
+    }
+
+    /* Chart.js canvases render whatever their JS config sets — force the
+       DOM behind them to white so any transparent areas print white. */
+    canvas { background: #ffffff !important; }
+
+    /* Avoid awkward mid-chart page breaks when printing to PDF */
+    .chart-card, .metric-card, .batch-panel { page-break-inside: avoid; }
+  }
+
+  .param-defs-panel {
+    margin-top: 12px;
+    padding: 10px 12px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+  .param-defs-title {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+    margin-bottom: 8px;
+  }
+  .param-defs-row {
+    margin-bottom: 8px;
+  }
+  .param-defs-row:last-child { margin-bottom: 0; }
+  .param-defs-code {
+    display: block;
+    font-family: 'DM Mono', monospace;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--accent2);
+    margin-bottom: 2px;
+  }
+  .param-defs-text {
+    display: block;
+    font-size: 11px;
+    color: var(--muted);
+    line-height: 1.4;
+  }
+  [data-theme="light"] .param-defs-text { color: var(--text); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>plant-surrogate-explorer</h1>
+  <p id="header-sub">loading…</p>
+  <button id="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark mode"
+    style="margin-left:auto;background:transparent;border:1px solid var(--border);
+           color:var(--muted);border-radius:6px;padding:4px 10px;
+           font-family:'DM Mono',monospace;font-size:11px;cursor:pointer;
+           transition:border-color .15s,color .15s;"
+    onmouseover="this.style.color='var(--text)';this.style.borderColor='var(--muted)'"
+    onmouseout="this.style.color='var(--muted)';this.style.borderColor='var(--border)'">
+    ☀ light
+  </button>
+</header>
+
+<div class="info-banner">
+  Select a model, set your conditions in the left panel, then run a response sweep to see how any input drives each output.
+</div>
+
+<div class="layout">
+  <div class="sidebar">
+
+    <!-- Model selector -->
+    <div class="model-selector">
+      <div class="sel-label">Active model</div>
+      <div class="model-tabs">
+        <div class="model-tab active" id="tab-light" onclick="switchModel('light')">🌿 Light</div>
+        <div class="model-tab water" id="tab-water" onclick="switchModel('water')">💧 Water</div>
+      </div>
+    </div>
+
+    <!-- Dynamic sliders -->
+    <div id="sliders-container"></div>
+
+    <!-- Daylight window (manual single-point path; no lat/lon context here) -->
+    <div class="daylight-section">
+      <div class="section-label">Daylight window</div>
+      <div class="met-grid-2">
+        <div>
+          <span class="met-field-label">Sunrise (h)</span>
+          <input type="number" id="sunrise_hr" class="met-input"
+                 value="6" min="0" max="24" step="0.1"
+                 oninput="checkDaylightLock(); debouncedPredict();">
+        </div>
+        <div>
+          <span class="met-field-label">Sunset (h)</span>
+          <input type="number" id="sunset_hr" class="met-input"
+                 value="18" min="0" max="24" step="0.1"
+                 oninput="checkDaylightLock(); debouncedPredict();">
+        </div>
+      </div>
+
+      <label class="met-checkbox-label">
+        <input type="checkbox" id="sweep-use-day" onchange="toggleSweepDayInputs()">
+        <span>Sweep: compute from day of year + site location</span>
+      </label>
+      <div class="met-extend-note" id="sweep-day-note">
+        Only applied when sweeping Hour of day: recomputes azimuth/solar elevation for each
+        swept hour on this day/site (overriding those sliders for the sweep), and overrides the
+        manual sunrise/sunset above for the daylight cutoff.
+      </div>
+
+      <div class="met-grid-2" id="sweep-day-inputs" style="display:none;">
+        <div>
+          <span class="met-field-label">Day of year</span>
+          <input type="number" id="sweep-day-of-year" class="met-input"
+                 value="172" min="1" max="366" step="1">
+        </div>
+        <div></div>
+        <div>
+          <span class="met-field-label">Latitude (°)</span>
+          <input type="number" id="sweep-lat" class="met-input"
+                 value="-39.65" step="0.01">
+        </div>
+        <div>
+          <span class="met-field-label">Longitude (°)</span>
+          <input type="number" id="sweep-lon" class="met-input"
+                 value="176.92" step="0.01">
+        </div>
+      </div>
+
+      <label class="met-checkbox-label">
+        <input type="checkbox" id="sweep-extend-hours" onchange="toggleSweepExtendNote()">
+        <span>Sweep: extend to 24h (outside training range)</span>
+      </label>
+      <div class="met-extend-note" id="sweep-extend-note">
+        Only applied when sweeping Hour of day: sweeps the full 0–24h range instead of [9, 16].
+        Points outside [9, 16] are extrapolations beyond the model's trained range — they're
+        shaded red on the chart.
+      </div>
+    </div>
+
+    <!-- Sweep -->
+    <div class="sweep-box">
+      <div class="section-label">Response sweep</div>
+      <select id="sweep-feature"></select>
+      <button class="run-btn" id="run-btn" onclick="runSweep()">Run sweep</button>
+      <div style="margin-top:10px;">
+        <label style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px;">
+          <span style="font-size:11px;color:var(--muted);">Sweep points</span>
+          <span style="font-family:'DM Mono',monospace;font-size:11px;color:var(--accent);" id="v-npoints">80</span>
+        </label>
+        <input type="range" id="npoints" min="20" max="200" step="10" value="80"
+               oninput="document.getElementById('v-npoints').textContent=this.value">
+      </div>
+      <div id="status"></div>
+    </div>
+
+    <!-- Met file upload -->
+    <div class="met-section">
+      <div class="section-label">Met file input</div>
+      <input type="file" id="met-file-input" accept=".csv"
+             style="display:none" onchange="onMetFileChosen(this)">
+      <div class="met-file-label" id="met-file-label"
+           onclick="document.getElementById('met-file-input').click()">
+        ⬆ Upload met CSV…
+      </div>
+      <button id="met-clear-btn"
+              onclick="clearMetFile()"
+              style="display:none;width:100%;margin-top:6px;"
+              class="dl-btn">✕ clear met file</button>
+
+      <div class="met-options" id="met-options">
+        <div class="met-grid-2">
+          <div>
+            <span class="met-field-label">Latitude (°)</span>
+            <input type="number" id="met-lat" class="met-input"
+                   value="-39.65" step="0.01">
+          </div>
+          <div>
+            <span class="met-field-label">Longitude (°)</span>
+            <input type="number" id="met-lon" class="met-input"
+                   value="176.92" step="0.01">
+          </div>
+        </div>
+        <div class="met-grid-2">
+          <div>
+            <span class="met-field-label">Day from</span>
+            <input type="number" id="met-day-min" class="met-input"
+                   value="1" min="1" max="366" step="1">
+          </div>
+          <div>
+            <span class="met-field-label">Day to</span>
+            <input type="number" id="met-day-max" class="met-input"
+                   value="366" min="1" max="366" step="1">
+          </div>
+        </div>
+        <label class="met-checkbox-label">
+          <input type="checkbox" id="met-extend-hours" onchange="toggleExtendHoursNote()">
+          <span>Extend to 24h (outside training range)</span>
+        </label>
+        <div class="met-extend-note" id="met-extend-note">
+          &#9888; Hours outside the model's trained range [9, 16] are extrapolations —
+          treat those predictions as unreliable.
+        </div>
+        <button class="met-parse-btn" id="met-parse-btn" onclick="parseMet()">
+          ⚙ Parse met file
+        </button>
+        <div class="met-status" id="met-status"></div>
+      </div>
+    </div>
+
+    <!-- Batch CSV upload -->
+    <div class="batch-section">
+      <div class="section-label">Batch predict</div>
+      <input type="file" id="csv-file-input" accept=".csv" style="display:none" onchange="onCSVUpload(this)">
+      <button class="upload-btn" onclick="document.getElementById('csv-file-input').click()">
+        ⬆ Upload feature CSV
+      </button>
+      <div class="batch-status" id="batch-status"></div>
+      <button class="run-btn" id="batch-run-btn" style="margin-top:8px;display:none" onclick="runBatchPredict()">
+        Run batch predict
+      </button>
+      <button class="dl-btn" id="batch-clear-btn" style="margin-top:6px;display:none;width:100%;text-align:center"
+              onclick="clearBatch()">✕ clear CSV</button>
+    </div>
+
+  </div>
+
+  <!-- Main -->
+  <div class="main">
+    <div class="metrics-grid" id="metrics-grid"></div>
+    <div class="charts-label">
+      Response curves — sweeping <span id="sweep-label">—</span>
+    </div>
+    <div class="charts-grid" id="charts-grid"></div>
+    <div class="download-row">
+      <button class="dl-btn" id="dl-btn" onclick="downloadCSV()" disabled>⬇ CSV</button>
+      <button class="dl-btn" id="dl-png-btn" onclick="downloadChartsPNG()" disabled>⬇ PNG</button>
+      <button class="dl-btn" id="dl-svg-btn" onclick="downloadChartsSVG()" disabled>⬇ SVG</button>
+    </div>
+
+    <!-- Batch results -->
+    <div class="batch-panel" id="batch-panel">
+      <div class="batch-panel-title">
+        Batch predictions — <span id="batch-row-count">0</span> rows ·
+        <span id="batch-x-label">—</span> on x-axis
+      </div>
+      <div class="batch-charts-grid" id="batch-charts-grid"></div>
+      <div class="batch-table-wrap">
+        <table class="batch-table" id="batch-table"></table>
+      </div>
+      <div class="download-row" style="display:flex;justify-content:flex-end;margin-top:4px;">
+        <button class="dl-btn" id="batch-dl-csv" onclick="downloadBatchCSV()">⬇ CSV</button>
+        <button class="dl-btn" id="batch-dl-png" onclick="downloadBatchPNG()">⬇ PNG</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Modal -->
+<div class="modal-overlay" id="modal-overlay" onclick="closeModal(event)">
+  <div class="modal-box">
+    <div class="modal-header">
+      <span class="modal-title" id="modal-title">—</span>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div style="position:relative;height:340px;">
+      <canvas id="modal-canvas"></canvas>
+    </div>
+    <div style="margin-top:10px;display:flex;justify-content:space-between;align-items:center;">
+      <span style="font-family:'DM Mono',monospace;font-size:10px;color:var(--muted);">click anywhere outside to close</span>
+      <div style="display:flex;gap:6px;">
+        <button class="dl-btn" id="modal-dl-png" onclick="downloadModalPNG()">⬇ PNG</button>
+        <button class="dl-btn" id="modal-dl-svg" onclick="downloadModalSVG()">⬇ SVG</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── Model metadata (fetched from /api/meta) ───────────────────────────────────
+let META = null;
+let activeModel = 'light';
+let charts = {};
+let lastSweepData = null;
+let modalChart = null;
+
+// Target display config — colours and units per key
+const TARGET_CONFIG = {
+  fabsPAR:             { label: 'Whole-canopy absorbed PAR index (fabsPAR)', unit: '–',               color: '#3fb950' },
+  fPAR_1:              { label: 'Lower-canopy relative PAR (fPAR_1)',        unit: '–',               color: '#58c969' },
+  waterFlux_optimized: { label: 'Whole-plant water flux',                    unit: 'mg plant⁻¹ s⁻¹', color: '#58a6ff' },
+  xylemWaterPotential: { label: 'Xylem water potential',                     unit: 'MPa',             color: '#79c0ff' },
+  intWaterPotential_1: { label: 'Int. water potential 1',                    unit: 'MPa',             color: '#d2a8ff' },
+  intWaterPotential_2: { label: 'Int. water potential 2',                    unit: 'MPa',             color: '#bc8cff' },
+  intWaterPotential_3: { label: 'Int. water potential 3',                    unit: 'MPa',             color: '#a371f7' },
+  intWaterPotential_4: { label: 'Int. water potential 4',                    unit: 'MPa',             color: '#8b5cf6' },
+};
+
+// Feature display config — human labels and units
+const FEATURE_CONFIG = {
+  hourOfDay:          { label: 'Hour of day',           unit: 'h' },
+  rowOrientation:     { label: 'Row orientation',       unit: '°' },
+  rowDistance:        { label: 'Row spacing',           unit: 'm' },
+  azimuth:            { label: 'Azimuth',               unit: '°' },
+  solarElevation:     { label: 'Solar elevation',       unit: '°' },
+  leafAreaPerPlant:   { label: 'Leaf area per plant',   unit: 'm²' },
+  fDiffuseLight:      { label: 'Diffuse light fraction',unit: '–' },
+  incomingRadiation:  { label: 'Incoming radiation',    unit: 'µmol m⁻² s⁻¹' },
+  rh:                 { label: 'Relative humidity',     unit: '–' },
+  wind:               { label: 'Wind speed',            unit: 'm s⁻¹' },
+  Ta:                 { label: 'Air temperature',       unit: '°C' },
+  soilWaterPotential: { label: 'Soil water potential',  unit: 'MPa' },
+  'P:eq1_b':          { label: 'Stomatal water-potential threshold (P:eq1_b)',       unit: 'MPa' },
+  'P:phi_stem':       { label: 'Stem vulnerability water-potential scale (P:phi_stem)', unit: 'MPa' },
+  'P:Grmax_a':        { label: 'Root hydraulic-conductance scaling (P:Grmax_a)',     unit: '–' },
+  'P:slope_Jmax':     { label: 'Jmax\u2013leaf-N slope (P:slope_Jmax)',              unit: '–' },
+  'P:cx1':            { label: 'Stem vulnerability curve shape (P:cx1)',             unit: '–' },
+};
+
+const PARAM_DEFINITIONS = {
+  'P:eq1_b':      'Leaf water-potential midpoint of the logistic stomatal-limitation response; the response multiplier equals 0.5 at this potential. Units: MPa.',
+  'P:phi_stem':   'Characteristic stem water potential in the xylem vulnerability response; axial conductivity equals 50% of its maximum at this potential. Units: MPa.',
+  'P:Grmax_a':    'Slope scaling maximum fine-root hydraulic conductance with fine-root dry biomass. Units: (mg H\u2082O s\u207b\u00b9 MPa\u207b\u00b9) (mg root DM)\u207b\u00b9.',
+  'P:cx1':        'Exponent controlling the curvature and steepness of the xylem vulnerability response. Units: dimensionless.',
+  'P:slope_Jmax': 'Slope relating maximum electron-transport capacity at 25 \u00b0C to leaf nitrogen per unit area. Units: \u00b5mol e\u207b g\u207b\u00b9 N s\u207b\u00b9.',
+};
+
+// ── Vertical marker plugin ────────────────────────────────────────────────────
+const verticalMarkerPlugin = {
+  id: 'verticalMarker',
+  afterDraw(chart) {
+    const idx = chart._markerIdx;
+    if (idx == null || !chart.data.labels || !chart.data.labels.length) return;
+    const meta = chart.getDatasetMeta(0);
+    if (!meta.data || !meta.data[idx]) return;
+    const x = meta.data[idx].x;
+    const { top, bottom } = chart.chartArea;
+    const ctx = chart.ctx;
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(x, top);
+    ctx.lineTo(x, bottom);
+    ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 3]);
+    ctx.stroke();
+    const yVal = meta.data[idx].y;
+    ctx.beginPath();
+    ctx.arc(x, yVal, 3.5, 0, 2 * Math.PI);
+    ctx.fillStyle = chart._markerColor || '#fff';
+    ctx.fill();
+    ctx.restore();
+  }
+};
+Chart.register(verticalMarkerPlugin);
+
+// Shades the background behind flagged data points on met-upload batch charts.
+// Enable via plugins: { rowShading: { bands: [{ flags: [bool,...], color }, ...] } }.
+// Bands are drawn in order, so later entries paint over earlier ones where they overlap.
+const rowShadingPlugin = {
+  id: 'rowShading',
+  beforeDatasetsDraw(chart, args, opts) {
+    const bands = opts && opts.bands;
+    if (!bands || !bands.length) return;
+    const meta = chart.getDatasetMeta(0);
+    if (!meta.data || !meta.data.length) return;
+    const { top, bottom } = chart.chartArea;
+    const ctx = chart.ctx;
+    ctx.save();
+    bands.forEach(({ flags, color }) => {
+      if (!flags || !flags.length) return;
+      ctx.fillStyle = color;
+      flags.forEach((isFlagged, i) => {
+        if (!isFlagged || !meta.data[i]) return;
+        const point = meta.data[i];
+        const prev  = meta.data[i - 1];
+        const next  = meta.data[i + 1];
+        const xLeft  = prev ? (point.x + prev.x) / 2 : point.x - 4;
+        const xRight = next ? (point.x + next.x) / 2 : point.x + 4;
+        ctx.fillRect(xLeft, top, xRight - xLeft, bottom - top);
+      });
+    });
+    ctx.restore();
+  }
+};
+Chart.register(rowShadingPlugin);
+
+// ── Boot: fetch meta then build UI ───────────────────────────────────────────
+async function boot() {
+  // Restore saved theme before anything renders
+  const savedTheme = localStorage.getItem('pfr-theme') || 'dark';
+  document.documentElement.setAttribute('data-theme', savedTheme);
+  const btn = document.getElementById('theme-toggle');
+  if (btn) btn.textContent = savedTheme === 'light' ? '🌙 dark' : '☀ light';
+
+  const res = await fetch('/api/meta');
+  META = await res.json();
+  buildUI('light');
+  await predict();
+  // Sync chart tick fonts/colors with the restored theme (bigger fonts in light mode)
+  applyTheme(savedTheme);
+
+  // Default the sweep day-of-year field to today's date
+  const doyEl = document.getElementById('sweep-day-of-year');
+  if (doyEl) {
+    const now = new Date();
+    const startOfYear = new Date(now.getFullYear(), 0, 0);
+    doyEl.value = Math.ceil((now - startOfYear) / 86400000);
+  }
+}
+
+function toggleSweepDayInputs() {
+  const useDay = document.getElementById('sweep-use-day').checked;
+  document.getElementById('sweep-day-inputs').style.display = useDay ? 'grid' : 'none';
+  document.getElementById('sweep-day-note').classList.toggle('visible', useDay);
+  document.getElementById('sunrise_hr').disabled = useDay;
+  document.getElementById('sunset_hr').disabled = useDay;
+}
+
+function toggleSweepExtendNote() {
+  const extend = document.getElementById('sweep-extend-hours').checked;
+  document.getElementById('sweep-extend-note').classList.toggle('visible', extend);
+}
+
+// ── Switch model ──────────────────────────────────────────────────────────────
+function switchModel(model) {
+  if (model === activeModel) return;
+  activeModel = model;
+
+  // Update tabs
+  document.getElementById('tab-light').classList.toggle('active', model === 'light');
+  document.getElementById('tab-water').classList.toggle('active', model === 'water');
+  document.getElementById('tab-water').classList.toggle('water', true);
+
+  // Clear any loaded batch CSV (features differ between models)
+  clearBatch();
+  // Re-apply met lock for the new model's feature set (differs between light/water)
+  if (metParsedRows) {
+    metFeatures = new Set(META[model].met_features || []);
+    lockMetSliders();
+  }
+
+  // Rebuild sidebar + main
+  buildUI(model);
+  predict();
+}
+
+// ── Build full UI for a model ─────────────────────────────────────────────────
+function buildUI(model) {
+  const m = META[model];
+  const isWater = model === 'water';
+  const accentClass = isWater ? 'water' : '';
+
+  // Header subtitle
+  const nFeatures = m.features.length;
+  const nTargets  = m.targets.length;
+  document.getElementById('header-sub').textContent =
+    `${model} surrogate · MLP · ${nFeatures} inputs · ${nTargets} targets`;
+
+  // Run button colour
+  const btn = document.getElementById('run-btn');
+  btn.className = 'run-btn' + (isWater ? ' water' : '');
+
+  // Sliders
+  buildSliders(model, m);
+
+  // Sweep dropdown
+  buildSweepDropdown(m);
+
+  // Metric cards
+  buildMetrics(m, isWater);
+
+  // Charts
+  buildCharts(m, isWater);
+
+  // Reset sweep state
+  lastSweepData = null;
+  document.getElementById('dl-btn').disabled = true;
+  document.getElementById('dl-png-btn').disabled = true;
+  document.getElementById('dl-svg-btn').disabled = true;
+  document.getElementById('sweep-label').textContent = '—';
+  document.getElementById('status').textContent = '';
+
+  // Re-apply met locks after slider rebuild
+  if (metParsedRows) lockMetSliders();
+  checkDaylightLock();
+}
+
+// ── Sliders ───────────────────────────────────────────────────────────────────
+function buildSliders(model, m) {
+  const container = document.getElementById('sliders-container');
+  const isWater = model === 'water';
+
+  // Group features: env features first (no P: prefix), then params (P: prefix)
+  const envFeatures   = m.features.filter(f => !f.startsWith('P:'));
+  const paramFeatures = m.features.filter(f => f.startsWith('P:'));
+
+  let html = '';
+
+  if (envFeatures.length) {
+    html += `<div class="section-label">Environmental inputs</div>`;
+    html += envFeatures.map(f => sliderHTML(f, m.feature_ranges[f], isWater)).join('');
+  }
+
+  if (paramFeatures.length) {
+    html += `<div class="section-label">Model parameters</div>`;
+    html += paramFeatures.map(f => sliderHTML(f, m.feature_ranges[f], isWater)).join('');
+
+    const definedParams = paramFeatures.filter(f => PARAM_DEFINITIONS[f]);
+    if (definedParams.length) {
+      html += `<div class="param-defs-panel">`;
+      html += `<div class="param-defs-title">Parameter definitions</div>`;
+      html += definedParams.map(f => `
+        <div class="param-defs-row">
+          <span class="param-defs-code">${f}</span>
+          <span class="param-defs-text">${PARAM_DEFINITIONS[f]}</span>
+        </div>`).join('');
+      html += `</div>`;
+    }
+  }
+
+  container.innerHTML = html;
+}
+
+function sliderHTML(feat, range, isWater) {
+  const cfg     = FEATURE_CONFIG[feat] || { label: feat, unit: '–' };
+  const val     = range.default;
+  const step    = guessStep(range.min, range.max);
+  const accentC = isWater ? ' water' : '';
+  const dispVal = formatVal(val, step);
+
+  return `
+    <div class="input-row">
+      <label>
+        <span class="feat-name">${cfg.label}</span>
+        <span class="feat-unit">${cfg.unit}</span>
+      </label>
+      <div class="slider-row">
+        <input type="range" id="${feat}" class="${isWater ? 'water' : ''}"
+               min="${range.min}" max="${range.max}" step="${step}" value="${val}"
+               oninput="onSlider(this)">
+        <input type="number" id="n-${feat}" class="feat-num-input${accentC}"
+               value="${dispVal}" step="${step}"
+               oninput="onNumInput(this, '${feat}')">
+      </div>
+      <div class="range-warning" id="w-${feat}">&#9888; outside training range [${range.min}, ${range.max}]</div>
+    </div>`;
+}
+
+function guessStep(min, max) {
+  const span = max - min;
+  if (span <= 0.01) return 0.0001;
+  if (span <= 0.1)  return 0.001;
+  if (span <= 2)    return 0.01;
+  if (span <= 20)   return 0.1;
+  if (span <= 100)  return 0.5;
+  return 1;
+}
+
+function formatVal(val, step) {
+  if (step <= 0.0001) return parseFloat(val).toFixed(4);
+  if (step <= 0.001)  return parseFloat(val).toFixed(3);
+  if (step <= 0.01)   return parseFloat(val).toFixed(2);
+  if (step <= 0.1)    return parseFloat(val).toFixed(1);
+  return parseFloat(val).toFixed(1);
+}
+
+function onSlider(el) {
+  const range  = META[activeModel].feature_ranges[el.id];
+  const step   = guessStep(range.min, range.max);
+  const numEl  = document.getElementById('n-' + el.id);
+  if (numEl) numEl.value = formatVal(el.value, step);
+  checkRange(el.id, parseFloat(el.value), range.min, range.max);
+  if (el.id === 'hourOfDay') checkDaylightLock();
+  debouncedPredict();
+}
+
+function onNumInput(numEl, feat) {
+  const val   = parseFloat(numEl.value);
+  if (isNaN(val)) return;
+  const range = META[activeModel].feature_ranges[feat];
+  // Move slider handle (clamped visually; raw value sent to API)
+  const slider = document.getElementById(feat);
+  if (slider) slider.value = Math.min(range.max, Math.max(range.min, val));
+  checkRange(feat, val, range.min, range.max);
+  if (feat === 'hourOfDay') checkDaylightLock();
+  debouncedPredict();
+}
+
+function checkRange(feat, val, min, max) {
+  const numEl  = document.getElementById('n-' + feat);
+  const warnEl = document.getElementById('w-' + feat);
+  const out    = val < min || val > max;
+  if (numEl)  numEl.classList.toggle('out-of-range', out);
+  if (warnEl) warnEl.classList.toggle('visible', out);
+}
+
+// ── Daylight window (manual single-point sunrise/sunset lock) ─────────────────
+// When a met file is loaded, hourOfDay/incomingRadiation are already met-locked
+// and per-row daylight zeroing is handled server-side in /api/parse_met.
+function checkDaylightLock() {
+  if (metParsedRows) return;
+
+  const hourEl = document.getElementById('hourOfDay');
+  const sunriseEl = document.getElementById('sunrise_hr');
+  const sunsetEl  = document.getElementById('sunset_hr');
+  if (!hourEl || !sunriseEl || !sunsetEl) return;
+
+  const hour    = parseFloat(hourEl.value);
+  const sunrise = parseFloat(sunriseEl.value);
+  const sunset  = parseFloat(sunsetEl.value);
+  const outside = !isNaN(hour) && !isNaN(sunrise) && !isNaN(sunset) &&
+                  (hour < sunrise || hour > sunset);
+
+  ['incomingRadiation', 'fDiffuseLight'].forEach(feat => {
+    const row = document.querySelector(`.input-row:has(#${CSS.escape(feat)})`);
+    if (!row) return;
+    row.classList.toggle('sun-locked', outside);
+
+    let badge = row.querySelector('.sun-badge');
+    if (outside) {
+      const range  = META[activeModel].feature_ranges[feat];
+      const step   = guessStep(range.min, range.max);
+      const slider = document.getElementById(feat);
+      const numEl  = document.getElementById('n-' + feat);
+      if (slider) slider.value = 0;
+      if (numEl)  numEl.value  = formatVal(0, step);
+      checkRange(feat, 0, range.min, range.max);
+      if (!badge) {
+        const nameEl = row.querySelector('.feat-name');
+        if (nameEl) {
+          badge = document.createElement('span');
+          badge.className = 'sun-badge';
+          badge.textContent = '🌙 night';
+          nameEl.appendChild(badge);
+        }
+      }
+    } else if (badge) {
+      badge.remove();
+    }
+  });
+}
+
+// ── Sweep dropdown ────────────────────────────────────────────────────────────
+function buildSweepDropdown(m) {
+  const sel = document.getElementById('sweep-feature');
+  sel.innerHTML = m.features.map(f => {
+    const cfg = FEATURE_CONFIG[f] || { label: f, unit: '–' };
+    return `<option value="${f}">${cfg.label} (${cfg.unit})</option>`;
+  }).join('');
+}
+
+// ── Metric cards ──────────────────────────────────────────────────────────────
+function buildMetrics(m, isWater) {
+  const grid = document.getElementById('metrics-grid');
+  const cols = m.targets.length <= 2 ? m.targets.length : 4;
+  grid.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+  grid.innerHTML = m.targets.map(key => {
+    const cfg = TARGET_CONFIG[key] || { label: key, unit: '–', color: '#e6edf3' };
+    return `
+      <div class="metric-card">
+        <div class="m-label">${cfg.label}</div>
+        <div class="m-value" id="m-${key}" style="color:${cfg.color}">—</div>
+        <div class="m-unit">${cfg.unit}</div>
+      </div>`;
+  }).join('');
+}
+
+// ── Charts ────────────────────────────────────────────────────────────────────
+function buildCharts(m, isWater) {
+  // Destroy existing charts
+  Object.values(charts).forEach(c => c.destroy());
+  charts = {};
+
+  const grid = document.getElementById('charts-grid');
+  grid.innerHTML = m.targets.map(key => {
+    const cfg = TARGET_CONFIG[key] || { label: key, unit: '–', color: '#e6edf3' };
+    return `
+      <div class="chart-card" onclick="openModal('${key}')" title="Click to expand">
+        <div class="c-title">${cfg.label} <span style="color:var(--muted);font-size:9px;">${cfg.unit}</span></div>
+        <div style="position:relative;height:130px;">
+          <canvas id="chart-${key}"></canvas>
+        </div>
+      </div>`;
+  }).join('');
+
+  m.targets.forEach(key => {
+    const cfg = TARGET_CONFIG[key] || { label: key, unit: '–', color: '#e6edf3' };
+    const ctx = document.getElementById(`chart-${key}`).getContext('2d');
+    const ch = new Chart(ctx, {
+      type: 'line',
+      data: { labels: [], datasets: [{ data: [], borderColor: cfg.color, borderWidth: 1.8, pointRadius: 0, tension: 0.3, fill: false }] },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: { callbacks: { label: c => c.parsed.y.toFixed(5) } },
+          verticalMarker: {}
+        },
+        scales: {
+          x: { ticks: { color: '#7d8590', font: { size: 9, family: 'DM Mono' }, maxTicksLimit: 3, maxRotation: 0, autoSkip: false }, grid: { color: 'rgba(255,255,255,0.04)' }, border: { color: '#30363d' } },
+          y: { ticks: { color: '#7d8590', font: { size: 9, family: 'DM Mono' }, maxTicksLimit: 4 }, grid: { color: 'rgba(255,255,255,0.04)' }, border: { color: '#30363d' } }
+        }
+      }
+    });
+    ch._markerColor = cfg.color;
+    charts[key] = ch;
+  });
+}
+
+// ── Get current inputs ────────────────────────────────────────────────────────
+function getInputs() {
+  const inputs = {};
+  META[activeModel].features.forEach(f => {
+    // Prefer number input value (allows out-of-range); fall back to slider
+    const numEl = document.getElementById('n-' + f);
+    const sliderEl = document.getElementById(f);
+    if (numEl && numEl.value !== '') {
+      inputs[f] = parseFloat(numEl.value);
+    } else if (sliderEl) {
+      inputs[f] = parseFloat(sliderEl.value);
+    } else {
+      inputs[f] = META[activeModel].feature_ranges[f].default;
+    }
+  });
+  return inputs;
+}
+
+// ── Point predict ─────────────────────────────────────────────────────────────
+async function predict() {
+  try {
+    const res = await fetch(`/api/predict/${activeModel}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ inputs: getInputs() })
+    });
+    const data = await res.json();
+    META[activeModel].targets.forEach(key => {
+      const el = document.getElementById('m-' + key);
+      if (el) el.textContent = data.predictions[key].toFixed(4);
+    });
+  } catch(e) { console.error('Predict failed:', e); }
+}
+
+let predictTimer;
+function debouncedPredict() {
+  clearTimeout(predictTimer);
+  predictTimer = setTimeout(predict, 120);
+}
+
+// ── Sweep ─────────────────────────────────────────────────────────────────────
+async function runSweep() {
+  const btn          = document.getElementById('run-btn');
+  const status       = document.getElementById('status');
+  const sweepFeature = document.getElementById('sweep-feature').value;
+  const sweepLabel   = document.getElementById('sweep-feature').selectedOptions[0].text;
+  const nPoints      = parseInt(document.getElementById('npoints').value);
+
+  document.getElementById('sweep-label').textContent = sweepLabel.toLowerCase();
+  btn.disabled = true;
+  status.textContent = 'running sweep…';
+
+  const sweepBody = {
+    inputs: getInputs(),
+    sweep_feature: sweepFeature,
+    n_points: nPoints,
+  };
+  if (document.getElementById('sweep-use-day').checked) {
+    sweepBody.day_of_year = parseInt(document.getElementById('sweep-day-of-year').value, 10);
+    sweepBody.lat = parseFloat(document.getElementById('sweep-lat').value);
+    sweepBody.lon = parseFloat(document.getElementById('sweep-lon').value);
+  } else {
+    sweepBody.sunrise_hr = parseFloat(document.getElementById('sunrise_hr').value);
+    sweepBody.sunset_hr  = parseFloat(document.getElementById('sunset_hr').value);
+  }
+  sweepBody.extend_hours = document.getElementById('sweep-extend-hours').checked;
+
+  try {
+    const res = await fetch(`/api/sweep/${activeModel}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(sweepBody)
+    });
+    const data = await res.json();
+    lastSweepData = data;
+
+    const currentVal  = getInputs()[sweepFeature];
+    const sweepVals   = data.sweep_values;
+    const closestIdx  = sweepVals.reduce((best, v, i) =>
+      Math.abs(v - currentVal) < Math.abs(sweepVals[best] - currentVal) ? i : best, 0);
+    const midIdx      = Math.floor(sweepVals.length / 2);
+    const labels      = sweepVals.map((v, i) =>
+      (i === 0 || i === sweepVals.length - 1 || i === midIdx) ? parseFloat(v).toFixed(2) : '');
+
+    // Extrapolation shading: points outside the model's trained hourOfDay range
+    // (only populated when the "extend to 24h" sweep toggle is on).
+    const extrapolationFlags = data.outside_trained_range || [];
+    const shadingBands = extrapolationFlags.some(f => f)
+      ? [{ flags: extrapolationFlags, color: 'rgba(248,129,102,0.16)' }]
+      : [];
+
+    META[activeModel].targets.forEach(key => {
+      const ch   = charts[key];
+      const yVals = data.predictions[key];
+      const yMin  = Math.min(...yVals);
+      const yMax  = Math.max(...yVals);
+      const yPad  = (yMax - yMin) * 0.08 || 0.001;
+      ch.data.labels = labels;
+      ch.data.datasets[0].data = yVals;
+      ch._markerIdx = closestIdx;
+      ch.options.scales.y.min = yMin - yPad;
+      ch.options.scales.y.max = yMax + yPad;
+      ch.options.plugins.rowShading = shadingBands.length ? { bands: shadingBands } : false;
+      ch.update();
+    });
+
+    document.getElementById('dl-btn').disabled = false;
+    document.getElementById('dl-png-btn').disabled = false;
+    document.getElementById('dl-svg-btn').disabled = false;
+    const extrapCount = extrapolationFlags.filter(f => f).length;
+    status.textContent = `done · ${sweepVals.length} pts · current value marked` +
+      (extrapCount ? ` · ${extrapCount} pts outside trained range` : '');
+  } catch(e) {
+    status.textContent = 'error — is the API running?';
+    console.error(e);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// ── Download CSV ──────────────────────────────────────────────────────────────
+function downloadCSV() {
+  if (!lastSweepData) return;
+  const targets = META[activeModel].targets;
+  const feat    = lastSweepData.sweep_feature;
+  const cols    = [feat, ...targets];
+  const rows    = lastSweepData.sweep_values.map((v, i) =>
+    [v, ...targets.map(t => lastSweepData.predictions[t][i])].join(','));
+  const csv     = [cols.join(','), ...rows].join('\n');
+  const a       = document.createElement('a');
+  a.href        = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+  a.download    = `sweep_${activeModel}_${feat}.csv`;
+  a.click();
+}
+
+// ── Modal ─────────────────────────────────────────────────────────────────────
+function openModal(targetKey) {
+  if (!lastSweepData) return;
+  const cfg = TARGET_CONFIG[targetKey] || { label: targetKey, unit: '–', color: '#e6edf3' };
+
+  document.getElementById('modal-title').textContent = `${cfg.label}  (${cfg.unit})`;
+  document.getElementById('modal-overlay').classList.add('open');
+
+  const yVals      = lastSweepData.predictions[targetKey];
+  const sweepVals  = lastSweepData.sweep_values;
+  const currentVal = getInputs()[lastSweepData.sweep_feature];
+  const closestIdx = sweepVals.reduce((best, v, i) =>
+    Math.abs(v - currentVal) < Math.abs(sweepVals[best] - currentVal) ? i : best, 0);
+  const midIdx     = Math.floor(sweepVals.length / 2);
+  const labels     = sweepVals.map((v, i) =>
+    (i === 0 || i === sweepVals.length - 1 || i === midIdx) ? parseFloat(v).toFixed(3) : '');
+  const yMin       = Math.min(...yVals);
+  const yMax       = Math.max(...yVals);
+  const yPad       = (yMax - yMin) * 0.06 || 0.001;
+
+  const extrapolationFlags = lastSweepData.outside_trained_range || [];
+  const shadingBands = extrapolationFlags.some(f => f)
+    ? [{ flags: extrapolationFlags, color: 'rgba(248,129,102,0.16)' }]
+    : [];
+
+  if (modalChart) { modalChart.destroy(); modalChart = null; }
+  const ctx = document.getElementById('modal-canvas').getContext('2d');
+  modalChart = new Chart(ctx, {
+    type: 'line',
+    data: { labels, datasets: [{ data: yVals, borderColor: cfg.color, borderWidth: 2, pointRadius: 0, tension: 0.3, fill: false }] },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { label: c => `${targetKey}: ${c.parsed.y.toFixed(6)}` } },
+        verticalMarker: {},
+        rowShading: shadingBands.length ? { bands: shadingBands } : false
+      },
+      scales: {
+        x: {
+          ticks: { color: '#7d8590', font: { size: 10, family: 'DM Mono' }, maxTicksLimit: 5, maxRotation: 0, autoSkip: false },
+          grid: { color: 'rgba(255,255,255,0.04)' }, border: { color: '#30363d' },
+          title: { display: true, text: lastSweepData.sweep_feature, color: '#7d8590', font: { size: 10, family: 'DM Mono' } }
+        },
+        y: {
+          min: yMin - yPad, max: yMax + yPad,
+          ticks: { color: '#7d8590', font: { size: 10, family: 'DM Mono' }, maxTicksLimit: 6 },
+          grid: { color: 'rgba(255,255,255,0.04)' }, border: { color: '#30363d' },
+          title: { display: true, text: cfg.unit, color: '#7d8590', font: { size: 10, family: 'DM Mono' } }
+        }
+      }
+    }
+  });
+  modalChart._markerIdx = closestIdx;
+  modalChart._markerColor = cfg.color;
+}
+
+function closeModal(e) {
+  if (e && e.target !== document.getElementById('modal-overlay')) return;
+  document.getElementById('modal-overlay').classList.remove('open');
+  if (modalChart) { modalChart.destroy(); modalChart = null; }
+}
+
+
+// ── Chart image downloads ─────────────────────────────────────────────────────
+
+// Helper: get current theme background colours
+function themeBg() {
+  const light = document.documentElement.getAttribute('data-theme') === 'light';
+  return { outer: light ? '#ffffff' : '#0d1117', card: light ? '#f6f8fa' : '#161b22', text: light ? '#636c76' : '#7d8590' };
+}
+
+// Helper: stitch all sweep chart canvases into one combined canvas (with titles)
+function buildCombinedCanvas() {
+  const keys      = META[activeModel].targets;
+  const cols      = 2;
+  const rows      = Math.ceil(keys.length / cols);
+  const cw        = 460;
+  const ch        = 200;
+  const pad       = 12;
+  const titleH    = 18;   // pixels reserved above each chart for the label
+  const cellH     = ch + titleH;
+  const totalW    = cols * cw + (cols + 1) * pad;
+  const totalH    = rows * cellH + (rows + 1) * pad;
+
+  const out = document.createElement('canvas');
+  out.width  = totalW;
+  out.height = totalH;
+  const ctx  = out.getContext('2d');
+  const bg = themeBg();
+  ctx.fillStyle = bg.outer;
+  ctx.fillRect(0, 0, totalW, totalH);
+
+  keys.forEach((key, i) => {
+    const cfg  = TARGET_CONFIG[key] || { label: key, unit: '-' };
+    const col  = i % cols;
+    const row  = Math.floor(i / cols);
+    const x    = pad + col * (cw + pad);
+    const y    = pad + row * (cellH + pad);
+
+    // Draw title text
+    ctx.font      = '10px "DM Mono", monospace';
+    ctx.fillStyle = bg.text;
+    ctx.fillText(`${cfg.label}  ${cfg.unit}`, x + 4, y + 12);
+
+    // Draw chart canvas below the title
+    const src = document.getElementById('chart-' + key);
+    if (src) ctx.drawImage(src, x, y + titleH, cw, ch);
+  });
+  return out;
+}
+
+function downloadChartsPNG() {
+  const combined  = buildCombinedCanvas();
+  const sweepFeat = lastSweepData ? lastSweepData.sweep_feature : 'sweep';
+  const a = document.createElement('a');
+  a.href     = combined.toDataURL('image/png');
+  a.download = `sweep_${activeModel}_${sweepFeat}.png`;
+  a.click();
+}
+
+function downloadChartsSVG() {
+  const keys   = META[activeModel].targets;
+  const cols   = 2;
+  const rows   = Math.ceil(keys.length / cols);
+  const cw     = 460;
+  const ch     = 200;
+  const pad    = 12;
+  const titleH = 18;
+  const cellH  = ch + titleH;
+  const totalW = cols * cw + (cols + 1) * pad;
+  const totalH = rows * cellH + (rows + 1) * pad;
+
+  let elements = '';
+  keys.forEach((key, i) => {
+    const cfg  = TARGET_CONFIG[key] || { label: key, unit: '-' };
+    const col  = i % cols;
+    const row  = Math.floor(i / cols);
+    const x    = pad + col * (cw + pad);
+    const y    = pad + row * (cellH + pad);
+    const src  = document.getElementById('chart-' + key);
+    // Title text
+    elements += `<text x="${x + 4}" y="${y + 12}" font-family="monospace" font-size="10" fill="${bg.text}">${cfg.label}  ${cfg.unit}</text>\n`;
+    // Chart image
+    if (src) elements += `<image x="${x}" y="${y + titleH}" width="${cw}" height="${ch}" href="${src.toDataURL('image/png')}"/>\n`;
+  });
+
+  const sweepFeat = lastSweepData ? lastSweepData.sweep_feature : 'sweep';
+  const bg = themeBg();
+  const svg  = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${totalW}" height="${totalH}"><rect width="100%" height="100%" fill="${bg.outer}"/>${elements}</svg>`;
+  const blob = new Blob([svg], { type: 'image/svg+xml' });
+  const a    = document.createElement('a');
+  a.href     = URL.createObjectURL(blob);
+  a.download = `sweep_${activeModel}_${sweepFeat}.svg`;
+  a.click();
+}
+
+function downloadModalPNG() {
+  if (!modalChart) return;
+  const canvas    = document.getElementById('modal-canvas');
+  const titleText = document.getElementById('modal-title').textContent.trim();
+  const titleH    = 22;
+  const out = document.createElement('canvas');
+  out.width  = canvas.width;
+  out.height = canvas.height + titleH;
+  const ctx  = out.getContext('2d');
+  const bg = themeBg();
+  ctx.fillStyle = bg.card;
+  ctx.fillRect(0, 0, out.width, out.height);
+  // Draw title
+  ctx.font      = '12px "DM Mono", monospace';
+  ctx.fillStyle = bg.text === '#636c76' ? '#1f2328' : '#e6edf3';
+  ctx.fillText(titleText, 8, 15);
+  // Draw chart below title
+  ctx.drawImage(canvas, 0, titleH);
+  const a    = document.createElement('a');
+  a.href     = out.toDataURL('image/png');
+  a.download = `modal_${activeModel}_${titleText.split('  ')[0].trim()}.png`;
+  a.click();
+}
+
+function downloadModalSVG() {
+  if (!modalChart) return;
+  const canvas    = document.getElementById('modal-canvas');
+  const titleText = document.getElementById('modal-title').textContent.trim();
+  const titleH    = 22;
+  const dataUrl   = canvas.toDataURL('image/png');
+  const bg = themeBg();
+  const textCol = bg.text === '#636c76' ? '#1f2328' : '#e6edf3';
+  const svg  = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${canvas.width}" height="${canvas.height + titleH}">
+  <rect width="100%" height="100%" fill="${bg.card}"/>
+  <text x="8" y="15" font-family="monospace" font-size="12" fill="${textCol}">${titleText}</text>
+  <image y="${titleH}" width="${canvas.width}" height="${canvas.height}" href="${dataUrl}"/>
+</svg>`;
+  const blob = new Blob([svg], { type: 'image/svg+xml' });
+  const a    = document.createElement('a');
+  a.href     = URL.createObjectURL(blob);
+  a.download = `modal_${activeModel}_${titleText.split('  ')[0].trim()}.svg`;
+  a.click();
+}
+
+
+// ── Theme toggle ──────────────────────────────────────────────────────────────
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  const btn = document.getElementById('theme-toggle');
+  if (btn) btn.textContent = theme === 'light' ? '🌙 dark' : '☀ light';
+  // Update chart backgrounds to match theme
+  const bg = theme === 'light' ? '#ffffff' : '#161b22';
+  const gridCol = theme === 'light' ? 'rgba(0,0,0,0.15)' : 'rgba(255,255,255,0.04)';
+  const tickCol = theme === 'light' ? '#000000' : '#7d8590';
+  const borderCol = theme === 'light' ? '#000000' : '#30363d';
+  // Larger fonts in light mode for publication screenshots
+  const tickSize  = theme === 'light' ? 18 : 9;
+  const titleSize = theme === 'light' ? 20 : 10;
+
+  const applyToChart = (ch) => {
+    if (!ch || !ch.options || !ch.options.scales) return;
+    ['x', 'y'].forEach(axis => {
+      const s = ch.options.scales[axis];
+      if (!s) return;
+      if (s.ticks) {
+        s.ticks.color = tickCol;
+        s.ticks.font = Object.assign({}, s.ticks.font, { size: tickSize });
+      }
+      if (s.grid)   s.grid.color   = gridCol;
+      if (s.border) s.border.color = borderCol;
+      if (s.title) {
+        s.title.color = tickCol;
+        s.title.font  = Object.assign({}, s.title.font, { size: titleSize });
+      }
+    });
+    ch.update('none');
+  };
+
+  Object.values(charts).forEach(applyToChart);
+  Object.values(batchCharts).forEach(applyToChart);
+  if (modalChart) applyToChart(modalChart);
+}
+
+function toggleTheme() {
+  const current = document.documentElement.getAttribute('data-theme') || 'dark';
+  const next    = current === 'dark' ? 'light' : 'dark';
+  localStorage.setItem('pfr-theme', next);
+  applyTheme(next);
+}
+
+
+// ── Batch predict ─────────────────────────────────────────────────────────────
+let batchData     = null;   // parsed CSV rows [{col: val, ...}, ...]
+let batchHeaders  = [];     // original CSV column order
+let batchResults  = null;   // {rows: [...], predictions: {target: [...]}}
+let batchCharts   = {};
+
+// Met file state
+let metParsedRows = null;   // rows from /api/parse_met
+let metFeatures   = new Set(); // features supplied by met file for active model
+
+function onCSVUpload(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = e => parseCSV(e.target.result);
+  reader.readAsText(file);
+  // Reset input so same file can be re-uploaded
+  input.value = '';
+}
+
+function parseCSV(text) {
+  const lines = text.trim().split(/\r?\n/);
+  if (lines.length < 2) {
+    setBatchStatus('CSV must have at least one header row and one data row.', 'err');
+    return;
+  }
+  batchHeaders = lines[0].split(',').map(h => h.trim());
+  batchData    = lines.slice(1).map(line => {
+    const vals = line.split(',');
+    const row  = {};
+    batchHeaders.forEach((h, i) => { row[h] = parseFloat(vals[i]); });
+    return row;
+  });
+
+  validateAndLockCSV();
+}
+
+function validateAndLockCSV() {
+  const required = META[activeModel].features;
+  const missing  = required.filter(f => !batchHeaders.includes(f));
+  const extra    = batchHeaders.filter(f => !required.includes(f));
+
+  if (missing.length) {
+    setBatchStatus(`Missing columns: ${missing.join(', ')}`, 'err');
+    return;
+  }
+
+  // Lock matched sliders to first-row values
+  const firstRow = batchData[0];
+  required.forEach(feat => {
+    const slider = document.getElementById(feat);
+    const numEl  = document.getElementById('n-' + feat);
+    const row    = document.querySelector(`.input-row:has(#${CSS.escape(feat)})`);
+    if (slider && numEl) {
+      const val  = firstRow[feat];
+      const range = META[activeModel].feature_ranges[feat];
+      const step  = guessStep(range.min, range.max);
+      slider.value = Math.min(range.max, Math.max(range.min, val));
+      numEl.value  = formatVal(val, step);
+      checkRange(feat, val, range.min, range.max);
+    }
+    if (row) row.classList.add('feat-locked');
+  });
+
+  const extraNote = extra.length ? `  ·  ${extra.length} extra col(s) ignored` : '';
+  setBatchStatus(
+    `✓ ${batchData.length} rows · ${required.length} features matched${extraNote}`,
+    'ok'
+  );
+
+  document.getElementById('batch-run-btn').style.display = 'block';
+  document.getElementById('batch-clear-btn').style.display = 'block';
+}
+
+function setBatchStatus(msg, cls) {
+  const el = document.getElementById('batch-status');
+  el.textContent = msg;
+  el.className   = 'batch-status' + (cls ? ' ' + cls : '');
+}
+
+function clearBatch() {
+  batchData    = null;
+  batchHeaders = [];
+  batchResults = null;
+
+  // Unlock CSV-locked sliders (not met-locked ones)
+  document.querySelectorAll('.feat-locked').forEach(el => el.classList.remove('feat-locked'));
+
+  document.getElementById('batch-run-btn').style.display   = 'none';
+  document.getElementById('batch-clear-btn').style.display = 'none';
+  document.getElementById('batch-panel').classList.remove('visible');
+  setBatchStatus('');
+
+  // Destroy batch charts
+  Object.values(batchCharts).forEach(c => c.destroy());
+  batchCharts = {};
+}
+
+async function runBatchPredict() {
+  const btn = document.getElementById('batch-run-btn');
+  btn.disabled = true;
+  setBatchStatus('running…');
+
+  // If a met file is loaded, build rows from it (merging slider values);
+  // otherwise fall back to the uploaded CSV rows.
+  const rowsToSend = metParsedRows ? buildMetBatchRows() : batchData;
+  if (!rowsToSend || rowsToSend.length === 0) {
+    setBatchStatus('No data to predict — upload a CSV or parse a met file.', 'err');
+    btn.disabled = false;
+    return;
+  }
+
+  // Keep batchData in sync so downloadBatchCSV() and the preview table work
+  if (metParsedRows) batchData = rowsToSend;
+
+  try {
+    const res = await fetch(`/api/predict_batch/${activeModel}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rows: rowsToSend })
+    });
+    if (!res.ok) throw new Error(await res.text());
+    batchResults = await res.json();
+    renderBatchResults();
+    setBatchStatus(`✓ ${rowsToSend.length} rows predicted`, 'ok');
+  } catch(e) {
+    setBatchStatus('error — ' + e.message, 'err');
+    console.error(e);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function renderBatchResults() {
+  const targets  = META[activeModel].targets;
+  const features = META[activeModel].features;
+  const rows     = batchResults.rows;
+  const preds    = batchResults.predictions;
+
+  // Choose x-axis:
+  //   met rows carry year+day → use "day hour" as label for clarity
+  //   plain CSV with hourOfDay → use hour
+  //   fallback → row index
+  const hasDayCol = rows.length > 0 && rows[0].day !== undefined;
+  const xLabels = hasDayCol
+    ? rows.map(r => `${r.day}d ${r.hourOfDay !== undefined ? r.hourOfDay + 'h' : ''}`.trim())
+    : features.includes('hourOfDay')
+      ? rows.map(r => r['hourOfDay'].toFixed(1))
+      : rows.map((_, i) => i);
+  const xTitle = hasDayCol ? 'Day · hour' : features.includes('hourOfDay') ? 'Hour of day (h)' : 'Row index';
+
+  document.getElementById('batch-row-count').textContent = rows.length;
+  document.getElementById('batch-x-label').textContent   = xTitle;
+
+  // Build chart grid
+  Object.values(batchCharts).forEach(c => c.destroy());
+  batchCharts = {};
+
+  const grid = document.getElementById('batch-charts-grid');
+  grid.innerHTML = targets.map(key => {
+    const cfg = TARGET_CONFIG[key] || { label: key, unit: '–', color: '#e6edf3' };
+    return `
+      <div class="chart-card">
+        <div class="c-title">${cfg.label} <span style="color:var(--muted);font-size:9px;">${cfg.unit}</span></div>
+        <div style="position:relative;height:130px;">
+          <canvas id="batch-chart-${key}"></canvas>
+        </div>
+      </div>`;
+  }).join('');
+
+  // Shading + tooltip context (met-upload flow only):
+  //   nightFlags         — beforeSunrise/afterSunset (physically zeroed, still trained-range)
+  //   extrapolationFlags — outsideTrainedRange (extend-to-24h; extrapolated beyond [9,16])
+  const nightFlags = rows.map(r => !!(r.beforeSunrise || r.afterSunset));
+  const extrapolationFlags = rows.map(r => !!r.outsideTrainedRange);
+  const shadingBands = [];
+  if (nightFlags.some(f => f)) shadingBands.push({ flags: nightFlags, color: 'rgba(240,165,0,0.12)' });
+  if (extrapolationFlags.some(f => f)) shadingBands.push({ flags: extrapolationFlags, color: 'rgba(248,129,102,0.18)' });
+
+  targets.forEach(key => {
+    const cfg   = TARGET_CONFIG[key] || { label: key, unit: '–', color: '#e6edf3' };
+    const yVals = preds[key];
+    const yMin  = Math.min(...yVals);
+    const yMax  = Math.max(...yVals);
+    const yPad  = (yMax - yMin) * 0.08 || 0.001;
+    const ctx   = document.getElementById(`batch-chart-${key}`).getContext('2d');
+    batchCharts[key] = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: xLabels,
+        datasets: [{
+          data: yVals,
+          borderColor: cfg.color,
+          borderWidth: 1.8,
+          pointRadius: rows.length <= 50 ? 3 : 0,
+          pointBackgroundColor: rows.map((r, i) =>
+            extrapolationFlags[i] ? '#f78166' : nightFlags[i] ? '#f0a500' : cfg.color),
+          tension: 0.3,
+          fill: false
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: {
+              label: c => c.parsed.y.toFixed(5),
+              afterLabel: c => {
+                const r = rows[c.dataIndex];
+                const lines = [];
+                if (r && r.sunriseHr !== undefined) {
+                  const flag = nightFlags[c.dataIndex] ? '  🌙 outside daylight' : '';
+                  lines.push(`sunrise ${r.sunriseHr.toFixed(2)}h · sunset ${r.sunsetHr.toFixed(2)}h${flag}`);
+                }
+                if (extrapolationFlags[c.dataIndex]) {
+                  lines.push('⚠ outside trained range [9, 16] — extrapolated');
+                }
+                return lines.length ? lines : undefined;
+              }
+            }
+          },
+          rowShading: shadingBands.length ? { bands: shadingBands } : false
+        },
+        scales: {
+          x: {
+            ticks: { color: '#7d8590', font: { size: 9, family: 'DM Mono' }, maxTicksLimit: 5, maxRotation: 0 },
+            grid:  { color: 'rgba(255,255,255,0.04)' },
+            border:{ color: '#30363d' },
+            title: { display: true, text: xTitle, color: '#7d8590', font: { size: 9, family: 'DM Mono' } }
+          },
+          y: {
+            min: yMin - yPad, max: yMax + yPad,
+            ticks: { color: '#7d8590', font: { size: 9, family: 'DM Mono' }, maxTicksLimit: 4 },
+            grid:  { color: 'rgba(255,255,255,0.04)' },
+            border:{ color: '#30363d' }
+          }
+        }
+      }
+    });
+  });
+
+  // Preview table (first 10 rows)
+  const previewRows = rows.slice(0, 10);
+  const allCols     = [...(batchHeaders.length ? batchHeaders : Object.keys(rows[0])), ...targets];
+  const table       = document.getElementById('batch-table');
+  table.innerHTML   =
+    `<tr>${allCols.map(c => `<th>${c}</th>`).join('')}</tr>` +
+    previewRows.map(row => {
+      const idx    = rows.indexOf(row);
+      const rowKeys = batchHeaders.length ? batchHeaders : Object.keys(row).filter(k => !targets.includes(k));
+      const cells  = rowKeys.map(h => {
+        const v = row[h];
+        if (v === undefined) return '<td></td>';
+        if (typeof v === 'boolean') {
+          if (!v) return '<td></td>';
+          return `<td>${h === 'outsideTrainedRange' ? '⚠' : '🌙'}</td>`;
+        }
+        return `<td>${isNaN(v) ? v : Number(v).toFixed(3)}</td>`;
+      });
+      const pcells = targets.map(t => `<td class="pred">${preds[t][idx].toFixed(4)}</td>`);
+      return `<tr>${cells.join('')}${pcells.join('')}</tr>`;
+    }).join('') +
+    (rows.length > 10 ? `<tr><td colspan="${allCols.length}" style="color:var(--muted);text-align:center;">… ${rows.length - 10} more rows in download</td></tr>` : '');
+
+  document.getElementById('batch-panel').classList.add('visible');
+}
+
+function downloadBatchCSV() {
+  if (!batchResults) return;
+  const targets = META[activeModel].targets;
+  const rows    = batchResults.rows;
+  const preds   = batchResults.predictions;
+  const rowKeys = batchHeaders.length ? batchHeaders : Object.keys(rows[0]).filter(k => !targets.includes(k));
+  const cols    = [...rowKeys, ...targets];
+  const csvRows = rows.map((row, i) => {
+    const inputVals = rowKeys.map(h => row[h] !== undefined ? row[h] : '');
+    const predVals  = targets.map(t => preds[t][i]);
+    return [...inputVals, ...predVals].join(',');
+  });
+  const csv  = [cols.join(','), ...csvRows].join('\n');
+  const a    = document.createElement('a');
+  a.href     = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+  a.download = `batch_${activeModel}_${rows.length}rows.csv`;
+  a.click();
+}
+
+function downloadBatchPNG() {
+  if (!batchResults) return;
+  const keys   = META[activeModel].targets;
+  const cols   = 2;
+  const rows   = Math.ceil(keys.length / cols);
+  const cw     = 460;
+  const ch     = 200;
+  const pad    = 12;
+  const titleH = 18;
+  const cellH  = ch + titleH;
+  const totalW = cols * cw + (cols + 1) * pad;
+  const totalH = rows * cellH + (rows + 1) * pad;
+
+  const out = document.createElement('canvas');
+  out.width  = totalW;
+  out.height = totalH;
+  const ctx  = out.getContext('2d');
+  const bg   = themeBg();
+  ctx.fillStyle = bg.outer;
+  ctx.fillRect(0, 0, totalW, totalH);
+
+  keys.forEach((key, i) => {
+    const cfg = TARGET_CONFIG[key] || { label: key, unit: '-' };
+    const col = i % cols;
+    const row = Math.floor(i / cols);
+    const x   = pad + col * (cw + pad);
+    const y   = pad + row * (cellH + pad);
+    ctx.font      = '10px "DM Mono", monospace';
+    ctx.fillStyle = bg.text;
+    ctx.fillText(`${cfg.label}  ${cfg.unit}`, x + 4, y + 12);
+    const src = document.getElementById('batch-chart-' + key);
+    if (src) ctx.drawImage(src, x, y + titleH, cw, ch);
+  });
+
+  const a    = document.createElement('a');
+  a.href     = out.toDataURL('image/png');
+  a.download = `batch_${activeModel}.png`;
+  a.click();
+}
+
+// ── Met file ──────────────────────────────────────────────────────────────────
+
+function onMetFileChosen(input) {
+  if (!input.files || !input.files[0]) return;
+  const name = input.files[0].name;
+  document.getElementById('met-file-label').textContent = '📂 ' + name;
+  document.getElementById('met-options').style.display = 'block';
+  document.getElementById('met-clear-btn').style.display = 'block';
+  document.getElementById('met-status').textContent = '';
+  document.getElementById('met-status').className = 'met-status';
+  metParsedRows = null;
+  metFeatures   = new Set();
+  unlockMetSliders();
+}
+
+function clearMetFile() {
+  metParsedRows = null;
+  metFeatures   = new Set();
+  document.getElementById('met-file-input').value = '';
+  document.getElementById('met-file-label').textContent = '⬆ Upload met CSV…';
+  document.getElementById('met-options').style.display = 'none';
+  document.getElementById('met-clear-btn').style.display = 'none';
+  setMetStatus('', '');
+  unlockMetSliders();
+  clearBatch();
+  checkDaylightLock();
+}
+
+function toggleExtendHoursNote() {
+  const checked = document.getElementById('met-extend-hours').checked;
+  document.getElementById('met-extend-note').classList.toggle('visible', checked);
+}
+
+async function parseMet() {
+  const fileInput = document.getElementById('met-file-input');
+  if (!fileInput.files || !fileInput.files[0]) {
+    setMetStatus('No file selected.', 'err');
+    return;
+  }
+  const lat    = parseFloat(document.getElementById('met-lat').value);
+  const lon    = parseFloat(document.getElementById('met-lon').value);
+  const dayMin = parseInt(document.getElementById('met-day-min').value, 10);
+  const dayMax = parseInt(document.getElementById('met-day-max').value, 10);
+
+  if (isNaN(lat) || isNaN(lon)) {
+    setMetStatus('Enter valid latitude and longitude.', 'err');
+    return;
+  }
+  if (dayMin > dayMax) {
+    setMetStatus('Day from must be ≤ Day to.', 'err');
+    return;
+  }
+
+  const parseBtn = document.getElementById('met-parse-btn');
+  parseBtn.disabled = true;
+  setMetStatus('⏳ parsing…', '');
+
+  const extendHours = document.getElementById('met-extend-hours').checked;
+
+  const formData = new FormData();
+  formData.append('file',         fileInput.files[0]);
+  formData.append('lat',          lat);
+  formData.append('lon',          lon);
+  formData.append('day_min',      dayMin);
+  formData.append('day_max',      dayMax);
+  formData.append('extend_hours', extendHours);
+
+  try {
+    const res = await fetch('/api/parse_met', { method: 'POST', body: formData });
+    if (!res.ok) {
+      const err = await res.json();
+      setMetStatus('Error: ' + (err.detail || res.statusText), 'err');
+      return;
+    }
+    const data = await res.json();
+    metParsedRows = data.rows;
+    metFeatures   = new Set(META[activeModel].met_features || []);
+
+    let msg = `✓ ${data.row_count.toLocaleString()} rows`;
+    if (data.years && data.years.length)
+      msg += ' · years: ' + data.years.join(', ');
+    msg += ` · days ${data.day_min}–${data.day_max}`;
+    const level = data.warnings && data.warnings.length ? 'warn' : 'ok';
+    if (data.warnings && data.warnings.length)
+      msg += '\n⚠ ' + data.warnings.join('\n⚠ ');
+
+    setMetStatus(msg, level);
+    lockMetSliders();
+
+    // Show run button in batch section
+    document.getElementById('batch-run-btn').style.display = 'block';
+    document.getElementById('batch-status').textContent = `met file loaded · ${data.row_count.toLocaleString()} rows`;
+    document.getElementById('batch-status').className = 'batch-status ok';
+
+  } catch(e) {
+    setMetStatus('Request failed: ' + e.message, 'err');
+  } finally {
+    parseBtn.disabled = false;
+  }
+}
+
+function lockMetSliders() {
+  metFeatures.forEach(feat => {
+    const row = document.querySelector(`.input-row:has(#${CSS.escape(feat)})`);
+    if (!row) return;
+    row.classList.add('met-locked');
+    if (!row.querySelector('.met-badge')) {
+      const nameEl = row.querySelector('.feat-name');
+      if (nameEl) {
+        const badge = document.createElement('span');
+        badge.className = 'met-badge';
+        badge.textContent = '🌦 met';
+        nameEl.appendChild(badge);
+      }
+    }
+  });
+}
+
+function unlockMetSliders() {
+  document.querySelectorAll('.met-locked').forEach(el => el.classList.remove('met-locked'));
+  document.querySelectorAll('.met-badge').forEach(el => el.remove());
+}
+
+function setMetStatus(msg, level) {
+  const el = document.getElementById('met-status');
+  el.textContent = msg;
+  el.className   = 'met-status' + (level ? ' ' + level : '');
+}
+
+function buildMetBatchRows() {
+  if (!metParsedRows) return null;
+  const sliderVals = getInputs();
+  return metParsedRows.map(metRow => {
+    const merged = { ...sliderVals };
+    metFeatures.forEach(f => {
+      if (metRow[f] !== undefined) merged[f] = metRow[f];
+    });
+    // Backend zeros incomingRadiation/fDiffuseLight for rows outside
+    // sunrise/sunset; fDiffuseLight isn't always in the met-locked feature
+    // set, so enforce it here too. Carry the flags through for display.
+    if (metRow.beforeSunrise || metRow.afterSunset) {
+      merged.incomingRadiation = 0;
+      merged.fDiffuseLight = 0;
+    }
+    merged.beforeSunrise = !!metRow.beforeSunrise;
+    merged.afterSunset   = !!metRow.afterSunset;
+    merged.outsideTrainedRange = !!metRow.outsideTrainedRange;
+    if (metRow.sunriseHr !== undefined) merged.sunriseHr = metRow.sunriseHr;
+    if (metRow.sunsetHr  !== undefined) merged.sunsetHr  = metRow.sunsetHr;
+    return merged;
+  });
+}
+
+// ── Boot ──────────────────────────────────────────────────────────────────────
+boot();
+</script>
+</body>
+</html>
