@@ -1,0 +1,5 @@
+uuid,CropLoad,scenario_role,source,requested_snapshot_day,selected_dayOfYear,requested_snapshot_hour,selected_hourOfDay,selected_timestamp,n_points
+738fcabe-2562-4a37-980e-cb0a0acbb4c1,200,low_crop_load,internodeArray,65,65,12,12,2022-03-06 12:30:00,11018
+738fcabe-2562-4a37-980e-cb0a0acbb4c1,200,low_crop_load,fruitArray,65,65,12,12,2022-03-06 12:30:00,200
+697271f9-f862-464c-9f8c-cf8d3f6f3d60,600,high_crop_load,internodeArray,65,65,12,12,2022-03-06 12:30:00,11018
+697271f9-f862-464c-9f8c-cf8d3f6f3d60,600,high_crop_load,fruitArray,65,65,12,12,2022-03-06 12:30:00,600

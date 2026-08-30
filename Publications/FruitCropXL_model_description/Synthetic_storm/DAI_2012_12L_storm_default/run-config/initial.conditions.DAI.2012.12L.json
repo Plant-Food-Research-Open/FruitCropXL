@@ -1,0 +1,76 @@
+{
+  "name": "initial.conditions.DAI.2012.12L",
+  "class": "initial.conditions",
+  "metaclass": "document-category-name",
+  "category": {
+    "organ_age": {
+      "PLANT_AGE_DAYS": 120,
+      "PLANT_AGE_TD_AFTER_BUDBURST": 75,
+      "FRUIT_AGE_AFTER_FULLBLOOM": 70,
+      "BERRY_AGE_AT_VERASION": 65,
+      "thermalDay_BB_FS": 32,
+      "thermalDay_FS_VR": 33
+    },
+    "leaf": {
+      "LMA_lower": 47.6,
+      "LMA_middle": 50,
+      "LMA_upper": 55,
+      "Nmass0_lower": 0.03,
+      "Nmass0_middle": 0.03,
+      "Nmass0_upper": 0.03,
+      "Narea_lower": 1.428,
+      "Narea_middle": 1.5,
+      "Narea_upper": 1.65,
+      "fNSC": 0.13
+    },
+    "wood": {
+      "WOOD_LENGTH": 0.25,
+      "WOOD_DIAMETER": 0.01,
+      "CORDON_DIAMETER": null,
+      "woodBiomassCalcMethod": 0,
+      "BIOMASS_WOOD": 12286.875,
+      "BIOMASS_CORDON": 3071.71875,
+      "fNSC": 0.15,
+      "Nm": 0.0086
+    },
+    "internode": {
+      "BIOMASS_INTERNODE": 2510,
+      "SHOOT_DIAMETER": null,
+      "fNSC": 0.1,
+      "INTERNODE_0": 0.05,
+      "Nm": 0.013
+    },
+    "structuralRoot": {
+      "rootWoodRefMode": 0,
+      "defaultStrRootToWood": 0.35,
+      "StrRootToTrunk": 0.151889719721247,
+      "rootBiomassAutoInitThreshold": 10,
+      "BIOMASS_ALL_ROOTS": 1866.25,
+      "PERCENT_FINE_ROOT": 0.2,
+      "fNSC": 0.2,
+      "Nm": 0.012
+    },
+    "fineRoot": {
+      "fNSC": 0.2,
+      "Nm": 0.019
+    },
+    "fruit": {
+      "FRUIT_FRESH_WEIGHT": 691,
+      "FRUIT_DRY_WEIGHT": 120,
+      "CONENTRATION_SOLUBLE_SUGAR": 0.105,
+      "CV_FRUIT": 0.1,
+      "CONENTRATION_MALIC_INITIAL": 0.02,
+      "CONENTRATION_TARTARIC_INITIAL": 0.017,
+      "bunchNumPerVine": 1,
+      "bunchNumPerShoot": 1,
+      "berryNumPerBunch": 45,
+      "SEED_FRESH_MASS": 50,
+      "Nm": 0.01,
+      "cSuc0": null,
+      "cSor0": null,
+      "cGlu0": null,
+      "cFru0": null,
+      "cSta0": null
+    }
+  }
+}

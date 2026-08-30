@@ -31,7 +31,7 @@ FruitCropXL source imports Commons Math APIs. If the Commons Math binary is redi
 - Artifact examined in the source repository: `jfruit2-1.3.6-with-dependencies.R1.jar`
 - Namespace: `org.inra.psh.jfruit2`
 - Redistribution in the public Git payload: no standalone JAR
-- Licence for JFruit2 itself: **not yet verified**
+- Licence for JFruit2 itself: GNU General Public License (GPLv3)
 
 The examined shaded JAR contains Apache License 2.0 and NOTICE files for included dependencies, including Apache Commons CLI and logging components. Those embedded files do not, on their own, establish the licence of the JFruit2 code. Do not add or publish the JFruit2 JAR in the public export until its upstream copyright holder, exact project licence, version, and required notices have been confirmed.
 

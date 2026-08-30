@@ -1,0 +1,9 @@
+uuid,CropLoad,source,found_plant_level_file,found_mean_fruit_file,found_fruitArray_file,found_internodeArray_file,selected_snapshot_day,selected_snapshot_hour,number_of_fruit_points,number_of_internode_points,missing_required_variables,unit_conversion_applied
+9ca2bf8b-c639-48c1-a98f-bbc84bb43b73,0,scenario_mapping,TRUE,TRUE,FALSE,TRUE,NA,NA,NA,NA,fruitArray file,meanFruitFW/meanFruitDW/SD mg_to_g for temporal fruit weight and calculated DMC
+738fcabe-2562-4a37-980e-cb0a0acbb4c1,200,scenario_mapping,TRUE,TRUE,TRUE,TRUE,NA,NA,NA,NA,,meanFruitFW/meanFruitDW/SD mg_to_g for temporal fruit weight and calculated DMC
+c87e1aee-277e-4fd5-b44b-8a7047a1e405,400,scenario_mapping,TRUE,TRUE,TRUE,TRUE,NA,NA,NA,NA,,meanFruitFW/meanFruitDW/SD mg_to_g for temporal fruit weight and calculated DMC
+697271f9-f862-464c-9f8c-cf8d3f6f3d60,600,scenario_mapping,TRUE,TRUE,TRUE,TRUE,NA,NA,NA,NA,,meanFruitFW/meanFruitDW/SD mg_to_g for temporal fruit weight and calculated DMC
+738fcabe-2562-4a37-980e-cb0a0acbb4c1,200,internodeArray,NA,NA,NA,TRUE,65,12,NA,11018,,
+738fcabe-2562-4a37-980e-cb0a0acbb4c1,200,fruitArray,NA,NA,TRUE,NA,65,12,200,NA,,fruitArray biomass/waterMass converted mg_to_g for fresh and dry weight
+697271f9-f862-464c-9f8c-cf8d3f6f3d60,600,internodeArray,NA,NA,NA,TRUE,65,12,NA,11018,,
+697271f9-f862-464c-9f8c-cf8d3f6f3d60,600,fruitArray,NA,NA,TRUE,NA,65,12,600,NA,,fruitArray biomass/waterMass converted mg_to_g for fresh and dry weight
