@@ -1,0 +1,222 @@
+{
+  "type" : "object",
+  "id" : "urn:jsonschema:rootSystem:RootBase",
+  "properties" : {
+    "length" : {
+      "type" : "number",
+      "name" : "length",
+      "defaultValue" : 0.0
+    },
+    "nodeID" : {
+      "type" : "integer",
+      "name" : "nodeID",
+      "defaultValue" : 0.0
+    },
+    "simuuid" : {
+      "type" : "string"
+    },
+    "order" : {
+      "type" : "integer",
+      "name" : "order",
+      "defaultValue" : 0.0
+    },
+    "plantNumber" : {
+      "type" : "integer",
+      "name" : "plantNumber",
+      "defaultValue" : 0.0
+    },
+    "cordonNumber" : {
+      "type" : "integer",
+      "name" : "cordonNumber",
+      "defaultValue" : 0.0
+    },
+    "nodeNumber" : {
+      "type" : "integer",
+      "name" : "nodeNumber",
+      "defaultValue" : 0.0
+    },
+    "organType" : {
+      "type" : "string"
+    },
+    "rank" : {
+      "type" : "integer",
+      "name" : "rank",
+      "defaultValue" : 0.0
+    },
+    "x" : {
+      "type" : "number",
+      "name" : "x",
+      "defaultValue" : 0.0
+    },
+    "endX" : {
+      "type" : "number",
+      "name" : "endX",
+      "defaultValue" : 0.0
+    },
+    "y" : {
+      "type" : "number",
+      "name" : "y",
+      "defaultValue" : 0.0
+    },
+    "endY" : {
+      "type" : "number",
+      "name" : "endY",
+      "defaultValue" : 0.0
+    },
+    "z" : {
+      "type" : "number",
+      "name" : "z",
+      "defaultValue" : 0.0
+    },
+    "endZ" : {
+      "type" : "number",
+      "name" : "endZ",
+      "defaultValue" : 0.0
+    },
+    "age" : {
+      "type" : "number",
+      "name" : "age",
+      "defaultValue" : 0.0
+    },
+    "ageD" : {
+      "type" : "number",
+      "name" : "ageD",
+      "defaultValue" : 0.0
+    },
+    "diameter" : {
+      "type" : "number",
+      "name" : "diameter",
+      "defaultValue" : 0.0
+    },
+    "waterPotential" : {
+      "type" : "number",
+      "name" : "waterPotential",
+      "defaultValue" : 0.0
+    },
+    "parentID" : {
+      "type" : "integer",
+      "name" : "parentID",
+      "defaultValue" : 0.0
+    },
+    "strip" : {
+      "type" : "integer",
+      "name" : "strip",
+      "defaultValue" : 0.0
+    },
+    "row" : {
+      "type" : "integer",
+      "name" : "row",
+      "defaultValue" : 0.0
+    },
+    "pos" : {
+      "type" : "integer",
+      "name" : "pos",
+      "defaultValue" : 0.0
+    },
+    "species" : {
+      "type" : "string"
+    },
+    "phloemSugarConcentration" : {
+      "type" : "number",
+      "name" : "phloemSugarConcentration",
+      "defaultValue" : 0.0
+    },
+    "plantWaterFlux" : {
+      "type" : "number",
+      "name" : "plantWaterFlux",
+      "defaultValue" : 0.0
+    },
+    "meanSoilWaterPotential" : {
+      "type" : "number",
+      "name" : "meanSoilWaterPotential",
+      "defaultValue" : 0.0
+    },
+    "weightedMeanWaterPotential" : {
+      "type" : "number",
+      "name" : "weightedMeanWaterPotential",
+      "defaultValue" : 0.0
+    },
+    "meanABA" : {
+      "type" : "number",
+      "name" : "meanABA",
+      "defaultValue" : 0.0
+    },
+    "gridIndex" : {
+      "type" : "array",
+      "items" : {
+        "type" : "integer"
+      }
+    },
+    "fiRootProportion" : {
+      "type" : "array",
+      "items" : {
+        "type" : "number"
+      }
+    },
+    "f_flux" : {
+      "type" : "array",
+      "items" : {
+        "type" : "number"
+      }
+    },
+    "waterUptake_mm" : {
+      "type" : "array",
+      "items" : {
+        "type" : "number"
+      }
+    },
+    "TGrmax" : {
+      "type" : "number",
+      "name" : "TGrmax",
+      "defaultValue" : 0.0
+    },
+    "relative_RSR" : {
+      "type" : "array",
+      "items" : {
+        "type" : "number"
+      }
+    },
+    "WUF" : {
+      "type" : "array",
+      "items" : {
+        "type" : "number"
+      }
+    },
+    "availalbeWater" : {
+      "type" : "array",
+      "items" : {
+        "type" : "number"
+      }
+    },
+    "nitrogenUptake_mgm2" : {
+      "type" : "array",
+      "items" : {
+        "type" : "number"
+      }
+    },
+    "fineRootExudation_mg" : {
+      "type" : "array",
+      "items" : {
+        "type" : "number"
+      }
+    },
+    "fineRootTurnover_mg" : {
+      "type" : "array",
+      "items" : {
+        "type" : "number"
+      }
+    },
+    "fineRootExudation_cum_mg" : {
+      "type" : "array",
+      "items" : {
+        "type" : "number"
+      }
+    },
+    "fineRootTurnover_cum_mg" : {
+      "type" : "array",
+      "items" : {
+        "type" : "number"
+      }
+    }
+  }
+}

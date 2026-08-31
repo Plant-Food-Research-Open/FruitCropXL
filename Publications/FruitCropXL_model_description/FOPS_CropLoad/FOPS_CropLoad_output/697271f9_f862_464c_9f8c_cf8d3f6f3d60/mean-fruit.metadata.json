@@ -1,0 +1,719 @@
+{
+  "type" : "object",
+  "id" : "urn:jsonschema:MeanFruitOutputData",
+  "properties" : {
+    "timestamp" : {
+      "type" : "string",
+      "description" : "Time-stamp in ISO 8601 format"
+    },
+    "year" : {
+      "type" : "integer",
+      "description" : "Year of the simulation",
+      "name" : "year",
+      "defaultValue" : 0.0,
+      "tags" : [ "Time and identifier" ]
+    },
+    "dayOfYear" : {
+      "type" : "integer",
+      "description" : "Day of year",
+      "name" : "dayOfYear",
+      "defaultValue" : 0.0,
+      "tags" : [ "Time and identifier" ]
+    },
+    "hourOfDay" : {
+      "type" : "integer",
+      "description" : "Hour of day",
+      "name" : "hourOfDay",
+      "defaultValue" : 0.0,
+      "tags" : [ "Time and identifier" ]
+    },
+    "scenario" : {
+      "type" : "integer",
+      "description" : "Internal scenario number for configuring different simulations",
+      "name" : "scenario",
+      "defaultValue" : 0.0,
+      "tags" : [ "Time and identifier" ]
+    },
+    "fruitAge_h" : {
+      "type" : "number",
+      "description" : "Fruit age in hours",
+      "name" : "fruitAge_h",
+      "defaultValue" : 0.0,
+      "tags" : [ "Time and identifier" ]
+    },
+    "totalFruitNumber" : {
+      "type" : "integer",
+      "description" : "Total number of fruits present on the plant, representing the cumulative count of all fruits.",
+      "name" : "totalFruitNumber",
+      "defaultValue" : 0.0,
+      "tags" : [ "Mean fruit dry, fresh weight and sugar concentrations" ]
+    },
+    "meanFruitFW" : {
+      "type" : "number",
+      "description" : "Average fresh weight of fruits on the plant, measured in milligrams.",
+      "name" : "meanFruitFW",
+      "unit" : "mg",
+      "defaultValue" : 0.0,
+      "tags" : [ "Mean fruit dry, fresh weight and sugar concentrations" ]
+    },
+    "meanFruitFW_sd" : {
+      "type" : "number",
+      "description" : "Standard deviation of the fresh weight of fruits, indicating variability in fruit size, measured in milligrams.",
+      "name" : "meanFruitFW_sd",
+      "unit" : "mg",
+      "defaultValue" : 0.0,
+      "tags" : [ "Mean fruit dry, fresh weight and sugar concentrations" ]
+    },
+    "meanFruitDW" : {
+      "type" : "number",
+      "description" : "Average dry weight of fruits on the plant, measured in milligrams.",
+      "name" : "meanFruitDW",
+      "unit" : "mg",
+      "defaultValue" : 0.0,
+      "tags" : [ "Mean fruit dry, fresh weight and sugar concentrations" ]
+    },
+    "meanFruitDW_sd" : {
+      "type" : "number",
+      "description" : "Standard deviation of the dry weight of fruits, indicating variability in fruit dry mass, measured in milligrams.",
+      "name" : "meanFruitDW_sd",
+      "unit" : "mg",
+      "defaultValue" : 0.0,
+      "tags" : [ "Mean fruit dry, fresh weight and sugar concentrations" ]
+    },
+    "meanFruitSc" : {
+      "type" : "number",
+      "description" : "Average sugar concentration in fruits, measured as a ratio of sugar mass to fruit mass.",
+      "name" : "meanFruitSc",
+      "unit" : "g/g",
+      "defaultValue" : 0.0,
+      "tags" : [ "Mean fruit dry, fresh weight and sugar concentrations" ]
+    },
+    "meanFruitSc_sd" : {
+      "type" : "number",
+      "description" : "Standard deviation of the sugar concentration in fruits, indicating variability in sugar content.",
+      "name" : "meanFruitSc_sd",
+      "unit" : "g/g",
+      "defaultValue" : 0.0,
+      "tags" : [ "Mean fruit dry, fresh weight and sugar concentrations" ]
+    },
+    "diameter" : {
+      "type" : "number",
+      "description" : "mean fruit diameter in cm",
+      "name" : "diameter",
+      "unit" : "cm",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit diameter and volume" ]
+    },
+    "vol" : {
+      "type" : "number",
+      "description" : "Standard deviation of the sugar concentration in fruits, indicating variability in sugar content.",
+      "name" : "vol",
+      "unit" : "cm^3",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit diameter and volume" ]
+    },
+    "Afruit" : {
+      "type" : "number",
+      "description" : "Fruit surface area in cm2",
+      "name" : "Afruit",
+      "unit" : "cm^2",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit diameter and volume" ]
+    },
+    "unloadingPerFruit" : {
+      "type" : "number",
+      "description" : "Mean amount of carbon unloaded from phloem, measured in mg of carbon. The sugar format may change between sucrose and sorbitol.",
+      "name" : "unloadingPerFruit",
+      "unit" : "mgC",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit Sugar Uptake" ]
+    },
+    "sugarUptake_active" : {
+      "type" : "number",
+      "description" : "Mean rate of sucrose/other sugar actively taken up by each fruit, measured in mg of sugar.",
+      "name" : "sugarUptake_active",
+      "unit" : "mgSugar",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit Sugar Uptake" ]
+    },
+    "sugarUptake_passive" : {
+      "type" : "number",
+      "description" : "Mean rate of sucrose passively taken up by each fruit, measured in mg of sucrose.",
+      "name" : "sugarUptake_passive",
+      "unit" : "mgSugar",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit Sugar Uptake" ]
+    },
+    "sugarUptake_massflow" : {
+      "type" : "number",
+      "description" : "Mean rate of sucrose delivered to each fruit through mass flow, measured in mg of sucrose.",
+      "name" : "sugarUptake_massflow",
+      "unit" : "mgSugar",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit Sugar Uptake" ]
+    },
+    "maintenanceDM" : {
+      "type" : "number",
+      "description" : "Carbon cost associated with maintaining the fruit metabolism, measured in mg/hour.",
+      "name" : "maintenanceDM",
+      "unit" : "mgC",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit Sugar Uptake" ]
+    },
+    "growthCost" : {
+      "type" : "number",
+      "description" : "Carbon cost associated with growth of the fruit, measured in mg/hour.",
+      "name" : "growthCost",
+      "unit" : "mgC",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit Sugar Uptake" ]
+    },
+    "waterUptake" : {
+      "type" : "number",
+      "description" : "Total amount of water taken up by the fruit, measured in grams.",
+      "name" : "waterUptake",
+      "unit" : "g",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit Water Balance" ]
+    },
+    "waterUptake_xylem" : {
+      "type" : "number",
+      "description" : "Total amount of water taken up from xylem by the fruit, measured in grams.",
+      "name" : "waterUptake_xylem",
+      "unit" : "g",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit Water Balance" ]
+    },
+    "waterUptake_phloem" : {
+      "type" : "number",
+      "description" : "Total amount of water taken up from phloem by the fruit, measured in grams.",
+      "name" : "waterUptake_phloem",
+      "unit" : "g",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit Water Balance" ]
+    },
+    "transpirationLost" : {
+      "type" : "number",
+      "description" : "Amount of water lost from the plant via transpiration, measured in grams.",
+      "name" : "transpirationLost",
+      "unit" : "g",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit Water Balance" ]
+    },
+    "osmoticWaterPotential_fruit" : {
+      "type" : "number",
+      "description" : "Osmotic potential of water in the fruit, influencing water movement, measured in bar.",
+      "name" : "osmoticWaterPotential_fruit",
+      "unit" : "bar",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit Pressure Dynamics" ]
+    },
+    "turgorPressure_fruit" : {
+      "type" : "number",
+      "description" : "Pressure within fruit cells due to water uptake, measured in bar.",
+      "name" : "turgorPressure_fruit",
+      "unit" : "bar",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit Pressure Dynamics" ]
+    },
+    "waterPotential_fruit" : {
+      "type" : "number",
+      "description" : "Energy state of water within the fruit, measured in bar.",
+      "name" : "waterPotential_fruit",
+      "unit" : "bar",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit Pressure Dynamics" ]
+    },
+    "osmoticWaterPotential_phloem" : {
+      "type" : "number",
+      "description" : "Osmotic potential of water in the phloem, influencing sap flow, measured in bar.",
+      "name" : "osmoticWaterPotential_phloem",
+      "unit" : "bar",
+      "defaultValue" : 0.0,
+      "tags" : [ "Phloem Hydraulic Properties" ]
+    },
+    "meanCpm" : {
+      "type" : "number",
+      "description" : "Mean phloem sugar concentration mol/L.",
+      "name" : "meanCpm",
+      "unit" : "mol/L",
+      "defaultValue" : 0.0,
+      "tags" : [ "Customizable fruit output based on height input" ]
+    },
+    "turgorPressure_phloem" : {
+      "type" : "number",
+      "description" : "Pressure within phloem cells due to water uptake, measured in bar.",
+      "name" : "turgorPressure_phloem",
+      "unit" : "bar",
+      "defaultValue" : 0.0,
+      "tags" : [ "Phloem Hydraulic Properties" ]
+    },
+    "waterPotential_phloem" : {
+      "type" : "number",
+      "description" : "Energy state of water within the phloem, measured in bar.",
+      "name" : "waterPotential_phloem",
+      "unit" : "bar",
+      "defaultValue" : 0.0,
+      "tags" : [ "Phloem Hydraulic Properties" ]
+    },
+    "Lphloem" : {
+      "type" : "number",
+      "description" : "Rate of water flow through the fruit phloem, measured in grams per square centimeter per bar per hour.",
+      "name" : "Lphloem",
+      "unit" : "g/cm²/bar/h",
+      "defaultValue" : 0.0,
+      "tags" : [ "Phloem Hydraulic Properties" ]
+    },
+    "Lxylem" : {
+      "type" : "number",
+      "description" : "Rate of water flow through the fruit xylem, measured in grams per square centimeter per bar per hour.",
+      "name" : "Lxylem",
+      "unit" : "g/cm²/bar/h",
+      "defaultValue" : 0.0,
+      "tags" : [ "Phloem Hydraulic Properties" ]
+    },
+    "osmoticWaterPotential_partialContribution" : {
+      "type" : "number",
+      "description" : "Partial contribution of osmotic water potential.",
+      "name" : "osmoticWaterPotential_partialContribution",
+      "unit" : "bar",
+      "defaultValue" : 0.0,
+      "tags" : [ "Water Potential Properties" ]
+    },
+    "cellWallExtensibility" : {
+      "type" : "number",
+      "description" : "Cell wall extensibility, measured in per bar per hour.",
+      "name" : "cellWallExtensibility",
+      "unit" : "per.bar.h",
+      "defaultValue" : 0.0,
+      "tags" : [ "Cell Wall Properties" ]
+    },
+    "elasticModulus" : {
+      "type" : "number",
+      "description" : "Elastic modulus of the fruit, measured in bar.",
+      "name" : "elasticModulus",
+      "unit" : "bar",
+      "defaultValue" : 0.0,
+      "tags" : [ "Elasticity Properties" ]
+    },
+    "ro" : {
+      "type" : "number",
+      "description" : "Skin water flow resistance, measured in cm per hour.",
+      "name" : "ro",
+      "unit" : "cm/h",
+      "defaultValue" : 0.0,
+      "tags" : [ "Skin Conductance" ]
+    },
+    "malicAcid" : {
+      "type" : "number",
+      "description" : "Total malic acid content in the fruit, measured in mg.",
+      "name" : "malicAcid",
+      "unit" : "mg",
+      "defaultValue" : 0.0,
+      "tags" : [ "Acid Properties" ]
+    },
+    "tartaricAcid" : {
+      "type" : "number",
+      "description" : "Total tartaric acid content in the fruit, measured in mg.",
+      "name" : "tartaricAcid",
+      "unit" : "mg",
+      "defaultValue" : 0.0,
+      "tags" : [ "Acid Properties" ]
+    },
+    "malicConcentration_fruit" : {
+      "type" : "number",
+      "description" : "Concentration of malic acid in fruit, measured in g/g.",
+      "name" : "malicConcentration_fruit",
+      "unit" : "g/g",
+      "defaultValue" : 0.0,
+      "tags" : [ "Acid Properties" ]
+    },
+    "tartaricConcentration_fruit" : {
+      "type" : "number",
+      "description" : "Concentration of tartaric acid in fruit, measured in g/g.",
+      "name" : "tartaricConcentration_fruit",
+      "unit" : "g/g",
+      "defaultValue" : 0.0,
+      "tags" : [ "Acid Properties" ]
+    },
+    "fruitIncidentPAR" : {
+      "type" : "number",
+      "description" : "Mean incident PAR at fruit surface area, measured in micromole per square meter per second.",
+      "name" : "fruitIncidentPAR",
+      "unit" : "umol/m^2/s",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit Light Interception" ]
+    },
+    "fruitAbsorbedPAR" : {
+      "type" : "number",
+      "description" : "Mean absorbed PAR by fruit, measured in micromole per second.",
+      "name" : "fruitAbsorbedPAR",
+      "unit" : "umol/s",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit Light Interception" ]
+    },
+    "fruitAbsorbedRadiation" : {
+      "type" : "number",
+      "description" : "Mean absorbed total radiation by fruit in the model radiation unit, measured per second.",
+      "name" : "fruitAbsorbedRadiation",
+      "unit" : "model_rad/s",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit Light Interception" ]
+    },
+    "fruitAbsorbedRadiation_m2" : {
+      "type" : "number",
+      "description" : "Mean absorbed total radiation by fruit per unit area in the model radiation unit.",
+      "name" : "fruitAbsorbedRadiation_m2",
+      "unit" : "model_rad/m^2/s",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit Light Interception" ]
+    },
+    "fruitLightArea_m2" : {
+      "type" : "number",
+      "description" : "Mean effective fruit area used in light interception calculations.",
+      "name" : "fruitLightArea_m2",
+      "unit" : "m^2",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit Light Interception" ]
+    },
+    "fruitBerryCountEffective" : {
+      "type" : "number",
+      "description" : "Mean effective berry count used in fruit light-area scaling.",
+      "name" : "fruitBerryCountEffective",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit Light Interception" ]
+    },
+    "totalFruitNumber_1" : {
+      "type" : "integer",
+      "description" : "Total number of fruits in zone 1 of the plant canopy.",
+      "name" : "totalFruitNumber_1",
+      "defaultValue" : 0.0,
+      "tags" : [ "Customizable fruit output based on height input" ]
+    },
+    "totalFruitNumber_2" : {
+      "type" : "integer",
+      "description" : "Total number of fruits in zone 2 of the plant canopy.",
+      "name" : "totalFruitNumber_2",
+      "defaultValue" : 0.0,
+      "tags" : [ "Customizable fruit output based on height input" ]
+    },
+    "totalFruitNumber_3" : {
+      "type" : "integer",
+      "description" : "Total number of fruits in zone 3 of the plant canopy.",
+      "name" : "totalFruitNumber_3",
+      "defaultValue" : 0.0,
+      "tags" : [ "Customizable fruit output based on height input" ]
+    },
+    "totalFruitNumber_4" : {
+      "type" : "integer",
+      "description" : "Total number of fruits in zone 4 of the plant canopy.",
+      "name" : "totalFruitNumber_4",
+      "defaultValue" : 0.0,
+      "tags" : [ "Customizable fruit output based on height input" ]
+    },
+    "meanFruitFW_1" : {
+      "type" : "number",
+      "description" : "Mean fresh weight of fruits in zone 1, measured in mg.",
+      "name" : "meanFruitFW_1",
+      "unit" : "mg",
+      "defaultValue" : 0.0,
+      "tags" : [ "Customizable fruit output based on height input" ]
+    },
+    "meanFruitFW_2" : {
+      "type" : "number",
+      "description" : "Mean fresh weight of fruits in zone 2, measured in mg.",
+      "name" : "meanFruitFW_2",
+      "unit" : "mg",
+      "defaultValue" : 0.0,
+      "tags" : [ "Customizable fruit output based on height input" ]
+    },
+    "meanFruitFW_3" : {
+      "type" : "number",
+      "description" : "Mean fresh weight of fruits in zone 3, measured in mg.",
+      "name" : "meanFruitFW_3",
+      "unit" : "mg",
+      "defaultValue" : 0.0,
+      "tags" : [ "Customizable fruit output based on height input" ]
+    },
+    "meanFruitFW_4" : {
+      "type" : "number",
+      "description" : "Mean fresh weight of fruits in zone 4, measured in mg.",
+      "name" : "meanFruitFW_4",
+      "unit" : "mg",
+      "defaultValue" : 0.0,
+      "tags" : [ "Customizable fruit output based on height input" ]
+    },
+    "meanFruitDW_1" : {
+      "type" : "number",
+      "description" : "Mean dry weight of fruits in zone 1, measured in mg.",
+      "name" : "meanFruitDW_1",
+      "unit" : "mg",
+      "defaultValue" : 0.0,
+      "tags" : [ "Customizable fruit output based on height input" ]
+    },
+    "meanFruitDW_2" : {
+      "type" : "number",
+      "description" : "Mean dry weight of fruits in zone 2, measured in mg.",
+      "name" : "meanFruitDW_2",
+      "unit" : "mg",
+      "defaultValue" : 0.0,
+      "tags" : [ "Customizable fruit output based on height input" ]
+    },
+    "meanFruitDW_3" : {
+      "type" : "number",
+      "description" : "Mean dry weight of fruits in zone 3, measured in mg.",
+      "name" : "meanFruitDW_3",
+      "unit" : "mg",
+      "defaultValue" : 0.0,
+      "tags" : [ "Customizable fruit output based on height input" ]
+    },
+    "meanFruitDW_4" : {
+      "type" : "number",
+      "description" : "Mean dry weight of fruits in zone 4, measured in mg.",
+      "name" : "meanFruitDW_4",
+      "unit" : "mg",
+      "defaultValue" : 0.0,
+      "tags" : [ "Customizable fruit output based on height input" ]
+    },
+    "meanFruitSc_1" : {
+      "type" : "number",
+      "description" : "Mean sugar concentration of fruits in zone 1, measured in g/g.",
+      "name" : "meanFruitSc_1",
+      "unit" : "g/g",
+      "defaultValue" : 0.0,
+      "tags" : [ "Customizable fruit output based on height input" ]
+    },
+    "meanFruitSc_2" : {
+      "type" : "number",
+      "description" : "Mean sugar concentration of fruits in zone 2, measured in g/g.",
+      "name" : "meanFruitSc_2",
+      "unit" : "g/g",
+      "defaultValue" : 0.0,
+      "tags" : [ "Customizable fruit output based on height input" ]
+    },
+    "meanFruitSc_3" : {
+      "type" : "number",
+      "description" : "Mean sugar concentration of fruits in zone 3, measured in g/g.",
+      "name" : "meanFruitSc_3",
+      "unit" : "g/g",
+      "defaultValue" : 0.0,
+      "tags" : [ "Customizable fruit output based on height input" ]
+    },
+    "meanFruitSc_4" : {
+      "type" : "number",
+      "description" : "Mean sugar concentration of fruits in zone 4, measured in g/g.",
+      "name" : "meanFruitSc_4",
+      "unit" : "g/g",
+      "defaultValue" : 0.0,
+      "tags" : [ "Customizable fruit output based on height input" ]
+    },
+    "simuuid" : {
+      "type" : "string",
+      "description" : "The unique simulation UUID assigned to each simulation run."
+    },
+    "fruitIncidentPAR_mean_1" : {
+      "type" : "number",
+      "description" : "Mean incident fruit PAR in zone 1, measured in umol/m2/s.",
+      "name" : "fruitIncidentPAR_mean_1",
+      "unit" : "umol/m^2/s",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit Light Interception" ]
+    },
+    "fruitIncidentPAR_mean_2" : {
+      "type" : "number",
+      "description" : "Mean incident fruit PAR in zone 2, measured in umol/m2/s.",
+      "name" : "fruitIncidentPAR_mean_2",
+      "unit" : "umol/m^2/s",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit Light Interception" ]
+    },
+    "fruitIncidentPAR_mean_3" : {
+      "type" : "number",
+      "description" : "Mean incident fruit PAR in zone 3, measured in umol/m2/s.",
+      "name" : "fruitIncidentPAR_mean_3",
+      "unit" : "umol/m^2/s",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit Light Interception" ]
+    },
+    "fruitIncidentPAR_mean_4" : {
+      "type" : "number",
+      "description" : "Mean incident fruit PAR in zone 4, measured in umol/m2/s.",
+      "name" : "fruitIncidentPAR_mean_4",
+      "unit" : "umol/m^2/s",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit Light Interception" ]
+    },
+    "fruitAbsorbedPAR_sum_1" : {
+      "type" : "number",
+      "description" : "Sum of absorbed fruit PAR in zone 1, measured in umol/s.",
+      "name" : "fruitAbsorbedPAR_sum_1",
+      "unit" : "umol/s",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit Light Interception" ]
+    },
+    "fruitAbsorbedPAR_sum_2" : {
+      "type" : "number",
+      "description" : "Sum of absorbed fruit PAR in zone 2, measured in umol/s.",
+      "name" : "fruitAbsorbedPAR_sum_2",
+      "unit" : "umol/s",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit Light Interception" ]
+    },
+    "fruitAbsorbedPAR_sum_3" : {
+      "type" : "number",
+      "description" : "Sum of absorbed fruit PAR in zone 3, measured in umol/s.",
+      "name" : "fruitAbsorbedPAR_sum_3",
+      "unit" : "umol/s",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit Light Interception" ]
+    },
+    "fruitAbsorbedPAR_sum_4" : {
+      "type" : "number",
+      "description" : "Sum of absorbed fruit PAR in zone 4, measured in umol/s.",
+      "name" : "fruitAbsorbedPAR_sum_4",
+      "unit" : "umol/s",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit Light Interception" ]
+    },
+    "fruitAbsorbedRadiation_sum_1" : {
+      "type" : "number",
+      "description" : "Sum of absorbed total fruit radiation in zone 1.",
+      "name" : "fruitAbsorbedRadiation_sum_1",
+      "unit" : "model_rad/s",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit Light Interception" ]
+    },
+    "fruitAbsorbedRadiation_sum_2" : {
+      "type" : "number",
+      "description" : "Sum of absorbed total fruit radiation in zone 2.",
+      "name" : "fruitAbsorbedRadiation_sum_2",
+      "unit" : "model_rad/s",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit Light Interception" ]
+    },
+    "fruitAbsorbedRadiation_sum_3" : {
+      "type" : "number",
+      "description" : "Sum of absorbed total fruit radiation in zone 3.",
+      "name" : "fruitAbsorbedRadiation_sum_3",
+      "unit" : "model_rad/s",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit Light Interception" ]
+    },
+    "fruitAbsorbedRadiation_sum_4" : {
+      "type" : "number",
+      "description" : "Sum of absorbed total fruit radiation in zone 4.",
+      "name" : "fruitAbsorbedRadiation_sum_4",
+      "unit" : "model_rad/s",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit Light Interception" ]
+    },
+    "fruitCount_1" : {
+      "type" : "integer",
+      "description" : "Number of fruit objects included in zone 1.",
+      "name" : "fruitCount_1",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit Light Interception" ]
+    },
+    "fruitCount_2" : {
+      "type" : "integer",
+      "description" : "Number of fruit objects included in zone 2.",
+      "name" : "fruitCount_2",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit Light Interception" ]
+    },
+    "fruitCount_3" : {
+      "type" : "integer",
+      "description" : "Number of fruit objects included in zone 3.",
+      "name" : "fruitCount_3",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit Light Interception" ]
+    },
+    "fruitCount_4" : {
+      "type" : "integer",
+      "description" : "Number of fruit objects included in zone 4.",
+      "name" : "fruitCount_4",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit Light Interception" ]
+    },
+    "fruitLightArea_sum_1" : {
+      "type" : "number",
+      "description" : "Sum of effective fruit light area in zone 1.",
+      "name" : "fruitLightArea_sum_1",
+      "unit" : "m^2",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit Light Interception" ]
+    },
+    "fruitLightArea_sum_2" : {
+      "type" : "number",
+      "description" : "Sum of effective fruit light area in zone 2.",
+      "name" : "fruitLightArea_sum_2",
+      "unit" : "m^2",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit Light Interception" ]
+    },
+    "fruitLightArea_sum_3" : {
+      "type" : "number",
+      "description" : "Sum of effective fruit light area in zone 3.",
+      "name" : "fruitLightArea_sum_3",
+      "unit" : "m^2",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit Light Interception" ]
+    },
+    "fruitLightArea_sum_4" : {
+      "type" : "number",
+      "description" : "Sum of effective fruit light area in zone 4.",
+      "name" : "fruitLightArea_sum_4",
+      "unit" : "m^2",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit Light Interception" ]
+    },
+    "mSuc" : {
+      "type" : "number",
+      "description" : "Mean sucrose carbon mass per fruit, measured in grams of carbon.",
+      "name" : "mSuc",
+      "unit" : "gC",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit Sugar Components" ]
+    },
+    "mSor" : {
+      "type" : "number",
+      "description" : "Mean sorbitol carbon mass per fruit, measured in grams of carbon.",
+      "name" : "mSor",
+      "unit" : "gC",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit Sugar Components" ]
+    },
+    "mGlu" : {
+      "type" : "number",
+      "description" : "Mean glucose carbon mass per fruit, measured in grams of carbon.",
+      "name" : "mGlu",
+      "unit" : "gC",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit Sugar Components" ]
+    },
+    "mFru" : {
+      "type" : "number",
+      "description" : "Mean fructose carbon mass per fruit, measured in grams of carbon.",
+      "name" : "mFru",
+      "unit" : "gC",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit Sugar Components" ]
+    },
+    "mSta" : {
+      "type" : "number",
+      "description" : "Mean starch carbon mass per fruit, measured in grams of carbon.",
+      "name" : "mSta",
+      "unit" : "gC",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit Sugar Components" ]
+    },
+    "mSyn" : {
+      "type" : "number",
+      "description" : "Mean other synthesized carbon mass per fruit, measured in grams of carbon.",
+      "name" : "mSyn",
+      "unit" : "gC",
+      "defaultValue" : 0.0,
+      "tags" : [ "Fruit Sugar Components" ]
+    }
+  }
+}

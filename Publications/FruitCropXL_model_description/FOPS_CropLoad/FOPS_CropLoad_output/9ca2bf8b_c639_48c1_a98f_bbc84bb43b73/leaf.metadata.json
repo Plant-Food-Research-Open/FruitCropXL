@@ -1,0 +1,381 @@
+{
+  "type" : "object",
+  "id" : "urn:jsonschema:leaf:Leaf",
+  "properties" : {
+    "timestamp" : {
+      "type" : "string"
+    },
+    "length" : {
+      "type" : "number",
+      "name" : "length",
+      "defaultValue" : 0.0
+    },
+    "nodeID" : {
+      "type" : "integer",
+      "name" : "nodeID",
+      "defaultValue" : 0.0
+    },
+    "simuuid" : {
+      "type" : "string"
+    },
+    "order" : {
+      "type" : "integer",
+      "name" : "order",
+      "defaultValue" : 0.0
+    },
+    "plantNumber" : {
+      "type" : "integer",
+      "name" : "plantNumber",
+      "defaultValue" : 0.0
+    },
+    "cordonNumber" : {
+      "type" : "integer",
+      "name" : "cordonNumber",
+      "defaultValue" : 0.0
+    },
+    "nodeNumber" : {
+      "type" : "integer",
+      "name" : "nodeNumber",
+      "defaultValue" : 0.0
+    },
+    "organType" : {
+      "type" : "string"
+    },
+    "rank" : {
+      "type" : "integer",
+      "name" : "rank",
+      "defaultValue" : 0.0
+    },
+    "x" : {
+      "type" : "number",
+      "name" : "x",
+      "defaultValue" : 0.0
+    },
+    "endX" : {
+      "type" : "number",
+      "name" : "endX",
+      "defaultValue" : 0.0
+    },
+    "y" : {
+      "type" : "number",
+      "name" : "y",
+      "defaultValue" : 0.0
+    },
+    "endY" : {
+      "type" : "number",
+      "name" : "endY",
+      "defaultValue" : 0.0
+    },
+    "z" : {
+      "type" : "number",
+      "name" : "z",
+      "defaultValue" : 0.0
+    },
+    "endZ" : {
+      "type" : "number",
+      "name" : "endZ",
+      "defaultValue" : 0.0
+    },
+    "age" : {
+      "type" : "number",
+      "name" : "age",
+      "defaultValue" : 0.0
+    },
+    "ageD" : {
+      "type" : "number",
+      "name" : "ageD",
+      "defaultValue" : 0.0
+    },
+    "diameter" : {
+      "type" : "number",
+      "name" : "diameter",
+      "defaultValue" : 0.0
+    },
+    "waterPotential" : {
+      "type" : "number",
+      "name" : "waterPotential",
+      "defaultValue" : 0.0
+    },
+    "parentID" : {
+      "type" : "integer",
+      "name" : "parentID",
+      "defaultValue" : 0.0
+    },
+    "biomass" : {
+      "type" : "number",
+      "name" : "biomass",
+      "defaultValue" : 0.0
+    },
+    "carbon_total" : {
+      "type" : "number",
+      "name" : "carbon_total",
+      "defaultValue" : 0.0
+    },
+    "carbon_structure" : {
+      "type" : "number",
+      "name" : "carbon_structure",
+      "defaultValue" : 0.0
+    },
+    "carbon_nonStructure" : {
+      "type" : "number",
+      "name" : "carbon_nonStructure",
+      "defaultValue" : 0.0
+    },
+    "structureDM" : {
+      "type" : "number",
+      "name" : "structureDM",
+      "defaultValue" : 0.0
+    },
+    "structureDM_PRI" : {
+      "type" : "number",
+      "name" : "structureDM_PRI",
+      "defaultValue" : 0.0
+    },
+    "structureDM_SEC" : {
+      "type" : "number",
+      "name" : "structureDM_SEC",
+      "defaultValue" : 0.0
+    },
+    "maintenanceDM" : {
+      "type" : "number",
+      "name" : "maintenanceDM",
+      "defaultValue" : 0.0
+    },
+    "reserveDM" : {
+      "type" : "number",
+      "name" : "reserveDM",
+      "defaultValue" : 0.0
+    },
+    "growthCost" : {
+      "type" : "number",
+      "name" : "growthCost",
+      "defaultValue" : 0.0
+    },
+    "loading" : {
+      "type" : "number",
+      "name" : "loading",
+      "defaultValue" : 0.0
+    },
+    "unloading" : {
+      "type" : "number",
+      "name" : "unloading",
+      "defaultValue" : 0.0
+    },
+    "Ka" : {
+      "type" : "number",
+      "name" : "Ka",
+      "defaultValue" : 0.0
+    },
+    "waterFlux" : {
+      "type" : "number",
+      "name" : "waterFlux",
+      "defaultValue" : 0.0
+    },
+    "potentialFinalSize" : {
+      "type" : "number",
+      "name" : "potentialFinalSize",
+      "defaultValue" : 0.0
+    },
+    "realizedFinalSize" : {
+      "type" : "number",
+      "name" : "realizedFinalSize",
+      "defaultValue" : 0.0
+    },
+    "expansionHalfTimePotential" : {
+      "type" : "number",
+      "name" : "expansionHalfTimePotential",
+      "defaultValue" : 0.0
+    },
+    "expansionHalfTimeRealized" : {
+      "type" : "number",
+      "name" : "expansionHalfTimeRealized",
+      "defaultValue" : 0.0
+    },
+    "cpb" : {
+      "type" : "number",
+      "name" : "cpb",
+      "defaultValue" : 0.0
+    },
+    "cpt" : {
+      "type" : "number",
+      "name" : "cpt",
+      "defaultValue" : 0.0
+    },
+    "j" : {
+      "type" : "number",
+      "name" : "j",
+      "defaultValue" : 0.0
+    },
+    "childInternodeIDs" : {
+      "type" : "array"
+    },
+    "fabs" : {
+      "type" : "number",
+      "name" : "fabs",
+      "defaultValue" : 0.0
+    },
+    "fpar" : {
+      "type" : "number",
+      "name" : "fpar",
+      "defaultValue" : 0.0
+    },
+    "fLayer" : {
+      "type" : "number",
+      "name" : "fLayer",
+      "defaultValue" : 0.0
+    },
+    "GSWpm" : {
+      "type" : "number",
+      "name" : "GSWpm",
+      "unit" : "m/s",
+      "defaultValue" : 0.0
+    },
+    "GSWa" : {
+      "type" : "number",
+      "name" : "GSWa",
+      "unit" : "m/s",
+      "defaultValue" : 0.0
+    },
+    "gs" : {
+      "type" : "number",
+      "name" : "gs",
+      "unit" : "mol/m2/s",
+      "defaultValue" : 0.0
+    },
+    "layer" : {
+      "type" : "integer",
+      "name" : "layer",
+      "defaultValue" : 0.0
+    },
+    "leafAreaAbove_plant" : {
+      "type" : "number",
+      "name" : "leafAreaAbove_plant",
+      "defaultValue" : 0.0
+    },
+    "leafAreaAbove_shoot" : {
+      "type" : "number",
+      "name" : "leafAreaAbove_shoot",
+      "defaultValue" : 0.0
+    },
+    "leafAreaDensity_local" : {
+      "type" : "number",
+      "name" : "leafAreaDensity_local",
+      "defaultValue" : 0.0
+    },
+    "adjustedWidth" : {
+      "type" : "number",
+      "name" : "adjustedWidth",
+      "defaultValue" : 0.0
+    },
+    "rosetteRankIndex" : {
+      "type" : "integer",
+      "name" : "rosetteRankIndex",
+      "defaultValue" : 0.0
+    },
+    "rosetteLeafCount" : {
+      "type" : "integer",
+      "name" : "rosetteLeafCount",
+      "defaultValue" : 0.0
+    },
+    "rosetteRankScale" : {
+      "type" : "number",
+      "name" : "rosetteRankScale",
+      "defaultValue" : 0.0
+    },
+    "realizationRatio" : {
+      "type" : "number",
+      "name" : "realizationRatio",
+      "defaultValue" : 0.0
+    },
+    "profileFinalSizeLocked" : {
+      "type" : "boolean"
+    },
+    "currentAreaToRealizedFinalRatio" : {
+      "type" : "number",
+      "name" : "currentAreaToRealizedFinalRatio",
+      "defaultValue" : 0.0
+    },
+    "appleLeafDevelopmentClass" : {
+      "type" : "string"
+    },
+    "fastEarlyExpansionLeaf" : {
+      "type" : "boolean"
+    },
+    "rosetteExpansionScaleUsed" : {
+      "type" : "number",
+      "name" : "rosetteExpansionScaleUsed",
+      "defaultValue" : 0.0
+    },
+    "shapeSpecies" : {
+      "type" : "string"
+    },
+    "initFromFieldCanopy" : {
+      "type" : "boolean"
+    },
+    "fieldPatchId" : {
+      "type" : "integer",
+      "name" : "fieldPatchId",
+      "defaultValue" : 0.0
+    },
+    "fieldLayerId" : {
+      "type" : "integer",
+      "name" : "fieldLayerId",
+      "defaultValue" : 0.0
+    },
+    "fieldLayerZmin" : {
+      "type" : "number",
+      "name" : "fieldLayerZmin",
+      "defaultValue" : 0.0
+    },
+    "fieldLayerLAD" : {
+      "type" : "number",
+      "name" : "fieldLayerLAD",
+      "defaultValue" : 0.0
+    },
+    "hasValidLeafLightForPhotosynthesis" : {
+      "type" : "boolean"
+    },
+    "carbonGainLastStep" : {
+      "type" : "number",
+      "name" : "carbonGainLastStep",
+      "defaultValue" : 0.0
+    },
+    "carbonCostLastStep" : {
+      "type" : "number",
+      "name" : "carbonCostLastStep",
+      "defaultValue" : 0.0
+    },
+    "carbonSelfBalanceLastStep" : {
+      "type" : "number",
+      "name" : "carbonSelfBalanceLastStep",
+      "defaultValue" : 0.0
+    },
+    "carbonSelfBalance10d" : {
+      "type" : "number",
+      "name" : "carbonSelfBalance10d",
+      "defaultValue" : 0.0
+    },
+    "carbonDeficitRemovalCandidate" : {
+      "type" : "integer",
+      "name" : "carbonDeficitRemovalCandidate",
+      "defaultValue" : 0.0
+    },
+    "carbonDeficitRemoved" : {
+      "type" : "integer",
+      "name" : "carbonDeficitRemoved",
+      "defaultValue" : 0.0
+    },
+    "PAnet" : {
+      "type" : "number",
+      "name" : "PAnet",
+      "unit" : "umol CO2/m2/s",
+      "defaultValue" : 0.0
+    },
+    "Anet" : {
+      "type" : "number",
+      "name" : "Anet",
+      "unit" : "umol CO2/m2/s",
+      "defaultValue" : 0.0
+    }
+  }
+}

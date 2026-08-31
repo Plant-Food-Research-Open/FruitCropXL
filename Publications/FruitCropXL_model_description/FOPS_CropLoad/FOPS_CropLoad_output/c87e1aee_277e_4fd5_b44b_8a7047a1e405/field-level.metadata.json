@@ -1,0 +1,198 @@
+{
+  "type" : "object",
+  "id" : "urn:jsonschema:FieldLevelOutputData",
+  "properties" : {
+    "timestamp" : {
+      "type" : "string",
+      "description" : "Time-stamp in ISO 8601 format"
+    },
+    "year" : {
+      "type" : "integer",
+      "description" : "year",
+      "name" : "year",
+      "defaultValue" : 0.0
+    },
+    "dayOfYear" : {
+      "type" : "integer",
+      "description" : "Day of year ",
+      "name" : "dayOfYear",
+      "defaultValue" : 0.0
+    },
+    "hourOfDay" : {
+      "type" : "integer",
+      "description" : "Hour of day",
+      "name" : "hourOfDay",
+      "defaultValue" : 0.0
+    },
+    "latitude" : {
+      "type" : "number",
+      "description" : "The latitude of the place in degrees, based on the convention that use North as positive, South is negative.",
+      "name" : "latitude",
+      "defaultValue" : 0.0
+    },
+    "longitude" : {
+      "type" : "number",
+      "description" : "The longitude in degrees, based on the convention use East as positive and West as negative",
+      "name" : "longitude",
+      "defaultValue" : 0.0
+    },
+    "rowDistance" : {
+      "type" : "number",
+      "description" : "Distance between rows.",
+      "name" : "rowDistance",
+      "defaultValue" : 0.0
+    },
+    "plantDistance" : {
+      "type" : "number",
+      "description" : "Distance between plants in a row.",
+      "name" : "plantDistance",
+      "defaultValue" : 0.0
+    },
+    "rowOrientation" : {
+      "type" : "number",
+      "description" : "Row orientation. 0 is for east-west, 90 is for south-north (rotate counter-clockwise).",
+      "name" : "rowOrientation",
+      "defaultValue" : 0.0
+    },
+    "scenario" : {
+      "type" : "integer",
+      "description" : "Internal sub-scenario number for configure different simulations",
+      "name" : "scenario",
+      "defaultValue" : 0.0
+    },
+    "age_degreeDay" : {
+      "type" : "number",
+      "description" : "Represents the main organ age in terms of effective growing days adjusted for temperature effects.",
+      "name" : "age_degreeDay",
+      "defaultValue" : 0.0
+    },
+    "age_days" : {
+      "type" : "number",
+      "description" : "Represents the organ age in days",
+      "name" : "age_days",
+      "defaultValue" : 0.0
+    },
+    "incomingRadiation" : {
+      "type" : "number",
+      "description" : "Rate of solar radiation received per unit area, measured in micromoles of photons per square meter per second.",
+      "name" : "incomingRadiation",
+      "unit" : "umol/m²/s",
+      "defaultValue" : 0.0
+    },
+    "azimuth" : {
+      "type" : "number",
+      "name" : "azimuth",
+      "defaultValue" : 0.0
+    },
+    "zenith" : {
+      "type" : "number",
+      "name" : "zenith",
+      "defaultValue" : 0.0
+    },
+    "solarElevation" : {
+      "type" : "number",
+      "name" : "solarElevation",
+      "defaultValue" : 0.0
+    },
+    "leafAreaPerPlant" : {
+      "type" : "number",
+      "description" : "Mean leaf area per vine.",
+      "name" : "leafAreaPerPlant",
+      "unit" : "m²",
+      "defaultValue" : 0.0
+    },
+    "LAI" : {
+      "type" : "number",
+      "description" : "Leaf Area Index (LAI) of the field.",
+      "name" : "LAI",
+      "defaultValue" : 0.0
+    },
+    "hourlyAbsorbedRadiation" : {
+      "type" : "number",
+      "description" : "Canopy absorbed radiation",
+      "name" : "hourlyAbsorbedRadiation",
+      "unit" : "umol/m²/s",
+      "defaultValue" : 0.0
+    },
+    "fabsPlant" : {
+      "type" : "number",
+      "description" : "Plant-level absorbed total-radiation fraction aggregated into the field-level output.",
+      "name" : "fabsPlant",
+      "defaultValue" : 0.0
+    },
+    "fparPlant" : {
+      "type" : "number",
+      "description" : "Plant-level absorbed PAR fraction aggregated into the field-level output.",
+      "name" : "fparPlant",
+      "defaultValue" : 0.0
+    },
+    "fabsSoil" : {
+      "type" : "number",
+      "description" : "Field-level light condition: fraction of global radiation absorbed by soil represented by the Tile module",
+      "name" : "fabsSoil",
+      "defaultValue" : 0.0
+    },
+    "fparSoil" : {
+      "type" : "number",
+      "description" : "Field-level light condition: fraction of PAR absorbed by soil represented by the Tile module",
+      "name" : "fparSoil",
+      "defaultValue" : 0.0
+    },
+    "fparGround" : {
+      "type" : "number",
+      "description" : "Fraction of PAR penetrated to the ground in the area defined by the row and plant distance. Similar to fparSoil. Depends on whether using shading factor. It is either using the fpar reached to the tile, or estimated by 1 - 1.06*fpar plant",
+      "name" : "fparGround",
+      "defaultValue" : 0.0
+    },
+    "k" : {
+      "type" : "number",
+      "description" : "Light extinction coefficient for Lambert-Beer equation based on fparGround.",
+      "name" : "k",
+      "defaultValue" : 0.0
+    },
+    "k_ground" : {
+      "type" : "number",
+      "description" : "Light extinction coefficient for Lambert-Beer equation based on field base LAI and fparGround",
+      "name" : "k_ground",
+      "defaultValue" : 0.0
+    },
+    "fPARLow" : {
+      "type" : "number",
+      "description" : "Fraction of PAR penetrated to low layer leaves, trunk height to 1/3 of the plant height - trunk height.",
+      "name" : "fPARLow",
+      "defaultValue" : 0.0
+    },
+    "fPARMid" : {
+      "type" : "number",
+      "description" : "Fraction of PAR penetrated to mid layer leaves, 1/3 to 2/3 of the plant height - trunk height",
+      "name" : "fPARMid",
+      "defaultValue" : 0.0
+    },
+    "fPARUp" : {
+      "type" : "number",
+      "description" : "Fraction of PAR penetrated to upper layer leaves, 2/3 of the canopy height. to the plant height.",
+      "name" : "fPARUp",
+      "defaultValue" : 0.0
+    },
+    "fPARGlobal" : {
+      "type" : "number",
+      "name" : "fPARGlobal",
+      "defaultValue" : 0.0
+    },
+    "fDiffuseLight" : {
+      "type" : "number",
+      "name" : "fDiffuseLight",
+      "defaultValue" : 0.0
+    },
+    "plantDensity" : {
+      "type" : "number",
+      "description" : "The plant density of the simulation.",
+      "name" : "plantDensity",
+      "defaultValue" : 0.0
+    },
+    "simuuid" : {
+      "type" : "string",
+      "description" : "The unique simulation UUID assigned to each simulation run."
+    }
+  }
+}
