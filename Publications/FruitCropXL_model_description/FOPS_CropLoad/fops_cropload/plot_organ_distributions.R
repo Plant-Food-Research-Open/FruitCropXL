@@ -1,9 +1,11 @@
 # Spatial organ-distribution figure writers for the FOPS CropLoad workflow.
 
 fops_plot_internode_3d <- function(selected_scenarios, params) {
-  high <- selected_scenarios[selected_scenarios$scenario_role == "high_crop_load", , drop = FALSE]
-  if (nrow(high) == 0 || is.na(high$internode_array_file[[1]]) || !file.exists(high$internode_array_file[[1]])) {
-    warning("High-crop-load internodeArray file is unavailable; skipping Python internode 3D plots.", call. = FALSE)
+  # The spatial panels are deliberately based on the retained snapshot, rather
+  # than re-extracting a potentially different time slice from raw outputs.
+  internode_csv <- params$saved_internode_snapshot_csv
+  if (is.null(internode_csv) || !file.exists(internode_csv)) {
+    warning("Saved internode snapshot CSV is unavailable; skipping Python internode 3D plots.", call. = FALSE)
     return(invisible(NULL))
   }
 
@@ -15,10 +17,10 @@ fops_plot_internode_3d <- function(selected_scenarios, params) {
   }
 
   output_dir <- file.path(params$output_dir, "FOPS_high_crop_load_internode_3d")
-  plot_label <- paste0("FOPS high crop load: ", high$scenario_label[[1]])
+  plot_label <- "FOPS high crop load: retained snapshot"
   args <- c(
     plot_script,
-    "--internode_csv", high$internode_array_file[[1]],
+    "--internode_csv", internode_csv,
     "--internode_metrics", "waterPotential,cp",
     "--snapshot_hour", as.character(params$snapshot_hour),
     "--outdir", output_dir,

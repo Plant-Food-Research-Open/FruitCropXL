@@ -12,29 +12,24 @@ arg_value <- function(name, default = NULL) {
 script_arg <- grep("^--file=", commandArgs(trailingOnly = FALSE), value = TRUE)
 script_path <- if (length(script_arg)) sub("^--file=", "", script_arg[[1]]) else "build_figure8.R"
 script_dir <- dirname(normalizePath(script_path, mustWork = FALSE))
-framework_dir <- normalizePath(file.path(script_dir, "..", ".."), mustWork = FALSE)
 
 spatial_csv <- arg_value(
   "--spatial-csv",
-  file.path(framework_dir, "12_FOPS_CropLoad_usecase", "FOPS_crop_load_spatial_low_high_data.csv")
+  file.path(script_dir, "FOPS_crop_load_spatial_low_high_data.csv")
 )
 internode_csv <- arg_value(
   "--internode-csv",
-  file.path(
-    "/home/jzhu/Workspace/Github/2-Functional-structural-fruit-crop-model-evaluation",
-    "Model_analysis/0_Model_output/FOPS_CropLoad/Old-version",
-    "629bd1e0_617c_49f0_9dc1_b9533cdd7f27",
-    "internodeArray_629bd1e0_617c_49f0_9dc1_b9533cdd7f27.csv"
-  )
+  file.path(script_dir, "internode_snapshot_plot_data.csv")
 )
 output_file <- arg_value(
   "--output",
-  file.path(framework_dir, "06_figures", "06B_Figure8_FOPS_crop_load_spatial_distribution.png")
+  file.path(script_dir, "output", "06B_Figure8_FOPS_crop_load_spatial_distribution.png")
 )
 panel_dir <- arg_value(
   "--panel-dir",
-  file.path(framework_dir, "12_FOPS_CropLoad_usecase", "FOPS_600_internode_3d")
+  file.path(script_dir, "output", "FOPS_600_internode_3d")
 )
+panel_source_dir <- arg_value("--panel-source-dir")
 
 required <- c("dplyr", "ggplot2", "patchwork", "readr", "scales", "tibble")
 missing <- required[!vapply(required, requireNamespace, logical(1), quietly = TRUE)]
@@ -50,48 +45,58 @@ run_panel_dir <- tempfile("figure8-3d-panels-")
 dir.create(run_panel_dir, recursive = TRUE, showWarnings = FALSE)
 on.exit(unlink(run_panel_dir, recursive = TRUE, force = TRUE), add = TRUE)
 
-python_script <- file.path(script_dir, "plot_internode_3d.py")
-python <- Sys.which("python3")
-if (!nzchar(python)) stop("python3 is unavailable.", call. = FALSE)
+expected_panel_files <- c(
+  "internodes_waterPotential_3d.png",
+  "internodes_Cp_3d.png",
+  "internode_snapshot_diagnostics.csv"
+)
+if (!is.null(panel_source_dir) && nzchar(panel_source_dir)) {
+  fresh_python_outputs <- file.path(panel_source_dir, expected_panel_files)
+} else {
+  python_script <- file.path(script_dir, "plot_internode_3d.py")
+  python <- Sys.which("python3")
+  if (!nzchar(python)) stop("python3 is unavailable.", call. = FALSE)
 
-matplotlib_dir <- file.path(tempdir(), "matplotlib-figure8")
-dir.create(matplotlib_dir, recursive = TRUE, showWarnings = FALSE)
-python_args <- c(
-  python_script,
-  "--internode_csv", internode_csv,
-  "--internode_metrics", "waterPotential,cp",
-  "--snapshot_doy", "65",
-  "--snapshot_hour", "12",
-  "--outdir", run_panel_dir,
-  "--exact_outdir", "true",
-  "--targets", "FOPS_600_internodes",
-  "--plot_label", "FOPS_600_fruits",
-  "--view_elev", "24",
-  "--view_azim", "-75",
-  "--interactive", "false",
-  "--histograms", "false",
-  "--publication_style", "true"
-)
-python_status <- system2(
-  python,
-  args = python_args,
-  env = paste0("MPLCONFIGDIR=", matplotlib_dir)
-)
-if (!identical(python_status, 0L)) {
-  stop("Python 3D-panel generation failed with exit status ", python_status, ".", call. = FALSE)
-}
-fresh_python_outputs <- file.path(
-  run_panel_dir,
-  c(
-    "internodes_waterPotential_3d.png",
-    "internodes_Cp_3d.png",
-    "internode_snapshot_diagnostics.csv"
+  matplotlib_dir <- file.path(tempdir(), "matplotlib-figure8")
+  dir.create(matplotlib_dir, recursive = TRUE, showWarnings = FALSE)
+  # Generate the independent water-potential and Cp panels in separate
+  # directories. This avoids file collisions for their diagnostics and makes
+  # the standalone Figure 8 build practical on constrained CI hosts.
+  metrics <- c("waterPotential", "cp")
+  metric_dirs <- file.path(run_panel_dir, metrics)
+  lapply(metric_dirs, dir.create, recursive = TRUE, showWarnings = FALSE)
+  python_status <- parallel::mclapply(seq_along(metrics), function(i) {
+    python_args <- c(
+      python_script,
+      "--internode_csv", internode_csv,
+      "--internode_metrics", metrics[[i]],
+      "--snapshot_doy", "65",
+      "--snapshot_hour", "12",
+      "--outdir", metric_dirs[[i]],
+      "--exact_outdir", "true",
+      "--targets", "FOPS_600_internodes",
+      "--plot_label", "FOPS_600_fruits",
+      "--view_elev", "24",
+      "--view_azim", "-75",
+      "--interactive", "false",
+      "--histograms", "false",
+      "--publication_style", "true"
+    )
+    system2(python, args = python_args, env = paste0("MPLCONFIGDIR=", matplotlib_dir))
+  }, mc.cores = length(metrics))
+  if (!all(vapply(python_status, identical, logical(1), 0L))) {
+    stop("Python 3D-panel generation failed.", call. = FALSE)
+  }
+  fresh_python_outputs <- c(
+    file.path(metric_dirs[[1]], "internodes_waterPotential_3d.png"),
+    file.path(metric_dirs[[2]], "internodes_Cp_3d.png"),
+    file.path(metric_dirs[[1]], "internode_snapshot_diagnostics.csv")
   )
-)
+}
 if (!all(file.exists(fresh_python_outputs))) {
   stop("Python completed without writing fresh 3D panels and diagnostics.", call. = FALSE)
 }
-generated_files <- list.files(run_panel_dir, full.names = TRUE, recursive = FALSE)
+generated_files <- fresh_python_outputs
 if (!all(file.copy(generated_files, panel_dir, overwrite = TRUE))) {
   stop("Could not promote fresh Python outputs to the retained panel directory.", call. = FALSE)
 }

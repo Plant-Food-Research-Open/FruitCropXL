@@ -1896,15 +1896,74 @@ build_temporal_fruit_fw_diagnostics <- function(mapping, params) {
   dplyr::bind_rows(rows)
 }
 
+read_saved_spatial_result <- function(spatial_csv, snapshot_info_csv) {
+  if (!file.exists(spatial_csv)) {
+    stop("Saved spatial snapshot CSV not found: ", spatial_csv, call. = FALSE)
+  }
+  spatial_data <- readr::read_csv(spatial_csv, show_col_types = FALSE, progress = FALSE)
+  required <- c("scenario_role", "CropLoad", "trait", "value")
+  missing <- setdiff(required, names(spatial_data))
+  if (length(missing) > 0) {
+    stop("Saved spatial snapshot is missing columns: ", paste(missing, collapse = ", "), call. = FALSE)
+  }
+  roles <- c("low_crop_load", "high_crop_load")
+  if (!all(roles %in% unique(spatial_data$scenario_role))) {
+    stop("Saved spatial snapshot must contain low_crop_load and high_crop_load rows.", call. = FALSE)
+  }
+  traits <- c("waterPotential", "Cp", "freshMass", "DMC")
+  if (!all(traits %in% unique(spatial_data$trait))) {
+    stop("Saved spatial snapshot is missing required traits: ",
+      paste(setdiff(traits, unique(spatial_data$trait)), collapse = ", "), call. = FALSE)
+  }
+  snapshot_info <- if (file.exists(snapshot_info_csv)) {
+    readr::read_csv(snapshot_info_csv, show_col_types = FALSE, progress = FALSE)
+  } else {
+    tibble::tibble()
+  }
+  selected_scenarios <- spatial_data %>%
+    dplyr::distinct(.data$uuid, .data$CropLoad, .data$scenario_role, .data$crop_load_label) %>%
+    dplyr::mutate(
+      scenario_label = .data$crop_load_label,
+      scenario_role_label = paste0(ifelse(.data$scenario_role == "low_crop_load", "Low", "High"),
+        " crop load: ", .data$crop_load_label)
+    )
+  list(
+    data = spatial_data,
+    snapshot_info = snapshot_info,
+    diagnostics = tibble::tibble(),
+    selected_scenarios = selected_scenarios
+  )
+}
+
+restore_crop_load_order <- function(data) {
+  if (!all(c("CropLoad", "crop_load_label") %in% names(data))) {
+    return(data)
+  }
+  labels <- data %>%
+    dplyr::transmute(CropLoad = suppressWarnings(as.numeric(.data$CropLoad)),
+      crop_load_label = as.character(.data$crop_load_label)) %>%
+    dplyr::filter(is.finite(.data$CropLoad), !is.na(.data$crop_load_label)) %>%
+    dplyr::distinct() %>%
+    dplyr::arrange(.data$CropLoad) %>%
+    dplyr::pull(.data$crop_load_label)
+  data$crop_load_label <- factor(as.character(data$crop_load_label), levels = unique(labels))
+  data
+}
+
 run_fops_cropload <- function(cli = parse_cli_args(commandArgs(trailingOnly = TRUE))) {
 
 formats <- split_csv(cli$format, default = c("svg", "png", "pdf"))
 required_packages(require_html = "html" %in% formats)
-local_data_dir <- file.path(getOption("fops_cropload_dir", getwd()), "data", "FOPS_CropLoad")
+workflow_dir <- getOption("fops_cropload_dir", getwd())
+local_data_dir <- file.path(workflow_dir, "data", "FOPS_CropLoad")
+bundled_raw_dir <- normalizePath(file.path(workflow_dir, "..", "FOPS_CropLoad_output"),
+  winslash = "/", mustWork = FALSE)
+default_scenario_folder <- if (dir.exists(local_data_dir)) local_data_dir else bundled_raw_dir
+prepared_data_dir <- normalizePath(cli$prepared_data_dir %||% workflow_dir,
+  winslash = "/", mustWork = FALSE)
 
 params <- list(
-  scenario_folder = cli$scenario_folder %||% cli$scenarios %||%
-    if (dir.exists(local_data_dir)) local_data_dir else "../0_Model_output/FOPS_CropLoad",
+  scenario_folder = cli$scenario_folder %||% cli$scenarios %||% default_scenario_folder,
   design_csv = cli$design_csv %||% "dual-field-space-FOPSCropLoad.csv",
   design_csv_pattern = cli$design_csv_pattern %||% "dual-field-space-*.csv",
   crop_load_col = cli$crop_load_col %||% "CropLoad",
@@ -1920,6 +1979,8 @@ params <- list(
   snapshot_day = parse_num_or_null(cli$snapshot_day),
   snapshot_hour = parse_num_or_null(cli$snapshot_hour) %||% 12,
   output_dir = cli$output_dir %||% cli$out_dir %||% "output/FOPS_CropLoad_usecase",
+  prepared_data_dir = prepared_data_dir,
+  regenerate_nonspatial = parse_bool(cli$regenerate_nonspatial, default = TRUE),
   make_temporal = parse_bool(cli$make_temporal, default = TRUE),
   temporal_end_at_harvest = parse_bool(cli$temporal_end_at_harvest, default = TRUE),
   shade_postharvest = parse_bool(cli$shade_postharvest, default = FALSE),
@@ -1935,6 +1996,12 @@ params <- list(
   high_crop_load = parse_num_or_null(cli$high_crop_load),
   crop_load_values = split_csv(cli$crop_load_values, default = character())
 )
+params$saved_spatial_csv <- cli$spatial_csv %||%
+  file.path(params$prepared_data_dir, "FOPS_crop_load_spatial_low_high_data.csv")
+params$saved_snapshot_info_csv <- cli$snapshot_info_csv %||%
+  file.path(params$prepared_data_dir, "FOPS_crop_load_snapshot_info.csv")
+params$saved_internode_snapshot_csv <- cli$internode_snapshot_csv %||%
+  file.path(params$prepared_data_dir, "internode_snapshot_plot_data.csv")
 if (is.null(params$dafb_end)) {
   params$dafb_end <- calc_days_after_full_bloom(
     day_of_year = params$harvest_day_of_year,
@@ -1945,91 +2012,101 @@ if (is.null(params$dafb_end)) {
 
 dir.create(params$output_dir, recursive = TRUE, showWarnings = FALSE)
 
-mapping <- build_scenario_mapping(
-  scenario_folder = params$scenario_folder,
-  design_csv = params$design_csv,
-  design_csv_pattern = params$design_csv_pattern,
-  crop_load_col = params$crop_load_col
-)
-
-readr::write_csv(mapping, file.path(params$output_dir, "FOPS_crop_load_scenario_mapping.csv"))
+mapping <- NULL
+if (isTRUE(params$regenerate_nonspatial)) {
+  mapping <- build_scenario_mapping(
+    scenario_folder = params$scenario_folder,
+    design_csv = params$design_csv,
+    design_csv_pattern = params$design_csv_pattern,
+    crop_load_col = params$crop_load_col
+  )
+  readr::write_csv(mapping, file.path(params$output_dir, "FOPS_crop_load_scenario_mapping.csv"))
+}
 
 full_sim_reserve <- NULL
 if (isTRUE(params$make_full_sim_reserve)) {
-  full_sim_reserve <- build_full_simulation_reserve_data(
-    mapping,
-    full_bloom_date = params$full_bloom_date
-  )
-  reserve_diagnostics <- build_reserve_replenishment_diagnostics(
-    full_sim_reserve,
-    harvest_day_of_year = params$harvest_day_of_year
-  )
-  readr::write_csv(
-    full_sim_reserve,
-    file.path(params$output_dir, "FOPS_crop_load_reserve_full_simulation_data.csv")
-  )
-  readr::write_csv(
-    reserve_diagnostics,
-    file.path(params$output_dir, "FOPS_crop_load_reserve_replenishment_diagnostics.csv")
-  )
+  if (isTRUE(params$regenerate_nonspatial)) {
+    full_sim_reserve <- build_full_simulation_reserve_data(
+      mapping,
+      full_bloom_date = params$full_bloom_date
+    )
+    reserve_diagnostics <- build_reserve_replenishment_diagnostics(
+      full_sim_reserve,
+      harvest_day_of_year = params$harvest_day_of_year
+    )
+    readr::write_csv(full_sim_reserve,
+      file.path(params$output_dir, "FOPS_crop_load_reserve_full_simulation_data.csv"))
+    readr::write_csv(reserve_diagnostics,
+      file.path(params$output_dir, "FOPS_crop_load_reserve_replenishment_diagnostics.csv"))
+  } else {
+    full_sim_reserve <- read_csv_table(file.path(params$prepared_data_dir,
+      "FOPS_crop_load_reserve_full_simulation_data.csv"))
+    if (nrow(full_sim_reserve) == 0) {
+      stop("Prepared reserve data are unavailable; use --regenerate_nonspatial true.", call. = FALSE)
+    }
+    full_sim_reserve <- restore_crop_load_order(full_sim_reserve)
+  }
   fops_plot_nsc_reserve(full_sim_reserve, params = params, formats = formats)
 }
 
 temporal <- NULL
 if (isTRUE(params$make_temporal)) {
-  temporal <- build_temporal_data(
-    mapping,
-    x_axis_mode = params$x_axis_mode,
-    dafb_start = params$dafb_start,
-    dafb_end = params$dafb_end,
-    full_bloom_doy = params$full_bloom_doy,
-    days_in_bloom_year = params$days_in_bloom_year,
-    full_bloom_date = params$full_bloom_date,
-    harvest_day_of_year = params$harvest_day_of_year,
-    plot_period_start = params$plot_period_start,
-    plot_period_end = params$plot_period_end
-  )
-  if (isTRUE(params$temporal_end_at_harvest)) {
-    temporal <- trim_temporal_through_harvest(
-      temporal,
-      harvest_day_of_year = params$harvest_day_of_year
+  if (isTRUE(params$regenerate_nonspatial)) {
+    temporal <- build_temporal_data(
+      mapping,
+      x_axis_mode = params$x_axis_mode,
+      dafb_start = params$dafb_start,
+      dafb_end = params$dafb_end,
+      full_bloom_doy = params$full_bloom_doy,
+      days_in_bloom_year = params$days_in_bloom_year,
+      full_bloom_date = params$full_bloom_date,
+      harvest_day_of_year = params$harvest_day_of_year,
+      plot_period_start = params$plot_period_start,
+      plot_period_end = params$plot_period_end
     )
+    if (isTRUE(params$temporal_end_at_harvest)) {
+      temporal <- trim_temporal_through_harvest(temporal,
+        harvest_day_of_year = params$harvest_day_of_year)
+    }
+    readr::write_csv(temporal,
+      file.path(params$output_dir, "FOPS_crop_load_temporal_water_carbon_fruit_data.csv"))
+    temporal_fw_diagnostics <- build_temporal_fruit_fw_diagnostics(mapping, params)
+    readr::write_csv(temporal_fw_diagnostics,
+      file.path(params$output_dir, "FOPS_crop_load_temporal_fruit_fw_diagnostics.csv"))
+  } else {
+    temporal <- read_csv_table(file.path(params$prepared_data_dir,
+      "FOPS_crop_load_temporal_water_carbon_fruit_data.csv"))
+    if (nrow(temporal) == 0) {
+      stop("Prepared temporal data are unavailable; use --regenerate_nonspatial true.", call. = FALSE)
+    }
+    temporal <- restore_crop_load_order(temporal)
   }
-  readr::write_csv(temporal, file.path(params$output_dir, "FOPS_crop_load_temporal_water_carbon_fruit_data.csv"))
-  temporal_fw_diagnostics <- build_temporal_fruit_fw_diagnostics(mapping, params)
-  readr::write_csv(temporal_fw_diagnostics, file.path(params$output_dir, "FOPS_crop_load_temporal_fruit_fw_diagnostics.csv"))
   fops_plot_temporal_response(temporal, params = params, formats = formats)
 }
 
 spatial_result <- NULL
 if (isTRUE(params$make_spatial)) {
-  spatial_result <- build_spatial_data(
-    mapping,
-    snapshot_day = params$snapshot_day,
-    snapshot_hour = params$snapshot_hour,
-    low_crop_load = params$low_crop_load,
-    high_crop_load = params$high_crop_load,
-    crop_load_values = params$crop_load_values
+  spatial_result <- read_saved_spatial_result(
+    params$saved_spatial_csv,
+    params$saved_snapshot_info_csv
   )
-  readr::write_csv(spatial_result$data, file.path(params$output_dir, "FOPS_crop_load_spatial_low_high_data.csv"))
-  readr::write_csv(spatial_result$snapshot_info, file.path(params$output_dir, "FOPS_crop_load_snapshot_info.csv"))
   fops_plot_organ_distributions(spatial_result, params = params, formats = formats)
 } else if (isTRUE(params$run_standalone_internode_3d)) {
-  internode_3d_scenarios <- select_spatial_scenarios(
-    mapping,
-    low_crop_load = params$low_crop_load,
-    high_crop_load = params$high_crop_load,
-    crop_load_values = params$crop_load_values
-  )
-  fops_plot_internode_3d(internode_3d_scenarios, params)
+  fops_plot_internode_3d(tibble::tibble(), params)
 }
 
-diagnostics <- build_diagnostics(mapping, spatial_result = spatial_result, temporal = temporal)
-readr::write_csv(diagnostics, file.path(params$output_dir, "FOPS_crop_load_diagnostics.csv"))
+if (isTRUE(params$regenerate_nonspatial)) {
+  diagnostics <- build_diagnostics(mapping, spatial_result = spatial_result, temporal = temporal)
+  readr::write_csv(diagnostics, file.path(params$output_dir, "FOPS_crop_load_diagnostics.csv"))
+}
 
 message("Wrote FOPS crop-load use-case outputs to: ", normalizePath(params$output_dir, winslash = "/", mustWork = FALSE))
-message("Design CSV: ", attr(mapping, "design_csv"))
-message("Crop-load column used: ", attr(mapping, "crop_load_col"))
+if (isTRUE(params$regenerate_nonspatial)) {
+  message("Design CSV: ", attr(mapping, "design_csv"))
+  message("Crop-load column used: ", attr(mapping, "crop_load_col"))
+} else {
+  message("Non-spatial figures read from prepared CSVs in: ", params$prepared_data_dir)
+}
 invisible(list(
   mapping = mapping,
   temporal = temporal,

@@ -1,0 +1,5 @@
+options_uuid,options_file,options_basename,plant_uuid,plant_basename,M:fruitTargetsGrid_T2,M:fruitTargetPerTree_T2,M:desiredFruitNumber_postPrune
+9ca2bf8b-c639-48c1-a98f-bbc84bb43b73,model.options.-9ca2bf8b-c639-48c1-a98f-bbc84bb43b73.json,model.options.-9ca2bf8b-c639-48c1-a98f-bbc84bb43b73.json,BASE,plant.parameters.RG-empirical.json,"0, 0, 0, 0, 0, 0, 0, 0, 0",0,0
+738fcabe-2562-4a37-980e-cb0a0acbb4c1,model.options.-738fcabe-2562-4a37-980e-cb0a0acbb4c1.json,model.options.-738fcabe-2562-4a37-980e-cb0a0acbb4c1.json,BASE,plant.parameters.RG-empirical.json,"20, 22, 20, 22, 31, 22, 21, 22, 20",200,200
+c87e1aee-277e-4fd5-b44b-8a7047a1e405,model.options.-c87e1aee-277e-4fd5-b44b-8a7047a1e405.json,model.options.-c87e1aee-277e-4fd5-b44b-8a7047a1e405.json,BASE,plant.parameters.RG-empirical.json,"40, 45, 40, 45, 62, 44, 40, 44, 40",400,400
+697271f9-f862-464c-9f8c-cf8d3f6f3d60,model.options.-697271f9-f862-464c-9f8c-cf8d3f6f3d60.json,model.options.-697271f9-f862-464c-9f8c-cf8d3f6f3d60.json,BASE,plant.parameters.RG-empirical.json,"60, 67, 60, 67, 94, 66, 60, 66, 60",600,600

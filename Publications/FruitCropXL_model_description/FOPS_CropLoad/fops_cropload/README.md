@@ -16,8 +16,10 @@ depend on the parent project's `R/` or `scripts/` folders.
 For backward compatibility in the parent repository,
 `scripts/plot_fops_crop_load_usecase.R` forwards to `run_fops_cropload.R`.
 
-When `--make_spatial true` is used, `plot_organ_distributions.R` also runs
-`plot_internode_3d.py` for the selected high-crop-load internode array. Set
+When `--make_spatial true` is used, `plot_organ_distributions.R` reads the
+retained spatial CSVs in this folder.  If enabled, it also runs
+`plot_internode_3d.py` from `internode_snapshot_plot_data.csv`.  It does not
+re-extract a spatial snapshot from raw simulation outputs. Set
 `--make_internode_3d false` to skip the Python 3D output. With
 `--make_spatial false`, pass `--make_internode_3d true` to render only those
 3D panels, without the other spatial figures.
@@ -51,43 +53,48 @@ temporal and reserve figures require the `plant-level-*` and
 
 ## Run directly
 
-### Portable copy (recommended)
+### Plot committed/prepared data
 
-From inside the copied `fops_cropload` folder:
-
-```bash
-Rscript run_fops_cropload.R \
-  --scenario_folder data/FOPS_CropLoad \
-  --design_csv dual-field-space-FOPSCropLoad.csv \
-  --crop_load_col CropLoad \
-  --output_dir output/FOPS_CropLoad_usecase
-```
-
-When `data/FOPS_CropLoad/` exists, it is also the default input location, so
-the `--scenario_folder` option can be omitted.
-
-### Parent repository
-
-Run from the project root:
+From the `FOPS_CropLoad` directory, this reads the prepared temporal and
+reserve CSVs and the retained spatial snapshot. It does not read or modify
+`FOPS_CropLoad_output/`.
 
 ```bash
-Rscript fops_cropload/run_fops_cropload.R \
-  --scenario_folder ../0_Model_output/FOPS_CropLoad \
-  --design_csv dual-field-space-FOPSCropLoad.csv \
-  --crop_load_col CropLoad \
-  --output_dir output/FOPS_CropLoad_usecase
+Rscript --vanilla fops_cropload/run_fops_cropload.R \
+  --regenerate_nonspatial false \
+  --make_temporal true --make_full_sim_reserve true --make_spatial true \
+  --make_internode_3d false \
+  --format png --output_dir _qa_test_output/prepared
 ```
 
-Or run from this folder against the parent repository's model output:
+Omit `--make_internode_3d false` to additionally write the two 3D internode
+panels from the retained `internode_snapshot_plot_data.csv`.
+
+### Regenerate non-spatial summaries from raw output
+
+The raw output is the sibling `FOPS_CropLoad_output/` directory. UUID folders
+are joined to `dual-field-space-FOPSCropLoad.csv`; treatment order is never
+inferred from directory order. This command regenerates only temporal and
+whole-tree summary data. Spatial figures still read the retained snapshot in
+`fops_cropload/`.
 
 ```bash
-cd fops_cropload
-Rscript run_fops_cropload.R \
-  --scenario_folder ../../0_Model_output/FOPS_CropLoad \
+Rscript --vanilla fops_cropload/run_fops_cropload.R \
+  --scenario_folder FOPS_CropLoad_output \
   --design_csv dual-field-space-FOPSCropLoad.csv \
-  --crop_load_col CropLoad \
-  --output_dir output/FOPS_CropLoad_usecase
+  --make_temporal true --make_full_sim_reserve true --make_spatial true \
+  --make_internode_3d false \
+  --format png --output_dir _qa_test_output/regenerated
 ```
+
+The `--scenario_folder` argument may be omitted in this repository layout.
+Use a separate `--output_dir` for QA so committed prepared CSVs and manuscript
+figures are not overwritten.
+
+`build_figure8.R` similarly uses `FOPS_crop_load_spatial_low_high_data.csv`
+for histogram panels and `internode_snapshot_plot_data.csv` for the two 3D
+panels. It accepts explicit `--spatial-csv`, `--internode-csv`, `--output`,
+and `--panel-dir` paths when a manuscript Figure 8 export is required.
 
 ## Generate individual figures
 
