@@ -190,7 +190,8 @@ public class StormValidationUnitTest extends ValidationTestBase {
 	  "fraction_internodeLoading",
 	  "fraction_perennielWoodLoading",
 	  "fraction_fineRootLoading",
-	  "maintenanceDM"
+	  "maintenanceDM",
+	  "netReserveChange"
       // merged duplicate fruit-count columns from multi-file synthetic outputs
       
     };

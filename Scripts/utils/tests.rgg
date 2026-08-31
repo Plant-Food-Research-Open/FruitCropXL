@@ -42,6 +42,7 @@ import static globalParameters.*;
 import static modelOptions.*;
 import static lightInterception.*;
 import static initialConditions.*;
+import static plantParameters.*;
 
 import static fieldBase.*;
 import static main.*;
@@ -50,10 +51,16 @@ import static absOrgan.*;
 import static leaf.*;
 import static shoot.*;
 import static plantBase.*;
+import static structuralRoot.*;
+import static fineRoot.*;
 import static fruitBase.*;
+import static berryComplex.*;
+import static virtualFruit.*;
 import static outputTables.*;
 import static diagnosticTables.*;
+import static carbonAllocation.*;
 import static carbonTransport.*;
+import static plantHydraulics.*;
 // ##############################################//
 // 	Properties
 // ##############################################//
@@ -115,7 +122,11 @@ public class TestRunner {
 				LightInterceptionModeUnitTest.class,
 				PlantOutputSchemaUnitTest.class,
 				ReserveTurnoverUnitTest.class,
-				PlantBaseCarbonBoundaryUnitTest.class
+				VirtualFruitCarbonDemandUnitTest.class,
+				BerryComplexCarbonDemandUnitTest.class,
+				PlantBaseCarbonBoundaryUnitTest.class,
+				CarbonTransportNumericsUnitTest.class,
+				WaterHydraulicsTopologyUnitTest.class
 			);
 		resultReport(result);
 	}
@@ -364,6 +375,57 @@ public class PlantOutputSchemaUnitTest {
 	}
 
 	@Test
+	public void csvPlaceholdersAndRunProgressExistImmediatelyAfterInitialization()
+			throws Exception {
+		File testRoot = new File(PATH_OUTPUT,
+			"early-output-unit-" + System.currentTimeMillis());
+		String previousOutputPath = PATH_OUTPUT;
+		String previousPlantPath = plantLevelOutputFilePath;
+		String previousFieldPath = fieldLevelOutputFilePath;
+		String previousFruitPath = meanFruitOutputFilePath;
+		String previousProgressPath = runProgressOutputFilePath;
+		String previousPlantMetadataPath = plantLevelMetadataFilePath;
+		String previousFieldMetadataPath = fieldLevelMetadataFilePath;
+		String previousFruitMetadataPath = meanFruitMetadataFilePath;
+		try {
+			assertTrue(testRoot.mkdirs());
+			PATH_OUTPUT = testRoot.getPath() + File.separator;
+			initCsvWriters("placeholder-unit");
+
+			File plantCsv = new File(plantLevelOutputFilePath);
+			File fieldCsv = new File(fieldLevelOutputFilePath);
+			File fruitCsv = new File(meanFruitOutputFilePath);
+			File progressCsv = new File(runProgressOutputFilePath);
+			assertTrue(plantCsv.isFile());
+			assertTrue(fieldCsv.isFile());
+			assertTrue(fruitCsv.isFile());
+			assertEquals("Placeholder must not add a biological row", 0L, plantCsv.length());
+			assertEquals("Placeholder must not add a biological row", 0L, fieldCsv.length());
+			assertEquals("Placeholder must not add a biological row", 0L, fruitCsv.length());
+			assertTrue(new File(plantLevelMetadataFilePath).isFile());
+			assertTrue(new File(fieldLevelMetadataFilePath).isFile());
+			assertTrue(new File(meanFruitMetadataFilePath).isFile());
+
+			touchRunProgress("water_start", "started");
+			String progress = readText(progressCsv);
+			assertTrue(progress.indexOf(
+				"timestamp,step,year,dayOfYear,hourOfDay,stage,status,elapsedMs") == 0);
+			assertTrue(progress.indexOf(",initialized,ok,") >= 0);
+			assertTrue(progress.indexOf(",water_start,started,") >= 0);
+		} finally {
+			PATH_OUTPUT = previousOutputPath;
+			plantLevelOutputFilePath = previousPlantPath;
+			fieldLevelOutputFilePath = previousFieldPath;
+			meanFruitOutputFilePath = previousFruitPath;
+			runProgressOutputFilePath = previousProgressPath;
+			plantLevelMetadataFilePath = previousPlantMetadataPath;
+			fieldLevelMetadataFilePath = previousFieldMetadataPath;
+			meanFruitMetadataFilePath = previousFruitMetadataPath;
+			deleteTree(testRoot);
+		}
+	}
+
+	@Test
 	public void plantAndSolverDebugDtoSchemasAreStable() {
 		String[] plantNames = indexedPropertyNames(PlantLevelOutputData.class, 160);
 		String[] fieldNames = indexedPropertyNames(FieldLevelOutputData.class, 33);
@@ -437,7 +499,7 @@ public class PlantOutputSchemaUnitTest {
 			AppleFlowerToFruitDiagnosticOutputData.class,
 			AppleLeafAxisDiagnosticOutputData.class
 		};
-		int[] expectedCounts = {60, 29, 29, 29, 23, 27, 19};
+		int[] expectedCounts = {60, 29, 111, 29, 23, 27, 19};
 		String[] commonIdentifiers = {
 			"timestamp", "step", "year", "dayOfYear", "hourOfDay",
 			"scenario", "simuuid", "plantNumber", "fieldInstanceId"
@@ -447,13 +509,71 @@ public class PlantOutputSchemaUnitTest {
 			assertPropertyBlock(names, 0, commonIdentifiers);
 		}
 		String[] carbonNames = indexedPropertyNames(
-			CarbonTransportMassBalanceDiagnosticOutputData.class, 29);
+			CarbonTransportMassBalanceDiagnosticOutputData.class, 111);
 		String[] plantBaseFields = {
 			"ctPlantBaseFallbackUsed", "ctPlantBaseFallbackReason",
 			"ctPlantBaseFallbackCount", "ctPlantBaseResidual",
 			"ctPlantBaseDenominator"
 		};
 		assertPropertyBlock(carbonNames, 24, plantBaseFields);
+		String[] convergenceFields = {
+			"absoluteFluxError", "relativeFluxConvergenceError",
+			"ctPlantBaseAbsoluteResidual", "ctPlantBaseRelativeResidual",
+			"ctDampingFactor", "ctRawPlantBasePhi", "ctAcceptedPlantBasePhi",
+			"ctConverged", "ctMaxIterationReached", "ctNonlinearMerit"
+		};
+		assertPropertyBlock(carbonNames, 29, convergenceFields);
+		String[] retryFields = {
+			"ctRetryUsed", "ctRetryConverged", "ctSolverFallbackUsed",
+			"ctInvalidUnfoldTrialCount", "ctFinalIterationLimit"
+		};
+		assertPropertyBlock(carbonNames, 39, retryFields);
+		String[] closureFields = {
+			"sumLocalJ", "pbFoldedJ", "closureResidual", "closureScale",
+			"relativeClosureResidual", "closureNormalizedError",
+			"netFluxIdentityResidual", "totalGrowingOrganCount",
+			"foldedGrowingOrganCount", "unfoldedGrowingOrganCount",
+			"foldCoverageComplete", "unfoldCoverageComplete"
+		};
+		assertPropertyBlock(carbonNames, 55, closureFields);
+		String[] fruitConsistencyFields = {
+			"sumFruitExactUnloading", "sumFruitExactActive",
+			"sumFruitExactMassFlow", "sumFruitStoredUnloading",
+			"fruitLinearizationResidual",
+			"fruitLinearizationRelativeResidual",
+			"maxFruitLinearizationResidual",
+			"maxFruitLinearizationRelativeResidual",
+			"maxFruitResidualOrganID", "fruitStoredVsExactResidual",
+			"maxFruitTaylorPointResidual",
+			"maxFruitTaylorPointRelativeResidual"
+		};
+		assertPropertyBlock(carbonNames, 81, fruitConsistencyFields);
+		String[] simpleRootFields = {
+			"simpleRootActive", "simpleRootTopologyValid",
+			"simpleRootFoldValid", "simpleRootUnfoldValid",
+			"simpleRootDoubleFoldCount", "simpleRootMinLayer",
+			"simpleRootMaxLayer", "simpleRootLayerCount",
+			"simpleStructuralRootExpected",
+			"simpleStructuralRootFolded",
+			"simpleStructuralRootUnfolded", "simpleFineRootExpected",
+			"simpleFineRootFolded", "simpleFineRootUnfolded",
+			"simpleRootLocalJ", "simpleRootFoldedJ",
+			"simpleRootClosureResidual",
+			"simpleRootRelativeClosureResidual"
+		};
+		assertPropertyBlock(carbonNames, 93, simpleRootFields);
+		String[] fallbackStateFields = {
+			"ctBootstrapFallbackUsed", "ctHasAcceptedHourlyState",
+			"ctStoredPlantBaseSugar", "ctPlantBaseSugarFromPhi",
+			"ctAcceptedHourlyPlantBaseSugar"
+		};
+		assertPropertyBlock(carbonNames, 44, fallbackStateFields);
+		String[] failedTrialFields = {
+			"ctFailedTrialPlantBasePhi", "ctFailedTrialPlantBaseSugar",
+			"ctFailedTrialMinSugar", "ctFailedTrialMaxSugar",
+			"ctFailedTrialMeanSugar", "ctFailedTrialMerit"
+		};
+		assertPropertyBlock(carbonNames, 49, failedTrialFields);
 	}
 
 	@Test
@@ -596,6 +716,65 @@ public class PlantOutputSchemaUnitTest {
 	}
 }
 
+public class WaterHydraulicsTopologyUnitTest {
+	private static void assertInvalid(String expectedMessage,
+			long[] ids, long[] parents, long[] basal,
+			long[] leafParents, double[] leafPotentials) {
+		WaterHydraulicTestResult result = testWaterHydraulicFold(
+			ids, parents, basal, leafParents, leafPotentials, 0.4);
+		assertFalse("Topology unexpectedly valid", result.valid);
+		assertTrue("Expected error containing '" + expectedMessage + "' but was '"
+			+ result.error + "'", result.error.indexOf(expectedMessage) >= 0);
+	}
+
+	@Test
+	public void branchedTreeFoldsDemandAndVisitsEverySegmentOnce() {
+		long[] ids = {10L, 11L, 12L, 13L};
+		long[] parents = {-1L, 10L, 10L, 12L};
+		long[] basal = {10L};
+		long[] leafParents = {11L, 13L};
+		double[] leafPotentials = {2.0, 3.0};
+		WaterHydraulicTestResult result = testWaterHydraulicFold(
+			ids, parents, basal, leafParents, leafPotentials, 0.4);
+
+		assertTrue(result.error, result.valid);
+		double[] expectedSubtree = {5.0, 2.0, 3.0, 3.0};
+		double[] expectedFlux = {2.0, 0.8, 1.2, 1.2};
+		for (int i = 0; i < ids.length; i++) {
+			assertEquals(expectedSubtree[i], result.subtreePotential[i], 1.0e-12);
+			assertEquals(expectedFlux[i], result.waterFlux[i], 1.0e-12);
+			assertEquals("Segment must fold exactly once", 1, result.foldCount[i]);
+			assertEquals("Segment must unfold exactly once", 1, result.unfoldCount[i]);
+		}
+	}
+
+	@Test
+	public void invalidTopologiesFailClearly() {
+		assertInvalid("missing leaf parent",
+			new long[] {1L}, new long[] {-1L}, new long[] {1L},
+			new long[] {99L}, new double[] {1.0});
+		assertInvalid("missing internode parent",
+			new long[] {1L, 2L}, new long[] {-1L, 99L}, new long[] {1L},
+			new long[0], new double[0]);
+		assertInvalid("self-parent",
+			new long[] {1L}, new long[] {1L}, new long[0],
+			new long[0], new double[0]);
+		assertInvalid("cycle",
+			new long[] {1L, 2L}, new long[] {2L, 1L}, new long[0],
+			new long[0], new double[0]);
+		assertInvalid("duplicate internode ID",
+			new long[] {1L, 2L, 2L}, new long[] {-1L, 1L, 1L}, new long[] {1L},
+			new long[0], new double[0]);
+		assertInvalid("duplicate parent assignment",
+			new long[] {1L, 2L, 3L, 2L},
+			new long[] {-1L, 1L, 1L, 3L}, new long[] {1L},
+			new long[0], new double[0]);
+		assertInvalid("disconnected internode",
+			new long[] {1L, 2L}, new long[] {-1L, -1L}, new long[] {1L},
+			new long[0], new double[0]);
+	}
+}
+
 public class ReserveTurnoverUnitTest {
 	private static GrowingOrgan reserveFixture(double reserveCarbon) {
 		GrowingOrgan fixture = new GrowingOrgan();
@@ -636,6 +815,349 @@ public class ReserveTurnoverUnitTest {
 	}
 }
 
+public class VirtualFruitCarbonDemandUnitTest {
+	private String previousSpecies;
+	private float previousSorbitolFraction;
+	private boolean previousEnablePreT1;
+	private boolean previousPreT1Active;
+	private boolean previousUseStaticArc;
+
+	@Before
+	public void useAppleCarbonFixture() {
+		previousSpecies = species;
+		previousSorbitolFraction = FRACTION_SORBITOL;
+		previousEnablePreT1 = enablePotentialGrowthBeforeT1;
+		previousPreT1Active = preT1PotentialGrowthActive;
+		previousUseStaticArc = useStaticArc;
+		species = "apple";
+		FRACTION_SORBITOL = 0.75f;
+		enablePotentialGrowthBeforeT1 = false;
+		preT1PotentialGrowthActive = false;
+		useStaticArc = false;
+	}
+
+	@After
+	public void restoreCarbonFixture() {
+		species = previousSpecies;
+		FRACTION_SORBITOL = previousSorbitolFraction;
+		enablePotentialGrowthBeforeT1 = previousEnablePreT1;
+		preT1PotentialGrowthActive = previousPreT1Active;
+		useStaticArc = previousUseStaticArc;
+	}
+
+	public static double mm(double sugar, double km) {
+		return sugar / (km + sugar);
+	}
+
+	private static double phiFromSugar(double sugar) {
+		double carbon = convertSugarToPhloemC((float) sugar);
+		return 0.5 * carbon * carbon;
+	}
+
+	@Test
+	public void inwardMassFlowUsesAcceptedHydraulicSlopeAndIsHistoryIndependent() {
+		double referenceMassFlow = 2.0;
+		double referenceSugar = 0.10;
+		double referenceWaterFlow = 0.5;
+		double[] candidates = {0.05, 0.15, 0.08, 0.05};
+		double[] expected = {1.0, 3.0, 1.6, 1.0};
+		for (int i = 0; i < candidates.length; i++) {
+			assertEquals(expected[i], VirtualFruit.laggedVirtualFruitMassFlowCarbon(
+				referenceMassFlow, referenceSugar, referenceWaterFlow,
+				candidates[i]), 1.0e-12);
+		}
+		assertEquals(referenceMassFlow,
+			VirtualFruit.laggedVirtualFruitMassFlowCarbon(referenceMassFlow,
+				referenceSugar, referenceWaterFlow, referenceSugar), 0.0);
+	}
+
+	@Test
+	public void fileBackedCpmHasMatchingFruitCropXLSugarReference() {
+		double expectedSugar = 0.15;
+		double molarMass = 0.75 * MOL_SORBITOL + 0.25 * MOL_SURCROSE;
+		double cpm = 1000.0 * expectedSugar / molarMass;
+		assertEquals(expectedSugar, VirtualFruit.virtualFruitSugarFromCpm(cpm), 1.0e-12);
+		assertTrue(Double.isNaN(VirtualFruit.virtualFruitSugarFromCpm(Double.NaN)));
+	}
+
+	@Test
+	public void analyticalMassFlowDerivativeMatchesFiniteDifferenceAndTaylorPoint() {
+		double referenceMassFlow = 2.0;
+		double referenceSugar = 0.10;
+		double referenceWaterFlow = 0.5;
+		double[] sugars = {0.04, 0.10, 0.18};
+		for (int i = 0; i < sugars.length; i++) {
+			double phi = phiFromSugar(sugars[i]);
+			double sugar = sugarFromCp(phi);
+			double analytical = VirtualFruit.laggedVirtualFruitMassFlowDerivativePhi(
+				referenceMassFlow, referenceSugar, referenceWaterFlow, phi, sugar);
+			/* sugarFromCp currently returns legacy float precision. */
+			double epsilon = phi * 1.0e-3;
+			double above = VirtualFruit.laggedVirtualFruitMassFlowCarbon(
+				referenceMassFlow, referenceSugar, referenceWaterFlow,
+				sugarFromCp(phi + epsilon));
+			double below = VirtualFruit.laggedVirtualFruitMassFlowCarbon(
+				referenceMassFlow, referenceSugar, referenceWaterFlow,
+				sugarFromCp(phi - epsilon));
+			double numerical = (above - below) / (2.0 * epsilon);
+			double scale = Math.max(1.0, Math.abs(numerical));
+			assertTrue(Math.abs(analytical - numerical) / scale < 2.0e-3);
+
+			double massFlow0 = VirtualFruit.laggedVirtualFruitMassFlowCarbon(
+				referenceMassFlow, referenceSugar, referenceWaterFlow, sugar);
+			double massFlowA = massFlow0 - phi * analytical;
+			assertEquals("A+B*Phi must reconstruct the exact CP mass flow at Phi0",
+				massFlow0, massFlowA + analytical * phi, 1.0e-12);
+		}
+	}
+
+	@Test
+	public void preT1PrimaryGrowthIsUnscaledWithZeroTransportDerivative() {
+		enablePotentialGrowthBeforeT1 = true;
+		preT1PotentialGrowthActive = true;
+		useStaticArc = false;
+
+		double growthReference = 10.0;
+		GrowingOrgan fixture = new GrowingOrgan();
+		fixture.km_pri = 0.072;
+		fixture.structureDM_PRI_PT = VirtualFruit.reconstructVirtualFruitPotentialGrowth(
+			growthReference, mm(0.15, fixture.km_pri), true);
+		fixture.structureDM_SEC_PT = 0.0;
+		fixture.reserveDM_PT = 0.0;
+		fixture.maintenanceDM_PT = 0.0;
+		fixture.loading_PT = 0.0;
+		fixture.cpt = phiFromSugar(0.08);
+		fixture.cpb = fixture.cpt;
+
+		lineariseOrgan(fixture);
+		double reconstructedSink = (fixture.sink_source_a
+			+ fixture.sink_source_b * fixture.cpt) / mgTogram;
+		assertEquals(growthReference, fixture.structureDM_PRI_PT, 0.0);
+		assertEquals(growthReference, reconstructedSink, 1.0e-12);
+		assertEquals("Pre-T1 primary derivative must be zero",
+			0.0, fixture.sink_source_b, 0.0);
+	}
+
+	@Test
+	public void outwardMassFlowIsSignedFixedAndHasZeroDerivative() {
+		double massFlowReference = -2.0;
+		double referenceSugar = 0.10;
+		double[] candidates = {0.03, 0.08, 0.15, 0.03};
+		for (int i = 0; i < candidates.length; i++) {
+			double phi = phiFromSugar(candidates[i]);
+			assertEquals(massFlowReference,
+				VirtualFruit.laggedVirtualFruitMassFlowCarbon(massFlowReference,
+					referenceSugar, -0.5, candidates[i]), 0.0);
+			assertEquals(0.0,
+				VirtualFruit.laggedVirtualFruitMassFlowDerivativePhi(
+					massFlowReference, referenceSugar, -0.5, phi,
+					candidates[i]), 0.0);
+		}
+		assertEquals(-2.0,
+			VirtualFruit.sanitizeSignedVirtualFruitMassFlow(-2.0), 0.0);
+		assertEquals("Invalid Cpref must use a fixed reference with zero slope",
+			2.0, VirtualFruit.laggedVirtualFruitMassFlowCarbon(
+				2.0, 0.0, 0.5, 0.15), 0.0);
+	}
+
+}
+
+public class BerryComplexCarbonDemandUnitTest {
+	private static double mm(double sugar, double km) {
+		return sugar / (km + sugar);
+	}
+
+	private static double phiFromSugar(double sugar) {
+		double carbon = convertSugarToPhloemC((float) sugar);
+		return 0.5 * carbon * carbon;
+	}
+
+	@Test
+	public void potentialImportsUseOnlyPrimarySinkChannel() {
+		BerryComplex fruit = new BerryComplex((String) null, 0);
+		fruit.sugarUptake_passive = 7.0;
+		fruit.mapBerryImportPotentialChannels(10.0);
+
+		assertEquals(10.0, fruit.structureDM_PRI_PT, 0.0);
+		assertEquals(0.0, fruit.maintenanceDM_PT, 0.0);
+		assertEquals(0.0, fruit.structureDM_SEC_PT, 0.0);
+		assertEquals(0.0, fruit.reserveDM_PT, 0.0);
+		assertEquals(0.0, fruit.sugarUptake_passive, 0.0);
+	}
+
+	@Test
+	public void berryMassFlowPotentialIsLaggedAcrossCandidatesAndAcceptedAtHourBoundary() {
+		BerryComplex fruit = new BerryComplex((String) null, 0);
+		boolean previousUseCTRAM = useCTRAM;
+		boolean previousInputVesselConditions = inputVesselConditions;
+		boolean previousEnablePreT1 = enablePotentialGrowthBeforeT1;
+		boolean previousPreT1Active = preT1PotentialGrowthActive;
+		try {
+			useCTRAM = true;
+			inputVesselConditions = false;
+			enablePotentialGrowthBeforeT1 = false;
+			preT1PotentialGrowthActive = false;
+			fruit.km_pri = 0.072;
+			fruit.biomass = 1000.0;
+			fruit.berryNum = 1;
+			fruit.Vmax_berry = 0.0025f;
+			fruit.Cstar = 1000.0f;
+			fruit.Cscale = 1.0f;
+			fruit.commitBerryMassFlowReference(2.0, 0.08, 0.5);
+			double[] candidates = {0.03, 0.08, 0.15, 0.03};
+			double[] expectedMassFlow = {0.75, 2.0, 3.75, 0.75};
+			double previousActive = -1.0;
+			for (int i = 0; i < candidates.length; i++) {
+				fruit.calcPTCTRAM(candidates[i]);
+				fruit.calcUnloading(candidates[i]);
+				assertEquals(0.0, fruit.maintenanceDM_PT, 0.0);
+				assertEquals(expectedMassFlow[i],
+					fruit.getDirectMassFlowCarbon(candidates[i]), 1.0e-12);
+				assertEquals(0.0, fruit.structureDM_SEC_PT, 0.0);
+				assertEquals(0.0, fruit.sugarUptake_passive, 0.0);
+				if (i > 0 && i < 3) {
+					assertTrue(fruit.structureDM_PRI > previousActive);
+				}
+				previousActive = fruit.structureDM_PRI;
+			}
+
+			assertEquals("Solver candidates must not update the accepted berry reference",
+				2.0, fruit.previousMassFlowCarbon, 0.0);
+			assertEquals(0.08, fruit.massFlowPhloemSugarReference, 0.0);
+			assertEquals(0.5, fruit.massFlowWaterFlowReference, 0.0);
+			fruit.commitBerryMassFlowReference(3.0, 0.10, 0.4);
+			fruit.calcPTCTRAM(0.08);
+			assertEquals("Accepted physical flow becomes the next-hour reference",
+				3.0, fruit.getDirectMassFlowCarbon(0.10), 0.0);
+		} finally {
+			useCTRAM = previousUseCTRAM;
+			inputVesselConditions = previousInputVesselConditions;
+			enablePotentialGrowthBeforeT1 = previousEnablePreT1;
+			preT1PotentialGrowthActive = previousPreT1Active;
+		}
+	}
+
+	@Test
+	public void physicalMassFlowUsesDirectionalCarrierAndPreservesSign() {
+		double inward = (1.0 - 0.9) * 0.8 * 0.15;
+		assertEquals(inward, BerryComplex.berryMassFlowSugarPotential(
+			0.9, 0.8, 0.03, 0.15), 1.0e-12);
+		double outward = (1.0 - 0.9) * -0.8 * 0.03;
+		assertEquals(outward, BerryComplex.berryMassFlowSugarPotential(
+			0.9, -0.8, 0.03, 0.15), 1.0e-12);
+		assertTrue(outward < 0.0);
+		assertEquals(0.0, BerryComplex.berryMassFlowSugarPotential(
+			0.9, 1.0e-14, 0.03, 0.15), 0.0);
+	}
+
+	@Test
+	public void berryLaggedMassFlowDerivativeMatchesFiniteDifferenceAndOutwardIsFixed() {
+		double referenceMassFlow = 2.0;
+		double referenceSugar = 0.10;
+		double phi = phiFromSugar(0.08);
+		double sugar = sugarFromCp(phi);
+		double analytical = BerryComplex.laggedBerryMassFlowDerivativePhi(
+			referenceMassFlow, referenceSugar, 0.5, phi, sugar);
+		double epsilon = phi * 1.0e-3; // sugarFromCp retains legacy float precision
+		double above = BerryComplex.laggedBerryMassFlowCarbon(referenceMassFlow,
+			referenceSugar, 0.5, sugarFromCp(phi + epsilon));
+		double below = BerryComplex.laggedBerryMassFlowCarbon(referenceMassFlow,
+			referenceSugar, 0.5, sugarFromCp(phi - epsilon));
+		double numerical = (above - below) / (2.0 * epsilon);
+		double scale = Math.max(1.0, Math.abs(numerical));
+		assertTrue(Math.abs(analytical - numerical) / scale < 2.0e-3);
+		double massFlow0 = BerryComplex.laggedBerryMassFlowCarbon(referenceMassFlow,
+			referenceSugar, 0.5, sugar);
+		double massFlowA = massFlow0 - phi * analytical;
+		assertEquals(massFlow0, massFlowA + analytical * phi, 1.0e-12);
+
+		double[] candidates = {0.03, 0.08, 0.15};
+		for (int i = 0; i < candidates.length; i++) {
+			assertEquals(-2.0, BerryComplex.laggedBerryMassFlowCarbon(
+				-2.0, referenceSugar, -0.5, candidates[i]), 0.0);
+			assertEquals(0.0, BerryComplex.laggedBerryMassFlowDerivativePhi(
+				-2.0, referenceSugar, -0.5, phiFromSugar(candidates[i]),
+				candidates[i]), 0.0);
+		}
+	}
+
+	@Test
+	public void turgorCarrierBranchMatchesImpliedWaterFlowDirection() {
+		double inwardTurgor = 1.2;
+		double outwardTurgor = 2.4;
+		double inwardFlow = BerryComplex.berryPhloemWaterFlowAtTurgor(
+			1.0, 1.0, 2.0, inwardTurgor, 0.0, 0.0, 0.0);
+		double outwardFlow = BerryComplex.berryPhloemWaterFlowAtTurgor(
+			1.0, 1.0, 2.0, outwardTurgor, 0.0, 0.0, 0.0);
+		assertTrue(inwardFlow > 0.0);
+		assertTrue(outwardFlow < 0.0);
+		assertEquals(inwardTurgor, BerryComplex.selectBerryTurgorPressure(
+			inwardTurgor, inwardFlow, outwardTurgor, outwardFlow, 2.0), 0.0);
+		assertEquals(outwardTurgor, BerryComplex.selectBerryTurgorPressure(
+			inwardTurgor, -0.1, outwardTurgor, outwardFlow, 2.0), 0.0);
+	}
+
+	@Test
+	public void wholePlantImportExcludesMaintenanceButInternalBalanceDeductsIt() {
+		double active = 10.0;
+		double massFlow = -2.0;
+		double maintenance = 3.0;
+		double imported = BerryComplex.berryImportedCarbonPerFruit(active, massFlow);
+		assertEquals("Berry maintenance must not be added to unloading",
+			8.0, imported, 0.0);
+		assertEquals("Berry maintenance must remain an internal post-unloading cost",
+			3.5, BerryComplex.berryInternalCarbonAfterCosts(
+				imported, 1.0, maintenance, 0.5), 0.0);
+	}
+
+	@Test
+	public void commonPoolAndTaylorMassFlowAgreeAtExpansionPoint() {
+		double sugar = 0.08;
+		double kmPri = 0.072;
+		double activePotential = 10.0;
+		double referenceMassFlow = 2.0;
+		double referenceSugar = 0.10;
+		double referenceWaterFlow = 0.5;
+		double phi = phiFromSugar(sugar);
+		double physicalMassFlow = BerryComplex.laggedBerryMassFlowCarbon(
+			referenceMassFlow, referenceSugar, referenceWaterFlow, sugar);
+		double massFlowB = BerryComplex.laggedBerryMassFlowDerivativePhi(
+			referenceMassFlow, referenceSugar, referenceWaterFlow, phi, sugar);
+		double massFlowA = physicalMassFlow - phi * massFlowB;
+		double commonPool = BerryComplex.realiseBerryCarbonDemand(
+			activePotential, mm(sugar, kmPri))
+			+ physicalMassFlow;
+		double transport = activePotential * mm(sugar, kmPri)
+			+ massFlowA + massFlowB * phi;
+
+		assertEquals(transport, commonPool, 1.0e-12);
+		assertTrue("Active uptake must remain limited through KM_PRI",
+			BerryComplex.realiseBerryCarbonDemand(activePotential, mm(sugar, kmPri))
+				< BerryComplex.realiseBerryCarbonDemand(activePotential, mm(0.2, kmPri)));
+	}
+
+	@Test
+	public void exactBerryAuditPreservesAcceptedReferencesAndSignedOutflow() {
+		BerryComplex fruit = new BerryComplex((String) null, 0);
+		fruit.km_pri = 0.072;
+		fruit.structureDM_PRI_PT = 1.0;
+		fruit.commitBerryMassFlowReference(-2.0, 0.10, -0.5);
+		double phi = phiFromSugar(0.08);
+		double exactMass = exactFruitMassFlowMg(fruit, phi);
+		double exactActive = exactFruitActiveUnloadingMg(fruit, phi);
+		double exact = exactFruitUnloadingMg(fruit, phi);
+		double derivative = exactFruitUnloadingDerivativePhiMg(fruit, phi);
+		double intercept = exact - phi * derivative;
+
+		assertEquals(-2.0, exactMass, 0.0);
+		assertEquals(exactActive + exactMass, exact, 0.0);
+		assertEquals(exact, intercept + derivative * phi, 1.0e-12);
+		assertEquals(-2.0, fruit.previousMassFlowCarbon, 0.0);
+		assertEquals(0.10, fruit.massFlowPhloemSugarReference, 0.0);
+		assertEquals(-0.5, fruit.massFlowWaterFlowReference, 0.0);
+	}
+}
+
 public class PlantBaseCarbonBoundaryUnitTest {
 	private String previousSpecies;
 
@@ -663,7 +1185,7 @@ public class PlantBaseCarbonBoundaryUnitTest {
 	private static PlantBase applyBoundary(double branchA, double branchB,
 			double previousPotential) {
 		PlantBase fixture = boundaryFixture(branchA, branchB, previousPotential);
-		applyGuardedPlantBaseCarbonBoundary(fixture);
+		applyGuardedPlantBaseCarbonBoundary(fixture, 1.0);
 		assertTrue(isFiniteCarbonValue(fixture.cpt));
 		assertTrue(fixture.cpt >= CT_PHI_FLOOR);
 		assertTrue(isFiniteCarbonValue(fixture.sugarConcentration_phloem));
@@ -684,6 +1206,52 @@ public class PlantBaseCarbonBoundaryUnitTest {
 		assertEquals(branchB, fixture.ctPlantBaseDenominator, 0.0);
 		assertEquals(branchA + branchB * fixture.cpt,
 			fixture.ctPlantBaseResidual, 0.0);
+	}
+
+	@Test
+	public void largePlantBaseJumpIsUnderRelaxed() {
+		PlantBase fixture = boundaryFixture(-0.009, 1.0, 0.001);
+		applyGuardedPlantBaseCarbonBoundary(fixture, 0.5);
+		assertEquals(0.005, fixture.cpt, 1e-15);
+		assertEquals(-0.004, fixture.ctPlantBaseResidual, 1e-15);
+		assertEquals(0, fixture.ctPlantBaseFallbackUsed);
+	}
+
+	@Test
+	public void worseningMeritReducesDamping() {
+		assertEquals(0.25, adaptCtDampingFactor(0.5, 1.0, 1.1), 0.0);
+		assertEquals(CT_DAMPING_MIN,
+			adaptCtDampingFactor(CT_DAMPING_MIN, 1.0, 1.1), 0.0);
+	}
+
+	@Test
+	public void improvingMeritAllowsDampingToRecover() {
+		assertEquals(0.625, adaptCtDampingFactor(0.5, 10.0, 5.0), 0.0);
+		assertEquals(0.55, adaptCtDampingFactor(0.5, 1.0, 0.9), 1e-15);
+		assertEquals(CT_DAMPING_MAX,
+			adaptCtDampingFactor(CT_DAMPING_MAX, 10.0, 5.0), 0.0);
+	}
+
+	@Test
+	public void mixedFluxCriterionUsesAbsoluteAndRelativeScale() {
+		assertTrue(ctMixedErrorConverged(5e-5, 1.0));
+		assertFalse(ctMixedErrorConverged(5e-5, 0.01));
+		// Both individual criteria fail here; an additive tolerance would pass.
+		assertFalse(ctMixedErrorConverged(1.5e-5, 0.1));
+	}
+
+	@Test
+	public void plantBaseResidualPreventsFalseFluxConvergence() {
+		assertFalse(ctSolveConverged(
+			1e-6, 1.0, 1e-3, 1.0));
+		assertTrue(ctSolveConverged(
+			1e-6, 1.0, 1e-6, 1.0));
+	}
+
+	@Test
+	public void closureDiagnosticsDoNotChangeIsolationPatchConvergence() {
+		assertTrue(ctSolveConverged(
+			1e-6, 1.0, 1e-6, 1.0));
 	}
 
 	@Test
@@ -751,13 +1319,13 @@ public class PlantBaseCarbonBoundaryUnitTest {
 	@Test
 	public void fallbackCountAccumulatesAndAcceptedSolveClearsCurrentFlag() {
 		PlantBase fixture = boundaryFixture(-1.0e-4, 0.0, 0.002);
-		applyGuardedPlantBaseCarbonBoundary(fixture);
-		applyGuardedPlantBaseCarbonBoundary(fixture);
+		applyGuardedPlantBaseCarbonBoundary(fixture, 1.0);
+		applyGuardedPlantBaseCarbonBoundary(fixture, 1.0);
 		assertEquals(2, fixture.ctPlantBaseFallbackCount);
 
 		fixture.branch_flux_a = -2.0e-4;
 		fixture.branch_flux_b = 0.4;
-		applyGuardedPlantBaseCarbonBoundary(fixture);
+		applyGuardedPlantBaseCarbonBoundary(fixture, 1.0);
 		assertEquals(0, fixture.ctPlantBaseFallbackUsed);
 		assertEquals(0, fixture.ctPlantBaseFallbackReason);
 		assertEquals(2, fixture.ctPlantBaseFallbackCount);
@@ -772,12 +1340,532 @@ public class PlantBaseCarbonBoundaryUnitTest {
 	}
 }
 
+public class CarbonTransportNumericsUnitTest {
+	private static void configureSimpleRootLayer(
+			StructuralRoot root, FineRoot fine, int layer) {
+		root.layer = layer;
+		root.sink_source_a = 0.001 * Double.valueOf(layer + 1).doubleValue();
+		root.sink_source_b = 0.10 + 0.02 * layer;
+		root.r = 0.15 + 0.03 * layer;
+		root.xp = 0.00001 * Double.valueOf(layer + 1).doubleValue();
+		root.cpb = root.cpt = 0.02;
+		fine.layer = layer;
+		fine.sink_source_a = 0.0002 * Double.valueOf(layer + 1).doubleValue();
+		fine.sink_source_b = 0.03 + 0.01 * layer;
+		fine.r = 0.0;
+		fine.xp = 0.0;
+		fine.cpb = fine.cpt = 0.02;
+	}
+
+	private static void assertSimpleRootChain(int layerCount) {
+		StructuralRoot[] roots = new StructuralRoot[layerCount];
+		FineRoot[] fineRoots = new FineRoot[layerCount];
+		double[] expectedFoldA = new double[layerCount];
+		double[] expectedFoldB = new double[layerCount];
+		CarbonTransportSolveContext ctx = new CarbonTransportSolveContext();
+		ctx.foldStep = 100 + layerCount;
+		ctx.unfoldStep = 200 + layerCount;
+		ctx.dampingFactor = 1.0;
+		ctx.simpleRootActive = true;
+		ctx.simpleRootTopologyValid = true;
+		ctx.simpleRootFoldValid = true;
+		ctx.simpleRootUnfoldValid = true;
+		ctx.simpleStructuralRootExpected = layerCount;
+		ctx.simpleFineRootExpected = layerCount;
+
+		int layer;
+		for (layer = 0; layer < layerCount; layer++) {
+			roots[layer] = new StructuralRoot();
+			fineRoots[layer] = new FineRoot();
+			configureSimpleRootLayer(roots[layer], fineRoots[layer], layer);
+		}
+
+		for (layer = layerCount - 1; layer >= 0; layer--) {
+			double rawA = roots[layer].sink_source_a
+				+ fineRoots[layer].sink_source_a;
+			double rawB = roots[layer].sink_source_b
+				+ fineRoots[layer].sink_source_b;
+			StructuralRoot child = null;
+			if (layer < layerCount - 1) {
+				rawA += expectedFoldA[layer + 1];
+				rawB += expectedFoldB[layer + 1];
+				child = roots[layer + 1];
+			}
+			double denominator = 1.0 + rawB * roots[layer].r;
+			expectedFoldA[layer] = (rawA - rawB * roots[layer].xp)
+				/ denominator;
+			expectedFoldB[layer] = rawB / denominator;
+
+			assertTrue(foldSimpleRootSegment(
+				roots[layer], fineRoots[layer], child, ctx));
+			assertEquals(expectedFoldA[layer],
+				roots[layer].branch_flux_a, 1.0e-7);
+			assertEquals(expectedFoldB[layer],
+				roots[layer].branch_flux_b, 1.0e-7);
+		}
+		roots[0].foldRecv++;
+
+		assertEquals(layerCount, ctx.simpleStructuralRootFolded);
+		assertEquals(layerCount, ctx.simpleFineRootFolded);
+		assertEquals(0, ctx.simpleRootDoubleFoldCount);
+		for (layer = 0; layer < layerCount; layer++) {
+			assertEquals(1, roots[layer].foldRecv);
+			assertEquals(1, fineRoots[layer].foldRecv);
+			assertEquals(ctx.foldStep, roots[layer].lastFoldStep);
+			assertEquals(ctx.foldStep, fineRoots[layer].lastFoldStep);
+		}
+
+		double upstreamPhi = 0.02;
+		double localRootCurrent = 0.0;
+		for (layer = 0; layer < layerCount; layer++) {
+			assertTrue(unfoldSimpleRootSegment(
+				roots[layer], fineRoots[layer], upstreamPhi,
+				1000L + layer, ctx));
+			roots[layer].j = roots[layer].sink_source_a
+				+ roots[layer].sink_source_b * roots[layer].cpt;
+			fineRoots[layer].j = fineRoots[layer].sink_source_a
+				+ fineRoots[layer].sink_source_b * fineRoots[layer].cpt;
+			localRootCurrent += roots[layer].j + fineRoots[layer].j;
+			upstreamPhi = roots[layer].cpt;
+		}
+		double foldedRootCurrent = roots[0].branch_flux_a
+			+ roots[0].branch_flux_b * 0.02;
+		assertEquals(localRootCurrent, foldedRootCurrent, 1.0e-9);
+		assertEquals(layerCount, ctx.simpleStructuralRootUnfolded);
+		assertEquals(layerCount, ctx.simpleFineRootUnfolded);
+		for (layer = 0; layer < layerCount; layer++) {
+			assertEquals(1, roots[layer].unfoldRecv);
+			assertEquals(1, fineRoots[layer].unfoldRecv);
+			assertEquals(ctx.unfoldStep, roots[layer].lastUnfoldStep);
+			assertEquals(ctx.unfoldStep, fineRoots[layer].lastUnfoldStep);
+		}
+	}
+
+	@Test
+	public void oneLayerSimpleRootFoldsAndUnfoldsWithFullCoverage() {
+		assertSimpleRootChain(1);
+	}
+
+	@Test
+	public void twoLayerSimpleRootTransformsEveryStructuralRootOnce() {
+		assertSimpleRootChain(2);
+	}
+
+	@Test
+	public void fourLayerSimpleRootMatchesDirectRecursiveFold() {
+		assertSimpleRootChain(4);
+	}
+
+	@Test
+	public void simpleRootDoubleFoldIsRejected() {
+		StructuralRoot root = new StructuralRoot();
+		FineRoot fine = new FineRoot();
+		configureSimpleRootLayer(root, fine, 0);
+		CarbonTransportSolveContext ctx = new CarbonTransportSolveContext();
+		ctx.foldStep = 9;
+		ctx.simpleRootFoldValid = true;
+		assertTrue(foldSimpleRootSegment(root, fine, null, ctx));
+		assertFalse(foldSimpleRootSegment(root, fine, null, ctx));
+		assertEquals(1, ctx.simpleRootDoubleFoldCount);
+		assertFalse(ctx.simpleRootFoldValid);
+	}
+
+	@Test
+	public void legacyTwoLayerDoubleTransformDiffersFromCorrectFold() {
+		GrowingOrgan parent = new GrowingOrgan();
+		parent.r = 0.25;
+		parent.xp = 0.0002;
+		parent.branch_flux_a = 0.004;
+		parent.branch_flux_b = 0.8;
+		parent.Update_Branch_Flux();
+		double parentAlreadyFoldedA = parent.branch_flux_a;
+		double parentAlreadyFoldedB = parent.branch_flux_b;
+		double childFoldedA = 0.003;
+		double childFoldedB = 0.4;
+		parent.branch_flux_a += childFoldedA;
+		parent.branch_flux_b += childFoldedB;
+		parent.Update_Branch_Flux();
+
+		double correctRawA = 0.004 + childFoldedA;
+		double correctRawB = 0.8 + childFoldedB;
+		double correctDenominator = 1.0 + correctRawB * 0.25;
+		double correctFoldA = (correctRawA - correctRawB * 0.0002)
+			/ correctDenominator;
+		double correctFoldB = correctRawB / correctDenominator;
+		assertTrue(Math.abs(parent.branch_flux_a - correctFoldA) > 1.0e-5);
+		assertTrue(Math.abs(parent.branch_flux_b - correctFoldB) > 1.0e-3);
+		assertTrue(parentAlreadyFoldedA != 0.004
+			|| parentAlreadyFoldedB != 0.8);
+	}
+
+	@Test
+	public void multipleChildrenAreSummedBeforeOneResistanceTransform() {
+		// Update_Branch_Flux is defined by GrowingOrgan and is the exact
+		// resistance transform used by Petiole after its children are collected.
+		GrowingOrgan segment = new GrowingOrgan();
+		segment.r = 0.4;
+		segment.xp = 0.003;
+		double ownA = -0.03, ownB = 1.2;
+		double child1A = 0.01, child1B = 0.5;
+		double child2A = 0.02, child2B = 0.7;
+		double sumA = ownA + child1A + child2A;
+		double sumB = ownB + child1B + child2B;
+		double denominator = 1.0 + sumB * segment.r;
+		segment.branch_flux_a = sumA;
+		segment.branch_flux_b = sumB;
+		segment.Update_Branch_Flux();
+
+		assertEquals((sumA - sumB * segment.xp) / denominator,
+			segment.branch_flux_a, 1.0e-7);
+		assertEquals(sumB / denominator, segment.branch_flux_b, 1.0e-7);
+	}
+
+	@Test
+	public void branchedStructuralRootTransformPreservesLocalFoldIdentity() {
+		// StructuralRoot uses the inherited transform after deterministic
+		// post-order child accumulation; use its instantiable base as the fixture.
+		GrowingOrgan parent = new GrowingOrgan();
+		parent.r = 0.2;
+		parent.xp = 0.001;
+		double localA = -0.04;
+		double localB = 1.1;
+		double childA = 0.03;
+		double childB = 0.9;
+		double distalA = localA + childA;
+		double distalB = localB + childB;
+		parent.branch_flux_a = distalA;
+		parent.branch_flux_b = distalB;
+		parent.Update_Branch_Flux();
+		double basalPhi = 0.006;
+		double distalPhi = (basalPhi - distalA * parent.r - parent.xp)
+			/ (1.0 + distalB * parent.r);
+		double localCurrent = distalA + distalB * distalPhi;
+		double foldedCurrent = parent.branch_flux_a
+			+ parent.branch_flux_b * basalPhi;
+
+		assertEquals(localCurrent, foldedCurrent, 1.0e-7);
+	}
+
+	@Test
+	public void unfoldOwnerRejectsASecondTransportWriter() {
+		GrowingOrgan organ = new GrowingOrgan();
+		CarbonTransportSolveContext context =
+			new CarbonTransportSolveContext();
+		context.unfoldStep = 7;
+		assertTrue(claimCarbonUnfoldOwner(organ, 11L, context));
+		assertFalse(claimCarbonUnfoldOwner(organ, 12L, context));
+		assertEquals(2, organ.unfoldRecv);
+		assertEquals(11L, organ.lastWriterId);
+	}
+
+	@Test
+	public void validOrganTrialUsesCurrentHalfDamping() {
+		CarbonTransportSolveContext ctx = new CarbonTransportSolveContext();
+		double accepted = underRelaxOrganPhi(0.001, 0.003, 0.5, ctx);
+		assertEquals(0.002, accepted, 1e-15);
+		assertFalse(ctx.invalidUnfoldTrial);
+	}
+
+	@Test
+	public void largePositiveOrganTrialIsDamped() {
+		CarbonTransportSolveContext ctx = new CarbonTransportSolveContext();
+		double accepted = underRelaxOrganPhi(0.001, 0.101, 0.5, ctx);
+		assertEquals(0.051, accepted, 1e-15);
+		assertTrue(accepted < 0.101);
+	}
+
+	@Test
+	public void negativeOrganTrialRetainsPreviousPhi() {
+		CarbonTransportSolveContext ctx = new CarbonTransportSolveContext();
+		double accepted = underRelaxOrganPhi(0.002, -0.1, 0.5, ctx);
+		assertEquals(0.002, accepted, 0.0);
+		assertTrue(ctx.invalidUnfoldTrial);
+		assertEquals(1, ctx.invalidUnfoldTrialCount);
+		assertEquals(1, ctx.totalInvalidUnfoldTrialCount);
+	}
+
+	@Test
+	public void nonFiniteOrganTrialsRetainPreviousPhi() {
+		CarbonTransportSolveContext nanContext = new CarbonTransportSolveContext();
+		CarbonTransportSolveContext infContext = new CarbonTransportSolveContext();
+		assertEquals(0.002,
+			underRelaxOrganPhi(0.002, Double.NaN, 0.5, nanContext), 0.0);
+		assertEquals(0.002,
+			underRelaxOrganPhi(0.002, Double.POSITIVE_INFINITY, 0.5, infContext), 0.0);
+		assertTrue(nanContext.invalidUnfoldTrial);
+		assertTrue(infContext.invalidUnfoldTrial);
+	}
+
+	@Test
+	public void invalidOrganTrialForcesNonConvergenceAndLowerDamping() {
+		CarbonTransportSolveContext ctx = new CarbonTransportSolveContext();
+		ctx.converged = true;
+		underRelaxOrganPhi(0.002, -1.0, 0.5, ctx);
+		assertFalse(ctx.converged);
+		assertEquals(0.25,
+			adaptCtDampingFactor(0.5, 1.0, Double.POSITIVE_INFINITY), 0.0);
+	}
+
+	@Test
+	public void normalLimitTriggersExactlyOneRetry() {
+		CarbonTransportSolveContext normal = new CarbonTransportSolveContext();
+		normal.iterationCount = CT_MAX_ITERATIONS;
+		normal.maxIterationReached = true;
+		normal.converged = false;
+		assertTrue(shouldStartCarbonTransportRetry(normal));
+
+		CarbonTransportSolveContext retry = createCarbonTransportRetryContext(normal);
+		retry.iterationCount = CT_RETRY_MAX_ITERATIONS;
+		retry.maxIterationReached = true;
+		assertFalse("A retry failure must not trigger a second retry",
+			shouldStartCarbonTransportRetry(retry));
+	}
+
+	@Test
+	public void finiteNormalTrialWarmStartsRetryButInvalidTrialRollsBack() {
+		CarbonTransportSolveContext finiteNormal =
+			new CarbonTransportSolveContext();
+		finiteNormal.failedTrialCaptured = true;
+		finiteNormal.totalInvalidUnfoldTrialCount = 0;
+		assertTrue(shouldWarmStartCarbonTransportRetry(finiteNormal));
+
+		finiteNormal.totalInvalidUnfoldTrialCount = 1;
+		assertFalse(shouldWarmStartCarbonTransportRetry(finiteNormal));
+		finiteNormal.failedTrialCaptured = false;
+		finiteNormal.totalInvalidUnfoldTrialCount = 0;
+		assertFalse(shouldWarmStartCarbonTransportRetry(finiteNormal));
+	}
+
+	@Test
+	public void retryStartsAtPointOneWithSixtyIterationLimit() {
+		CarbonTransportSolveContext retry =
+			createCarbonTransportRetryContext(new CarbonTransportSolveContext());
+		assertTrue(retry.retryUsed);
+		assertEquals(CT_RETRY_DAMPING_INITIAL, retry.dampingFactor, 0.0);
+		assertEquals(0.1, retry.dampingFactor, 0.0);
+		assertEquals(60, retry.finalIterationLimit);
+	}
+
+}
+
 public class ModelUnitTest {
+	private static double mm(double sugar, double km) {
+		return sugar / (km + sugar);
+	}
+
 	@Before
 	public void setup() {
 		mainInstance.resetGraph();	
 		mainInstance.init();	
         derive();
+	}
+
+	@Test
+	public void plantBaseCarbonTransportInitializationSynchronizesSugarFromPhi() {
+		PlantBase plant = new PlantBase();
+		plant.initializeCarbonTransport();
+		assertTrue(plant.cpt > 0.0);
+		assertTrue(plant.cpb > 0.0);
+		assertTrue(plant.sugarConcentration_phloem > 0.0);
+		assertEquals(sugarFromCp(plant.cpt),
+			plant.sugarConcentration_phloem, 1e-15);
+		assertEquals(plant.sugarConcentration_phloem,
+			plant.sugarConcentration_phloem_pre, 0.0);
+		assertFalse(hasAcceptedHourlyCarbonTransportState(plant));
+		verifyPlantBaseSugarForOutput(
+			plant, plant.sugarConcentration_phloem);
+	}
+
+	@Test
+	public void failedTrialDiagnosticsAreCapturedBeforeRollback() {
+		PlantBase plant = first((* failedTrialPb:PlantBase *));
+		assertNotNull(plant);
+		plant.cpb = plant.cpt = 0.003;
+		plant.sugarConcentration_phloem = sugarFromCp(plant.cpt);
+		CarbonTransportSolveContext failedTrial =
+			new CarbonTransportSolveContext();
+		failedTrial.converged = false;
+		failedTrial.nonlinearMerit = 12.5;
+		captureFailedCarbonTransportTrial(plant, failedTrial);
+		assertTrue(failedTrial.failedTrialCaptured);
+		assertEquals(plant.cpt,
+			failedTrial.failedTrialPlantBasePhi, 0.0);
+		assertEquals(sugarFromCp(plant.cpt),
+			failedTrial.failedTrialPlantBaseSugar, 0.0);
+		assertTrue(failedTrial.failedTrialMinSugar >= 0.0);
+		assertTrue(failedTrial.failedTrialMaxSugar
+			>= failedTrial.failedTrialMinSugar);
+		assertTrue(failedTrial.failedTrialMeanSugar
+			>= failedTrial.failedTrialMinSugar);
+		assertTrue(failedTrial.failedTrialMeanSugar
+			<= failedTrial.failedTrialMaxSugar);
+		assertEquals(12.5, failedTrial.failedTrialMerit, 0.0);
+	}
+
+	@Test
+	public void carbonTransportSnapshotRestoresStateAndResistance() {
+		PlantBase plant = first((* snapshotPb:PlantBase *));
+		assertNotNull(plant);
+		GrowingOrgan organ = first((* snapshotGrowing:GrowingOrgan, (
+			snapshotGrowing.plantNumber == plant.plantNumber
+		) *));
+		assertNotNull(organ);
+		updateResistence(plant);
+		plant.sugarConcentration_phloem = sugarFromCp(plant.cpt);
+		plant.sugarConcentration_phloem_pre = 0.0;
+		CarbonTransportStateSnapshot snapshot = snapshotCarbonTransportState(plant);
+		double acceptedCpb = organ.cpb;
+		double acceptedCpt = organ.cpt;
+		double acceptedJ = organ.j;
+		double acceptedR = organ.r;
+		double acceptedXp = organ.xp;
+		double acceptedUnloading = organ.unloading;
+		double acceptedPlantPhi = plant.cpt;
+		double acceptedPlantSugar = sugarFromCp(acceptedPlantPhi);
+
+		organ.cpb = 0.9;
+		organ.cpt = 0.8;
+		organ.j = 0.7;
+		organ.r = 123.0;
+		organ.xp = 456.0;
+		organ.unloading = 789.0;
+		plant.cpb = plant.cpt = acceptedPlantPhi + 0.25;
+		plant.sugarConcentration_phloem = 0.99;
+		restoreCarbonTransportState(plant, snapshot);
+
+		assertEquals(acceptedCpb, organ.cpb, 0.0);
+		assertEquals(acceptedCpt, organ.cpt, 0.0);
+		assertEquals(acceptedJ, organ.j, 0.0);
+		assertEquals(acceptedR, organ.r, 1e-15);
+		assertEquals(acceptedXp, organ.xp, 1e-15);
+		assertEquals(acceptedUnloading, organ.unloading, 0.0);
+		assertEquals(acceptedPlantSugar, plant.sugarConcentration_phloem, 0.0);
+		assertEquals(sugarFromCp(plant.cpt),
+			plant.sugarConcentration_phloem, 0.0);
+		assertEquals(acceptedPlantSugar,
+			plant.sugarConcentration_phloem_pre, 0.0);
+	}
+
+	@Test
+	public void firstHourRetryFailureUsesInitializedStateOnceAsBootstrap() {
+		PlantBase plant = new PlantBase();
+		plant.plantNumber = -987655;
+		plant.initializeCarbonTransport();
+		prepareInitialCarbonTransportSnapshotState(plant);
+		CarbonTransportStateSnapshot snapshot = snapshotCarbonTransportState(plant);
+		double initializedPhi = plant.cpt;
+
+		plant.cpb = plant.cpt = initializedPhi + 0.5;
+		plant.sugarConcentration_phloem = 0.0;
+		CarbonTransportSolveContext failedRetry = new CarbonTransportSolveContext();
+		failedRetry.retryUsed = true;
+		failedRetry.maxIterationReached = true;
+		failedRetry.iterationCount = CT_RETRY_MAX_ITERATIONS;
+
+		assertFalse(finalizeCarbonTransportState(plant, snapshot, failedRetry));
+		assertFalse(failedRetry.converged);
+		assertTrue(failedRetry.retryUsed);
+		assertFalse(failedRetry.retryConverged);
+		assertTrue(failedRetry.solverFallbackUsed);
+		assertTrue(failedRetry.maxIterationReached);
+		assertEquals(initializedPhi, plant.cpt, 0.0);
+		assertTrue(plant.sugarConcentration_phloem > 0.0);
+		assertEquals(sugarFromCp(plant.cpt),
+			plant.sugarConcentration_phloem, 0.0);
+		assertEquals(1, failedRetry.carbonStatusUpdateCount);
+		assertTrue(failedRetry.bootstrapFallbackUsed);
+		assertFalse(hasAcceptedHourlyCarbonTransportState(plant));
+	}
+
+	@Test
+	public void laterRetryFailureRestoresAcceptedHourWithoutStatusCommit() {
+		PlantBase plant = first((* failurePb:PlantBase *));
+		assertNotNull(plant);
+		GrowingOrgan organ = first((* failureGrowing:GrowingOrgan, (
+			failureGrowing.plantNumber == plant.plantNumber
+		) *));
+		assertNotNull(organ);
+		plant.cpb = plant.cpt = 0.003;
+		plant.sugarConcentration_phloem = sugarFromCp(plant.cpt);
+		plant.sugarConcentration_phloem_pre = plant.sugarConcentration_phloem;
+		setAcceptedHourlyCarbonTransportState(plant, true);
+		CarbonTransportStateSnapshot snapshot = snapshotCarbonTransportState(plant);
+		double acceptedPlantPhi = plant.cpt;
+		double acceptedPlantSugar = plant.sugarConcentration_phloem;
+		double acceptedCpt = organ.cpt;
+		double acceptedJ = organ.j;
+		double acceptedUnloading = organ.unloading;
+		organ.cpt = acceptedCpt + 0.5;
+		organ.j = acceptedJ + 0.5;
+		organ.unloading = acceptedUnloading + 0.5;
+		plant.cpb = plant.cpt = 0.9;
+		plant.sugarConcentration_phloem = 0.0;
+
+		CarbonTransportSolveContext failedRetry = new CarbonTransportSolveContext();
+		failedRetry.retryUsed = true;
+		failedRetry.maxIterationReached = true;
+		failedRetry.iterationCount = CT_RETRY_MAX_ITERATIONS;
+		assertFalse(finalizeCarbonTransportState(plant, snapshot, failedRetry));
+		assertTrue(failedRetry.solverFallbackUsed);
+		assertFalse(failedRetry.bootstrapFallbackUsed);
+		assertFalse(failedRetry.retryConverged);
+		assertEquals("Failed trials must never call updateCarbonStatus",
+			0, failedRetry.carbonStatusUpdateCount);
+		assertEquals(acceptedCpt, organ.cpt, 0.0);
+		assertEquals(acceptedJ, organ.j, 0.0);
+		assertEquals(acceptedUnloading, organ.unloading, 0.0);
+		assertEquals(acceptedPlantPhi, plant.cpt, 0.0);
+		assertEquals(acceptedPlantSugar,
+			plant.sugarConcentration_phloem, 0.0);
+		assertTrue(hasAcceptedHourlyCarbonTransportState(plant));
+	}
+
+	@Test
+	public void successfulFirstSolveReplacesInitializedStateWithoutBootstrap() {
+		PlantBase plant = new PlantBase();
+		plant.plantNumber = -987656;
+		plant.initializeCarbonTransport();
+		prepareInitialCarbonTransportSnapshotState(plant);
+		CarbonTransportStateSnapshot snapshot = snapshotCarbonTransportState(plant);
+		double initializedPhi = plant.cpt;
+		double solvedPhi = initializedPhi + 0.002;
+		plant.cpb = plant.cpt = solvedPhi;
+		plant.sugarConcentration_phloem = sugarFromCp(solvedPhi);
+		plant.sugarConcentration_phloem_pre = plant.sugarConcentration_phloem;
+
+		CarbonTransportSolveContext successfulNormal =
+			new CarbonTransportSolveContext();
+		successfulNormal.converged = true;
+		assertTrue(finalizeCarbonTransportState(
+			plant, snapshot, successfulNormal));
+		assertEquals(solvedPhi, plant.cpt, 0.0);
+		assertTrue(plant.cpt != initializedPhi);
+		assertFalse(successfulNormal.retryUsed);
+		assertFalse(successfulNormal.retryConverged);
+		assertFalse(successfulNormal.solverFallbackUsed);
+		assertFalse(successfulNormal.bootstrapFallbackUsed);
+		assertEquals(1, successfulNormal.carbonStatusUpdateCount);
+		assertTrue(hasAcceptedHourlyCarbonTransportState(plant));
+	}
+
+	@Test
+	public void retrySuccessIsAcceptedWithOneStatusCommit() {
+		PlantBase plant = new PlantBase();
+		plant.plantNumber = -987654;
+		plant.cpb = plant.cpt = 0.001;
+		plant.sugarConcentration_phloem = sugarFromCp(plant.cpt);
+		plant.sugarConcentration_phloem_pre = plant.sugarConcentration_phloem;
+		assertFalse(hasAcceptedHourlyCarbonTransportState(plant));
+		CarbonTransportStateSnapshot snapshot = snapshotCarbonTransportState(plant);
+		CarbonTransportSolveContext successfulRetry =
+			createCarbonTransportRetryContext(new CarbonTransportSolveContext());
+		successfulRetry.converged = true;
+		assertTrue(finalizeCarbonTransportState(
+			plant, snapshot, successfulRetry));
+		assertTrue(successfulRetry.retryConverged);
+		assertFalse(successfulRetry.solverFallbackUsed);
+		assertEquals(1, successfulRetry.carbonStatusUpdateCount);
+		assertTrue(hasAcceptedHourlyCarbonTransportState(plant));
 	}
 
 	    @Test
@@ -786,6 +1874,145 @@ public class ModelUnitTest {
         int actual = step;
     	assertEquals(expected, actual);
 	    }
+
+	@Test
+	public void virtualFruitUsesSignedDirectMassFlowAcrossCandidates() {
+		VirtualFruit fruit = first((* vf:VirtualFruit *));
+		if (fruit == null) {
+			mainInstance.run();
+			fruit = first((* vf:VirtualFruit *));
+		}
+		assertNotNull("Default apple graph must contain a VirtualFruit fixture", fruit);
+
+		double referenceSugar = 0.15;
+		double km = 0.072;
+		double cachedActive = 10.0;
+		double cachedMassFlow = 2.0;
+		double previousReference = fruit.sugarConcentration_phloem_pre;
+		double previousWaterFlowReference = fruit.massFlowWaterFlowReference;
+		double previousUnloadingPerFruit = fruit.unloadingPerFruit;
+		double previousActiveReference = fruit.activeUnloadingReference;
+		double previousMassFlowReference = fruit.massFlowUnloadingReference;
+		boolean previousMassFlowReferenceInitialized =
+			fruit.massFlowUnloadingReferenceInitialized;
+		double previousFruitSugar = fruit.sugarConcentration_fruit;
+		double previousSugarUptakeActive = fruit.sugarUptake_active;
+		double previousSugarUptakeMassFlow = fruit.sugarUptake_massflow;
+		double previousSugarUptakePassive = fruit.sugarUptake_passive;
+		double previousWaterUptakePhloem = fruit.waterUptake_phloem;
+		double previousKmPri = fruit.km_pri;
+		double previousAge = fruit.age;
+		double previousCpb = fruit.cpb;
+		double previousCpt = fruit.cpt;
+		double previousMaintenancePt = fruit.maintenanceDM_PT;
+		double previousStructurePriPt = fruit.structureDM_PRI_PT;
+		double previousStructureSecPt = fruit.structureDM_SEC_PT;
+		double previousStructure = fruit.structureDM;
+		double previousStructurePri = fruit.structureDM_PRI;
+		double previousStructureSec = fruit.structureDM_SEC;
+		double previousUnloading = fruit.unloading;
+		boolean previousCalcCarbonAllocation = calcCarbonAllocation;
+		boolean previousEnablePreT1 = enablePotentialGrowthBeforeT1;
+		boolean previousPreT1Active = preT1PotentialGrowthActive;
+		boolean previousStaticArc = useStaticArc;
+		try {
+			calcCarbonAllocation = true;
+			enablePotentialGrowthBeforeT1 = false;
+			preT1PotentialGrowthActive = false;
+			useStaticArc = false;
+			fruit.commitVirtualFruitImportReferences(cachedActive,
+				cachedMassFlow, referenceSugar, 0.5);
+			fruit.sugarConcentration_fruit = 0.08;
+			fruit.sugarUptake_passive = 7.0;
+			fruit.km_pri = km;
+			fruit.age = Math.max(1.0, fruit.age);
+
+			double[] candidates = {0.03, 0.08, 0.15, 0.03};
+			double[] expectedMassFlow = {0.4, 16.0 / 15.0, 2.0, 0.4};
+			double[] realisedActive = new double[candidates.length];
+			double firstUnloading = 0.0;
+			for (int i = 0; i < candidates.length; i++) {
+				fruit.updateCarbonAllocation(candidates[i]);
+				realisedActive[i] = fruit.structureDM_PRI;
+				if (i == 0) firstUnloading = fruit.unloading;
+				assertEquals("Fruit mass flow must bypass the maintenance channel",
+					0.0, fruit.maintenanceDM_PT, 0.0);
+				assertEquals(0.0, fruit.structureDM_SEC_PT, 0.0);
+				assertEquals(0.0, fruit.structureDM_SEC, 0.0);
+				assertEquals(expectedMassFlow[i],
+					fruit.getDirectMassFlowCarbon(candidates[i]), 1.0e-12);
+				assertEquals("Passive JFruit2 import must not enter unloading",
+					fruit.structureDM_PRI + expectedMassFlow[i],
+					fruit.unloading, 1.0e-12);
+			}
+
+			assertEquals("Candidate evaluation must not mutate the JFruit2 reference",
+				referenceSugar, fruit.sugarConcentration_phloem_pre, 0.0);
+			assertEquals(cachedMassFlow, fruit.massFlowUnloadingReference, 0.0);
+			assertEquals(0.5, fruit.massFlowWaterFlowReference, 0.0);
+			assertEquals("Repeated candidates must be order independent",
+				firstUnloading, fruit.unloading, 0.0);
+			assertTrue("Active uptake must still rise through KM_PRI",
+				realisedActive[0] < realisedActive[1]
+					&& realisedActive[1] < realisedActive[2]);
+			assertEquals("Primary PT must contain only active import and undo reference MM once",
+				cachedActive / (referenceSugar / (km + referenceSugar)),
+				fruit.structureDM_PRI_PT, 1.0e-12);
+			assertEquals("Realised structure must contain only active import",
+				fruit.structureDM_PRI, fruit.structureDM, 0.0);
+			assertEquals(previousSugarUptakeActive, fruit.sugarUptake_active, 0.0);
+			assertEquals(previousSugarUptakeMassFlow, fruit.sugarUptake_massflow, 0.0);
+			assertEquals(previousWaterUptakePhloem, fruit.waterUptake_phloem, 0.0);
+
+			double candidateCarbon = convertSugarToPhloemC(0.20f);
+			fruit.cpb = fruit.cpt = 0.5 * candidateCarbon * candidateCarbon;
+			lineariseOrgan(fruit);
+			double reconstructed = (fruit.sink_source_a
+				+ fruit.sink_source_b * fruit.cpt) / mgTogram;
+			assertEquals("CT A+B*Phi must match exact CP/direct unloading at Phi0",
+				fruit.unloading, reconstructed, 2.0e-5);
+			assertEquals(0.0, fruit.maintenanceDM_PT, 0.0);
+			assertEquals(cachedMassFlow, fruit.massFlowUnloadingReference, 0.0);
+			assertEquals(referenceSugar, fruit.sugarConcentration_phloem_pre, 0.0);
+			assertEquals(0.5, fruit.massFlowWaterFlowReference, 0.0);
+
+			fruit.commitVirtualFruitImportReferences(cachedActive,
+				-3.0, referenceSugar, -0.4);
+			fruit.updateCarbonAllocation(0.08);
+			assertEquals("Accepted outward JFruit2 flow is fixed and signed next hour",
+				-3.0, fruit.getDirectMassFlowCarbon(0.08), 0.0);
+			assertEquals(0.0, fruit.getDirectMassFlowDerivativePhi(
+				fruit.cpt, 0.08), 0.0);
+		} finally {
+			fruit.sugarConcentration_phloem_pre = previousReference;
+			fruit.massFlowWaterFlowReference = previousWaterFlowReference;
+			fruit.unloadingPerFruit = previousUnloadingPerFruit;
+			fruit.activeUnloadingReference = previousActiveReference;
+			fruit.massFlowUnloadingReference = previousMassFlowReference;
+			fruit.massFlowUnloadingReferenceInitialized =
+				previousMassFlowReferenceInitialized;
+			fruit.sugarConcentration_fruit = previousFruitSugar;
+			fruit.sugarUptake_active = previousSugarUptakeActive;
+			fruit.sugarUptake_massflow = previousSugarUptakeMassFlow;
+			fruit.sugarUptake_passive = previousSugarUptakePassive;
+			fruit.waterUptake_phloem = previousWaterUptakePhloem;
+			fruit.km_pri = previousKmPri;
+			fruit.age = previousAge;
+			fruit.cpb = previousCpb;
+			fruit.cpt = previousCpt;
+			fruit.maintenanceDM_PT = previousMaintenancePt;
+			fruit.structureDM_PRI_PT = previousStructurePriPt;
+			fruit.structureDM_SEC_PT = previousStructureSecPt;
+			fruit.structureDM = previousStructure;
+			fruit.structureDM_PRI = previousStructurePri;
+			fruit.structureDM_SEC = previousStructureSec;
+			fruit.unloading = previousUnloading;
+			calcCarbonAllocation = previousCalcCarbonAllocation;
+			enablePotentialGrowthBeforeT1 = previousEnablePreT1;
+			preT1PotentialGrowthActive = previousPreT1Active;
+			useStaticArc = previousStaticArc;
+		}
+	}
 
 	@Test
 	public void waterFluxSolverDebugOutputIsConditionalAndReadOnly() throws Exception {
@@ -948,12 +2175,3 @@ public class ModelUnitTest {
 			assertTrue("Root proportion validation failed", rootValid);
 		} 
 }
-
-
-
-
-
-
-
-
-

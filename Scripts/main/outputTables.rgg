@@ -1349,6 +1349,10 @@ protected static void writeTablesToDataModels(int table, PlantBase pb) {
 		
 		
 		// Write output data to csv.
+		if (useCTRAM) {
+			verifyPlantBaseSugarForOutput(
+				pb, plantLevel_out.phloemSugarConcentration);
+		}
 		writeWaterFluxSolverDebug(pb);
 		if (!stepwiseOutput) {
 			StepwiseCsvWriter plantLevelCsvWriter = (StepwiseCsvWriter) csvWriters.get(plantLevelOutputFilePath);

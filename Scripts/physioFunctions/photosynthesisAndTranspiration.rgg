@@ -67,11 +67,14 @@ global float rbt; // = 2/3;       // m2 s ubar umol-1  Combined turbulence and b
 global float ra; //= 33;		//Aerodynamic resistance (ra) for water and heat transfer sm-1
 global float NIGHT_TRANSPIRATION; // = 1.5e-6;    //mm/s 
 global float g0; // = 0.018;     // umol m-2 leaf s-1 ubar-1, PRIETO et al., 2012 PCE, Residual stomatal conductance for CO2 at the light compensation point
-/** Leaf nonstructural carbon feedback coefficient on Vcmax, multiplied by fNSC. */
-global float p_vcmax_to_fnsc = 2.465483235;
-/** critical NSC threshold beyond which photosynthesis begins to experience
-significant inhibition, and below which it decrease with half of the rate*/
-global float fnsc_vcmax_star = 0.15;
+/** Half-saturation total leaf NSC fraction for photosynthesis inhibition (dimensionless). */
+global float fNSC_vcmax_f50 = 0.20;
+/** Maximum fractional inhibition of Vcmax by total leaf NSC (dimensionless). */
+global float r_vcmax_to_fnsc_max = 0.80;
+/** Hill exponent for total leaf NSC inhibition of photosynthesis (dimensionless). */
+global float n_vcmax_to_fnsc = 2.0;
+/** Relative sensitivity of Jmax to the Vcmax NSC inhibition (dimensionless; empirical). */
+global float alphaJ = 0.30;
 global float leafTypeEffect;
 
 
@@ -93,19 +96,6 @@ boolean shouldPrintInfo = false;
 	 * plant responses, vital for studies in plant growth and response to climatic changes.
 	 */
 	public class PhotosynthesisAndTranspiration {
-		private static float migrateOldVcmaxToFnscParameter(double oldP1, double oldP2) {
-			// The active pre-refactor formula used the hard-coded coefficient 2.465483235
-			// directly. For default legacy files (p1=21, p2=50), preserve that behavior;
-			// for non-default legacy files, interpret the old pair as the documented p2/p1 ratio.
-			if (Math.abs(oldP1 - 21.0) < 1e-9 && Math.abs(oldP2 - 50.0) < 1e-9) {
-				return 2.465483235f;
-			}
-			if (Math.abs(oldP1) < 1e-9) {
-				return 2.465483235f;
-			}
-			return (float) (oldP2 / oldP1);
-		}
-
 		public static void loadParameters() {
 			CategoryStore config = ((DocumentCategoryNameGroup) CONFIG.getGroup(FILE_NAME_PLANT_PARAMETERS, 
 			DocumentCategoryNameGroup.class)).getCategoryStore();
@@ -115,16 +105,27 @@ boolean shouldPrintInfo = false;
 			slope_Jmax       = config.getDouble("slope_Jmax", 136);
 			slope_Vcmax      = config.getDouble("slope_Vcmax", 137);
 			try {
-				p_vcmax_to_fnsc = config.getDouble("p_vcmax_to_fnsc");
+				fNSC_vcmax_f50 = config.getDouble("fNSC_vcmax_f50");
 			} catch (RuntimeException e) {
-				double oldP1 = config.getDouble("p1_Vcmax", 21);
-				double oldP2 = config.getDouble("p2_Vcmax", 50);
-				p_vcmax_to_fnsc = migrateOldVcmaxToFnscParameter(oldP1, oldP2);
+				// Compatibility fallback: legacy files omit the Hill half-saturation.
+				fNSC_vcmax_f50 = 0.20f;
 			}
 			try {
-				fnsc_vcmax_star = config.getDouble("fnsc_vcmax_star");
+				r_vcmax_to_fnsc_max = config.getDouble("r_vcmax_to_fnsc_max");
 			} catch (RuntimeException e) {
-				fnsc_vcmax_star = config.getDouble("fNSC_Vcmax", 0.15);
+				// Compatibility fallback: retain the Royal Gala Hill asymptote.
+				r_vcmax_to_fnsc_max = 0.80f;
+			}
+			try {
+				n_vcmax_to_fnsc = config.getDouble("n_vcmax_to_fnsc");
+			} catch (RuntimeException e) {
+				// Compatibility fallback: legacy files omit the Hill exponent.
+				n_vcmax_to_fnsc = 2.0f;
+			}
+			try {
+				alphaJ = config.getDouble("alphaJ");
+			} catch (RuntimeException e) {
+				// Legacy parameter files omit the weaker Jmax NSC response; retain 0.30.
 			}
 			slope_Rd        = config.getDouble("slope_Rd", 0.23);
 			slope_kappa2LL  = config.getDouble("slope_kappa2LL", 0.072185);
@@ -175,6 +176,28 @@ boolean shouldPrintInfo = false;
 			leafTypeEffect  = config.getDouble("leafTypeEffect", 0.8);
 			
 		}
+	}
+
+	/**
+	 * Calculates the bounded photosynthesis inhibition signal from total leaf NSC / leaf dry matter.
+	 * Both the returned inhibition and its inputs are dimensionless.
+	 */
+	static float calcPhotosynthesisNSCInhibition(float fNSC) {
+		double safeFNSC = (Double.isNaN(fNSC) || Double.isInfinite(fNSC)) ? 0.0 : Math.max(0.0, fNSC);
+		if (safeFNSC == 0.0) return 0.0f;
+		double safeF50 = (Double.isNaN(fNSC_vcmax_f50) || Double.isInfinite(fNSC_vcmax_f50) || fNSC_vcmax_f50 <= 0.0)
+			? 0.20 : fNSC_vcmax_f50;
+		double safeMax = (Double.isNaN(r_vcmax_to_fnsc_max) || Double.isInfinite(r_vcmax_to_fnsc_max))
+			? 0.0 : Math.max(0.0, Math.min(1.0, r_vcmax_to_fnsc_max));
+		double safeN = (Double.isNaN(n_vcmax_to_fnsc) || Double.isInfinite(n_vcmax_to_fnsc) || n_vcmax_to_fnsc <= 0.0)
+			? 2.0 : n_vcmax_to_fnsc;
+		double scaledFNSC = safeFNSC / safeF50;
+		double scaledPower = Math.pow(scaledFNSC, safeN);
+		double inhibition = safeMax * scaledPower / (1.0 + scaledPower);
+		if (Double.isNaN(inhibition) || Double.isInfinite(inhibition)) {
+			inhibition = safeMax;
+		}
+		return (float) Math.max(0.0, Math.min(safeMax, inhibition));
 	}
 	
 	
@@ -274,15 +297,12 @@ boolean shouldPrintInfo = false;
 	
 	
 	float kappa2LL = slope_kappa2LL* leafN +intc_kappa2LL;
-	float Jmax25 = organTypeEffect * slope_Jmax * (leafN - leafN_min) ;
+	// Apply the same bounded NSC response to Jmax, with weaker empirical sensitivity.
+	float reduc = calcPhotosynthesisNSCInhibition(fNSC);
+	float Jmax25 = organTypeEffect * (1.0 - alphaJ * reduc) * slope_Jmax * (leafN - leafN_min) ;
 	
 	float Jmax=(Jmax25*Math.exp((1/298.0-1/(temp+273.0))*EA_Jmax/R) * (1+Math.exp(sj/R-DEA_Jmax/298.0/R))/
 			(1+Math.exp(sj/R-1/(temp+273.0)*DEA_Jmax/R)));
-	//adding fNSC reduction factor to Vcmax, from the experimental data in qualiTree presentation, 
-	//it looks like there were no obvious reductions when fNSC is low
-	float reduc = fNSC > fnsc_vcmax_star  ? Math.min(0.99, p_vcmax_to_fnsc * fNSC) : 
-							   Math.min(0.99, 0.5*p_vcmax_to_fnsc * fNSC);
-	
 	float Vcmax25 = organTypeEffect * (1.0 - reduc) * slope_Vcmax * (leafN - leafN_min);
 	float Vcmax = (Vcmax25*Math.exp((1/298.0-1/(temp+273.0))*EA_Vcmax/R))* (1+Math.exp(sj/R-DEA_Vcmax/298.0/R))/
 			(1+Math.exp(sj/R-1/(temp+273.0)*DEA_Vcmax/R));

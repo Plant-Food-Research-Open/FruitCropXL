@@ -39,6 +39,8 @@ import org.inra.psh.jfruit2.config.ParametersFactory;
 */
 public module BerryComplex extends FruitService implements Configurable,Serializable 
 {
+	private static final long serialVersionUID = 1L;
+
 	@Override
 	void updateCarbonAllocation(double sugarConcentration) {
 		calcPTCTRAM(sugarConcentration);
@@ -74,6 +76,17 @@ public module BerryComplex extends FruitService implements Configurable,Serializ
 	double Lxmax; /**< Maximum conductivity for water transport in the xylem (g.cm-2.h-1.bar-1). */
 	double Lxstar; /**< Proportional to the slope at the inflection point of Lx (g-1). */
 	double sigmap = 0.9; /**< Reflection coefficient for sugar entering the phloem composite membrane (dimensionless), default value = 0.9. */
+	/** Signed accepted physical mass flow retained for the next hour (mg C h-1 per bunch). */
+	double previousMassFlowCarbon = 0.0;
+	/** Accepted phloem sugar concentration paired with the mass-flow reference (g sugar g-1 water). */
+	double massFlowPhloemSugarReference = 0.0;
+	/** Accepted phloem water flow paired with the mass-flow reference (g water h-1 per berry). */
+	double massFlowWaterFlowReference = 0.0;
+	/** Distinguishes a valid zero-flow reference from an uninitialized saved-graph field. */
+	boolean previousMassFlowCarbonInitialized = false;
+	private static final double BERRY_MASS_FLOW_WATER_EPS = 1.0e-12;
+	private static final double BERRY_MASS_FLOW_SUGAR_EPS = 1.0e-9;
+	private static final double BERRY_MASS_FLOW_PHI_EPS = 1.0e-10;
 	
 	/**
 	 * Localized plant parameters for growth and water transport.
@@ -719,7 +732,7 @@ void updateInput()
 		
 		updateInput();
 		this.sugarConcentration_phloem = sugarConcentration_phloem_input;
-		//assign active as primary, mass flow as secondary
+		// Assign active import as primary and mass-flow import to the high-priority channel.
 		//growth stage and seed, and allocation parameters
 		calcBerryGrowthStage();
         calcAllocationAmongHexoseAcids();
@@ -734,30 +747,18 @@ void updateInput()
 		calcOsmoticPotential_phloem(sugarConcentration_phloem_input);
 		calcOsmoticPotential_furit();
 		//membrane and cell wall 
-	    calcSigmap();
-	    calcCellWallExtensibility();
-	    calcVol();
+		calcSigmap();
+		calcCellWallExtensibility();
+		calcVol();
 		caclSugarUptake_active(sugarConcentration_phloem_input);
-		
+		calcTurgorPressure_fruit();
 		//calcElasticity();
 		//water uptake from xylem and phloem, sugar uptake from phloem
 		caclWaterUptake_xylem();
 		caclWaterUptake_phloem();
-				
-		structureDM_PRI_PT = berryNum * caclSugarUptake_active_CTRAM() * CARBON_FRACTION_SUCROSE/mgTogram;  //potential uptake without km limitation
-		structureDM_SEC_PT = berryNum * max(0, (1.0-sigmap) * waterUptake_phloem *(sugarConcentration_phloem_input))* CARBON_FRACTION_SUCROSE/mgTogram; 
-		
-		//assume after veraison all maintenanceDM is satisfied by malic acid degradation 
-		if(FruitService.veraison == false) {    
-			maintenanceDM_PT = berryNum*calcMaintanceRespiration(0.3);
-		} else
-		{	maintenanceDM_PT = 0;}
-		
-		reserveDM_PT = 0;
-		
-		loading_PT =  0; 
+		updateBerryImportPotentialChannels();
 		//if (printFlag) { println("sugarUptake_active " + structureDM_PRI_PT); }
-		//if (printFlag) { println(structureDM_PRI_PT+structureDM_SEC_PT+maintenanceDM_PT); }
+		//if (printFlag) { println(structureDM_PRI_PT+maintenanceDM_PT); }
 	}
 	
 	@Override
@@ -806,11 +807,148 @@ void updateInput()
 	}
 	
 	void caclSugarUptake_massflow(double sugarConcentration_phloem_input) {
-		//sugarConcentration_phloem = sugarConcentration_phloem / CARBON_FRACTION_SUCROSE;
-		//sugarUptake_massflow = (1.0-sigma) * waterUptake_phloem * (sugarConcentration_fruit + sugarConcentration_phloem)*0.5;
-		sugarUptake_massflow = max(0, (1.0-sigmap) * waterUptake_phloem * (sugarConcentration_fruit + sugarConcentration_phloem_input)*0.5); // as phloem carbon concentration is far less than fruit
-																							// when adding the furit sugar concentration, sometimes it causes unblances in carbon
+		sugarUptake_massflow = berryMassFlowSugarPotential(sigmap, waterUptake_phloem,
+			sugarConcentration_fruit, sugarConcentration_phloem_input); // g sucrose h-1 per berry
+																					// when adding the furit sugar concentration, sometimes it causes unblances in carbon
 		//println("sugarUptake_massflow " + sugarUptake_massflow);																						//as mysterious carbon comes;
+	}
+
+	public static double sanitizeBerryCarbonDemand(double value) {
+		return (Double.isNaN(value) || Double.isInfinite(value) || value < 0.0)
+			? 0.0 : value;
+	}
+
+	/** Preserve the sign of finite transport fluxes; only invalid values become zero. */
+	public static double sanitizeSignedBerryMassFlow(double value) {
+		return (Double.isNaN(value) || Double.isInfinite(value)) ? 0.0 : value;
+	}
+
+	/** Direction-dependent no-pedicel mass flow, in signed g sucrose h-1 per berry. */
+	public static double berryMassFlowSugarPotential(double reflectionCoefficient,
+			double phloemWaterUptake, double fruitSugarConcentration,
+			double phloemSugarConcentration) {
+		if (Double.isNaN(phloemWaterUptake)
+				|| Double.isInfinite(phloemWaterUptake)
+				|| Math.abs(phloemWaterUptake) <= BERRY_MASS_FLOW_WATER_EPS) {
+			return 0.0;
+		}
+		double carrierSugar = phloemWaterUptake > 0.0
+			? phloemSugarConcentration : fruitSugarConcentration;
+		double potential = (1.0 - reflectionCoefficient)
+			* phloemWaterUptake * carrierSugar;
+		return sanitizeSignedBerryMassFlow(potential);
+	}
+
+	/** Exact lagged hydraulic mass-flow function used by CP and by CTRAM hooks. */
+	public static double laggedBerryMassFlowCarbon(double massFlowReference,
+			double phloemSugarReference, double phloemWaterFlowReference,
+			double candidatePhloemSugar) {
+		double safeReference = sanitizeSignedBerryMassFlow(massFlowReference);
+		if (phloemWaterFlowReference > BERRY_MASS_FLOW_WATER_EPS
+				&& phloemSugarReference > BERRY_MASS_FLOW_SUGAR_EPS
+				&& !Double.isNaN(phloemSugarReference)
+				&& !Double.isInfinite(phloemSugarReference)
+				&& !Double.isNaN(candidatePhloemSugar)
+				&& !Double.isInfinite(candidatePhloemSugar)) {
+			double slopeSugar = safeReference / phloemSugarReference;
+			if (!Double.isNaN(slopeSugar) && !Double.isInfinite(slopeSugar)) {
+				return sanitizeSignedBerryMassFlow(slopeSugar * candidatePhloemSugar);
+			}
+		}
+		return safeReference;
+	}
+
+	/** Analytical derivative dM/dPhi for inward lagged mass flow. */
+	public static double laggedBerryMassFlowDerivativePhi(double massFlowReference,
+			double phloemSugarReference, double phloemWaterFlowReference,
+			double phi, double candidatePhloemSugar) {
+		if (phloemWaterFlowReference <= BERRY_MASS_FLOW_WATER_EPS
+				|| phloemSugarReference <= BERRY_MASS_FLOW_SUGAR_EPS
+				|| phi <= BERRY_MASS_FLOW_PHI_EPS
+				|| Double.isNaN(phloemSugarReference)
+				|| Double.isInfinite(phloemSugarReference)
+				|| Double.isNaN(phi) || Double.isInfinite(phi)
+				|| Double.isNaN(candidatePhloemSugar)
+				|| Double.isInfinite(candidatePhloemSugar)) {
+			return 0.0;
+		}
+		double slopeSugar = sanitizeSignedBerryMassFlow(massFlowReference)
+			/ phloemSugarReference;
+		double derivative = slopeSugar * candidatePhloemSugar / (2.0 * phi);
+		return sanitizeSignedBerryMassFlow(derivative);
+	}
+
+	public static double realiseBerryCarbonDemand(double potential, double limiter) {
+		double safeLimiter = sanitizeBerryCarbonDemand(limiter);
+		if (safeLimiter > 1.0) safeLimiter = 1.0;
+		return sanitizeBerryCarbonDemand(potential) * safeLimiter;
+	}
+
+	public static double berryImportedCarbonPerFruit(double realisedActive,
+			double realisedMassFlow) {
+		return sanitizeBerryCarbonDemand(realisedActive)
+			+ sanitizeSignedBerryMassFlow(realisedMassFlow);
+	}
+
+	public static double berryInternalCarbonAfterCosts(double importedCarbon,
+			double growthRespiration, double maintenanceRespiration,
+			double mobilizationCost) {
+		return importedCarbon - growthRespiration - maintenanceRespiration
+			- mobilizationCost;
+	}
+
+	void mapBerryImportPotentialChannels(double activePotential) {
+		structureDM_PRI_PT = sanitizeBerryCarbonDemand(activePotential);
+		structureDM_SEC_PT = 0.0;
+		maintenanceDM_PT = 0.0;
+		reserveDM_PT = 0.0;
+		loading_PT = 0.0;
+		sugarUptake_passive = 0.0;
+	}
+
+	void updateBerryImportPotentialChannels() {
+		double activePotential = berryNum * caclSugarUptake_active_CTRAM()
+			* CARBON_FRACTION_SUCROSE / mgTogram; // mg C h-1 per bunch
+		mapBerryImportPotentialChannels(activePotential);
+	}
+
+	double currentBerryMassFlowCarbon(double sugarConcentration_phloem_input) {
+		caclSugarUptake_massflow(sugarConcentration_phloem_input);
+		return sanitizeSignedBerryMassFlow(berryNum * sugarUptake_massflow
+			* CARBON_FRACTION_SUCROSE / mgTogram); // mg C h-1 per bunch
+	}
+
+	void commitBerryMassFlowReference(double acceptedMassFlowCarbon,
+			double acceptedPhloemSugar, double acceptedPhloemWaterFlow) {
+		try {
+			previousMassFlowCarbon = sanitizeSignedBerryMassFlow(acceptedMassFlowCarbon);
+			massFlowPhloemSugarReference = sanitizeSignedBerryMassFlow(acceptedPhloemSugar);
+			massFlowWaterFlowReference = sanitizeSignedBerryMassFlow(acceptedPhloemWaterFlow);
+			previousMassFlowCarbonInitialized = true;
+		} catch (RuntimeException e) {
+			// Compatibility fallback for legacy saved graphs lacking the added references.
+			previousMassFlowCarbon = 0.0;
+			massFlowPhloemSugarReference = 0.0;
+			massFlowWaterFlowReference = 0.0;
+			previousMassFlowCarbonInitialized = false;
+		}
+	}
+
+	@Override
+	double getDirectMassFlowCarbon(double sugarConcentration_phloem_input) {
+		if (!previousMassFlowCarbonInitialized) return 0.0;
+		return laggedBerryMassFlowCarbon(previousMassFlowCarbon,
+			massFlowPhloemSugarReference, massFlowWaterFlowReference,
+			sugarConcentration_phloem_input);
+	}
+
+	@Override
+	double getDirectMassFlowDerivativePhi(double cp,
+			double sugarConcentration_phloem_input) {
+		if (!previousMassFlowCarbonInitialized) return 0.0;
+		return laggedBerryMassFlowDerivativePhi(previousMassFlowCarbon,
+			massFlowPhloemSugarReference, massFlowWaterFlowReference,
+			cp, sugarConcentration_phloem_input);
 	}
 	
 	
@@ -818,23 +956,45 @@ void updateInput()
 	@Override	
 	void calcUnloading(double sugarConcentration_phloem_input) {
 		 this.sugarConcentration_phloem = sugarConcentration_phloem_input;
-		 caclSugarUptake_active(sugarConcentration_phloem_input); //unit is gram
-		 caclSugarUptake_passive(); //unit is gram
-		 caclSugarUptake_massflow(sugarConcentration_phloem_input); //unit is gram
-		 //assume after veraison all maintenanceDM is satisfied by malic acid degradation 
+		 updateBerryImportPotentialChannels();
+
+		 double activeLimiter = sinkUnloading(sugarConcentration_phloem_input, km_pri);
+		 if (shouldUsePreT1PotentialGrowth()) activeLimiter = 1.0;
+		 structureDM_PRI = realiseBerryCarbonDemand(structureDM_PRI_PT, activeLimiter);
+		 structureDM_SEC = 0.0;
+		 double realisedMassFlow = getDirectMassFlowCarbon(
+			 sugarConcentration_phloem_input);
+
+		 // Whole-plant unloading contains imported carbon only; passive uptake is zero.
+		 double realisedActivePerFruit = berryNum > 0
+			 ? structureDM_PRI / berryNum : 0.0;
+		 double realisedMassFlowPerFruit = berryNum > 0
+			 ? realisedMassFlow / berryNum : 0.0;
+		 unloadingPerFruit = berryImportedCarbonPerFruit(
+			 realisedActivePerFruit, realisedMassFlowPerFruit);
+		 unloading = unloadingPerFruit * berryNum; // mg C h-1 per bunch
+
+		 // Preserve realised per-berry sugar fluxes used by the internal berry model.
+		 if (berryNum > 0) {
+			 sugarUptake_active = realisedActivePerFruit
+				 * mgTogram / CARBON_FRACTION_SUCROSE;
+			 sugarUptake_massflow = realisedMassFlowPerFruit
+				 * mgTogram / CARBON_FRACTION_SUCROSE;
+		 } else {
+			 sugarUptake_active = 0.0;
+			 sugarUptake_massflow = 0.0;
+		 }
+		 caclSugarUptake_passive();
+
+		 // Berry maintenance is an internal post-unloading carbon cost.
+		 // Assume after veraison all maintenanceDM is satisfied by malic acid degradation.
 		if(FruitService.veraison == false) {    
 		   maintenanceDM = calcMaintanceRespiration(sugarConcentration_fruit) * 
-         				sinkUnloading(sugarConcentration_phloem_input, KM_MTNCE);
+				sinkUnloading(sugarConcentration_phloem_input, KM_MTNCE);
 		} else { 
 			maintenanceDM = 0;
 		}
 		
-		 //converted to mg c, in agree with other parts
-		 //unloading needs to be expressed in mg carbon in fruit as we need to link with other components in order to calculate phloem
-		 //CARBON concentration, we can not completely change the unit into carbon, as sucrose concentration needed in the osmotic calculation
-		 unloadingPerFruit = maintenanceDM + CARBON_FRACTION_SUCROSE * 
-		 (sugarUptake_active + sugarUptake_passive + sugarUptake_massflow)/mgTogram; 
-		 unloading  = unloadingPerFruit * berryNum;  //unloading per bunch
 		 structureDM = (1 - kss)*unloading;  //just add this to make the growth cost calculation easier. 
 		 //return unloading;
 		 //if (printFlag) { println("sugarUptake_active " + sugarUptake_active + " sugarUptake_massflow " + sugarUptake_massflow ); }
@@ -1002,13 +1162,14 @@ void updateInput()
 
 
 	
-  void calcTurgorPressure_fruit() {	
-	//Turgor regulation biomass unit should be converted into gram, 
+	private double solveBerryTurgorForCarrier(double carrierSugarConcentration) {
+		// Turgor regulation biomass unit should be converted into gram.
     double prod1 =  (Axylem * Lxylem + Aphloem * Lphloem); 
     double prod2 =  (Axylem * Lxylem + Aphloem * Lphloem * sigmap);
     double prod3 =  sugarUptake_active + (Aphloem * permeability_sugar * 
                                     (sugarConcentration_phloem - sugarConcentration_fruit));
-    double prod4 =  (1 - sigmap) * Aphloem * Lphloem * 0.5 * (sugarConcentration_phloem + sugarConcentration_fruit);
+    double prod4 =  (1 - sigmap) * Aphloem * Lphloem
+                                    * carrierSugarConcentration;
     // calculate aCoef
     double div1 = (rwtr * (maintenanceCoff*biomass*mgTogram  + (growthCoff-1) * prod3) - transpirationMass * growthCoff)/Dw;
     double div2 = (prod3 - maintenanceCoff*biomass*mgTogram)/Ds;
@@ -1030,9 +1191,77 @@ void updateInput()
     double pF2 = (turgorPressure_phloem + ( aCoef - cCoef * (osmoticWaterPotential_phloem - osmoticWaterPotential_fruit))/ bCoef) > 0 ?
                       turgorPressure_phloem + ( aCoef - cCoef * (osmoticWaterPotential_phloem - osmoticWaterPotential_fruit))/ bCoef : 0;
 					  
-    turgorPressure_fruit = (pF1-YC)>0 ? pF1 : pF2;
-   
-	waterPotential_fruit = turgorPressure_fruit - osmoticWaterPotential_fruit;	
+    return (pF1-YC)>0 ? pF1 : pF2;
+	}
+
+	/** Phloem flow implied by a candidate fruit turgor, in g water h-1 per berry. */
+	public static double berryPhloemWaterFlowAtTurgor(double phloemArea,
+			double phloemConductance, double phloemTurgor, double fruitTurgor,
+			double reflectionCoefficient, double phloemOsmoticPotential,
+			double fruitOsmoticPotential) {
+		return phloemArea * phloemConductance * (phloemTurgor - fruitTurgor
+			- reflectionCoefficient
+			* (phloemOsmoticPotential - fruitOsmoticPotential));
+	}
+
+	/** Select a self-consistent carrier branch, otherwise use the zero-flow boundary. */
+	public static double selectBerryTurgorPressure(double inwardTurgor,
+			double inwardWaterFlow, double outwardTurgor,
+			double outwardWaterFlow, double zeroFlowTurgor) {
+		if (!Double.isNaN(inwardTurgor) && !Double.isInfinite(inwardTurgor)
+				&& !Double.isNaN(inwardWaterFlow) && !Double.isInfinite(inwardWaterFlow)
+				&& inwardWaterFlow > BERRY_MASS_FLOW_WATER_EPS) {
+			return inwardTurgor;
+		}
+		if (!Double.isNaN(inwardWaterFlow) && !Double.isInfinite(inwardWaterFlow)
+				&& Math.abs(inwardWaterFlow) <= BERRY_MASS_FLOW_WATER_EPS) {
+			return zeroFlowTurgor;
+		}
+		if (!Double.isNaN(outwardTurgor) && !Double.isInfinite(outwardTurgor)
+				&& !Double.isNaN(outwardWaterFlow) && !Double.isInfinite(outwardWaterFlow)
+				&& outwardWaterFlow < -BERRY_MASS_FLOW_WATER_EPS) {
+			return outwardTurgor;
+		}
+		if (!Double.isNaN(outwardWaterFlow) && !Double.isInfinite(outwardWaterFlow)
+				&& Math.abs(outwardWaterFlow) <= BERRY_MASS_FLOW_WATER_EPS) {
+			return zeroFlowTurgor;
+		}
+		/*
+		 * Round-off can make both assumed directions slightly inconsistent.
+		 * The Up=0 boundary is continuous and avoids carrier-branch chatter.
+		 */
+		return zeroFlowTurgor;
+	}
+
+	void calcTurgorPressure_fruit() {
+		double zeroFlowTurgor = turgorPressure_phloem - sigmap
+			* (osmoticWaterPotential_phloem - osmoticWaterPotential_fruit);
+		double inwardTurgor = solveBerryTurgorForCarrier(
+			sugarConcentration_phloem);
+		double inwardWaterFlow = berryPhloemWaterFlowAtTurgor(Axylem,
+			Lphloem, turgorPressure_phloem, inwardTurgor, sigmap,
+			osmoticWaterPotential_phloem, osmoticWaterPotential_fruit);
+
+		if (!Double.isNaN(inwardWaterFlow) && !Double.isInfinite(inwardWaterFlow)
+				&& inwardWaterFlow > BERRY_MASS_FLOW_WATER_EPS) {
+			turgorPressure_fruit = inwardTurgor;
+		} else if (!Double.isNaN(inwardWaterFlow)
+				&& !Double.isInfinite(inwardWaterFlow)
+				&& Math.abs(inwardWaterFlow) <= BERRY_MASS_FLOW_WATER_EPS) {
+			turgorPressure_fruit = zeroFlowTurgor;
+		} else {
+			double outwardTurgor = solveBerryTurgorForCarrier(
+				sugarConcentration_fruit);
+			double outwardWaterFlow = berryPhloemWaterFlowAtTurgor(Axylem,
+				Lphloem, turgorPressure_phloem, outwardTurgor, sigmap,
+				osmoticWaterPotential_phloem, osmoticWaterPotential_fruit);
+			turgorPressure_fruit = selectBerryTurgorPressure(inwardTurgor,
+				inwardWaterFlow, outwardTurgor, outwardWaterFlow,
+				zeroFlowTurgor);
+		}
+
+		waterPotential_fruit = turgorPressure_fruit
+			- osmoticWaterPotential_fruit;
 	}
 	
   //******************************************************************************/
@@ -1044,7 +1273,9 @@ void updateInput()
 		return waterUptake_xylem;
 	}
 	double caclWaterUptake_phloem() {
-	    waterUptake_phloem = Axylem * Lphloem * (turgorPressure_phloem - turgorPressure_fruit - sigmap*(osmoticWaterPotential_phloem- osmoticWaterPotential_fruit));
+	    waterUptake_phloem = berryPhloemWaterFlowAtTurgor(Axylem,
+			Lphloem, turgorPressure_phloem, turgorPressure_fruit, sigmap,
+			osmoticWaterPotential_phloem, osmoticWaterPotential_fruit);
 	    //println("turgorPressure_phloem " + turgorPressure_phloem);	
 		//println("turgorPressure_fruit " + turgorPressure_fruit);	
 	    return waterUptake_phloem;
@@ -1058,7 +1289,8 @@ void updateInput()
   //******************************************************************************/
 	void updateStateVariables() {
 		//dry mass
-		double growth = unloadingPerFruit - growthCost/berryNum - maintenanceDM - carbonMobilizationCost;  //growth cost calculated in all growing organ in relation to unloading 
+		double growth = berryInternalCarbonAfterCosts(unloadingPerFruit,
+			growthCost/berryNum, maintenanceDM, carbonMobilizationCost);  //growth cost calculated in all growing organ in relation to unloading
 		
 		double deltaBiomass = growth/CARBON_FRACTION_SUCROSE;   //mg
 		
@@ -1187,6 +1419,23 @@ void updateInput()
 		//this.cpt = SOURCEcp - cpn * length * SOURCEj * Rs;
 		//this.cpb = SOURCEcp - (cpn - 1) * length * SOURCEj * Rs;
 		this.j = j;
+		try {
+			double initializedSugar = sugarFromCp(this.cpt);
+			calcPTCTRAM(initializedSugar);
+			double initializedMassFlow = currentBerryMassFlowCarbon(
+				initializedSugar);
+			commitBerryMassFlowReference(initializedMassFlow,
+				initializedSugar, waterUptake_phloem);
+		} catch (RuntimeException e) {
+			/*
+			 * Compatibility fallback for legacy/incompletely linked graphs. The
+			 * reference remains explicitly uninitialized and solver trials cannot set it.
+			 */
+			previousMassFlowCarbon = 0.0;
+			massFlowPhloemSugarReference = 0.0;
+			massFlowWaterFlowReference = 0.0;
+			previousMassFlowCarbonInitialized = false;
+		}
 	}
 	@Override
 	public void updateCTRs(double carbonConcentration) {
@@ -1285,11 +1534,16 @@ void updateInput()
 			calcTurgorPressure_fruit();
 			//calcElasticity();
 			//water uptake from xylem and phloem, sugar uptake from phloem
-			caclWaterUptake_xylem();
-			caclWaterUptake_phloem();
-			calcUnloading(sugarConcentration_phloem);
-			//update all state variables
-			updateStateVariables();
+				caclWaterUptake_xylem();
+				caclWaterUptake_phloem();
+				calcUnloading(sugarConcentration_phloem);
+				double nextMassFlowCarbon =
+					currentBerryMassFlowCarbon(sugarConcentration_phloem);
+				//update all state variables
+				updateStateVariables();
+				// Install the accepted physical flux only after this fruit update succeeds.
+				commitBerryMassFlowReference(nextMassFlowCarbon,
+					sugarConcentration_phloem, waterUptake_phloem);
 			//if (printFlag) { println("Biomass: "+biomass + " sugar uptake: "+unloading); }
 				
 			//N balance

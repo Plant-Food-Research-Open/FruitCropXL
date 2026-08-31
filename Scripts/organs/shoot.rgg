@@ -1287,8 +1287,10 @@ module Internode extends GrowingOrgan
 	}
 	
 	void calcWaterFlux(double f_waterFlux) 
-	{	
-		waterFlux = f_waterFlux * sum((*this (-->)+ v:PhotosynthateOrgan *)[waterFluxPotential]) ; 				
+	{
+		// Whole-subtree demand is folded once in plantHydraulics. Preserve the
+		// most recently folded value for legacy direct callers.
+		if (Double.isNaN(waterFlux) || Double.isInfinite(waterFlux)) waterFlux = 0.0;
 	}
 	//hydraulic conductivity per meter length of shoot calculated by diameter
 	
@@ -1299,6 +1301,34 @@ module Internode extends GrowingOrgan
 	
 	void calcKa() {
 		Ka = Kmax * 1/(1 + Math.pow(this.waterPotential/phi_stem, cx1));
+	}
+
+	/**
+	 * Calculates the signed gravitational head (MPa) from this segment's current
+	 * world-coordinate vertical displacement. Cordon and Trunk inherit this
+	 * implementation from Internode.
+	 */
+	double calcGravityHead()
+	{
+		try {
+			update3D();
+		} catch (RuntimeException e) {
+			// Compatibility fallback: do not use stale or placeholder coordinates.
+			return 0.0;
+		}
+
+		if (Double.isNaN(this.z) || Double.isInfinite(this.z) ||
+			Double.isNaN(this.endZ) || Double.isInfinite(this.endZ)) {
+			return 0.0;
+		}
+
+		double deltaZ = this.endZ - this.z;
+		if (Double.isNaN(deltaZ) || Double.isInfinite(deltaZ)) {
+			return 0.0;
+		}
+
+		double gravityHead = Dw * gacc * deltaZ * 1e-3;
+		return (Double.isNaN(gravityHead) || Double.isInfinite(gravityHead)) ? 0.0 : gravityHead;
 	}
 	
 	void calcWaterPotential() 
@@ -1311,7 +1341,7 @@ module Internode extends GrowingOrgan
 			this.waterPotential_b = inputWaterPotential;
 		}
 			
-		this.waterPotential = waterPotential_b - 1/Ka * this.waterFlux - Dw * gacc * this.length*1e-3; 
+		this.waterPotential = waterPotential_b - 1/Ka * this.waterFlux - calcGravityHead();
 		if(Double.isNaN(this.waterPotential)) this.waterPotential = inputWaterPotential;
 		
 /* 		println("this rank:" + rank + " getParent().waterPotential " + getParent().waterPotential + 
@@ -1718,7 +1748,8 @@ module Cordon extends Internode
 	@Override
 	void calcWaterFlux(double f_waterFlux) 
 	{
-		waterFlux = f_waterFlux * sum((*this (-->)+ v:PhotosynthateOrgan *)[waterFluxPotential]) ;
+		// Production hydraulics assigns the folded subtree flow directly.
+		if (Double.isNaN(waterFlux) || Double.isInfinite(waterFlux)) waterFlux = 0.0;
 						
 	}
 	//hydraulic conductivity per meter length of shoot calculated by diameter
@@ -1742,7 +1773,7 @@ module Cordon extends Internode
 			this.waterPotential_b = inputWaterPotential;
 		} 
 		
-		this.waterPotential = waterPotential_b - 1/Ka * this.waterFlux - Dw * gacc * this.length*1e-3;; 
+		this.waterPotential = waterPotential_b - 1/Ka * this.waterFlux - calcGravityHead();
 		if(Double.isNaN(this.waterPotential)) this.waterPotential = inputWaterPotential;
 	}
 	@Override
@@ -2072,8 +2103,10 @@ module Trunk extends Internode
 	@Override
 	void calcWaterFlux(double f_waterFlux) 
 	{
-		//first step pb[0] could be null
-		waterFlux = plantBaseID <= 0? 1e-5 : f_waterFlux * getPlantBase().waterFluxPotential;
+		// Production hydraulics assigns the folded subtree flow directly. Keep a
+		// finite local fallback for legacy direct callers before PlantBase linkage.
+		if (plantBaseID <= 0) waterFlux = 1e-5;
+		else if (Double.isNaN(waterFlux) || Double.isInfinite(waterFlux)) waterFlux = 0.0;
 		
 	}
 	@Override
@@ -2087,7 +2120,7 @@ module Trunk extends Internode
 			this.waterPotential_b = inputWaterPotential;
 		}
 			
-		this.waterPotential = waterPotential_b - 1/Ka * this.waterFlux - Dw * gacc * this.length*1e-3;;
+		this.waterPotential = waterPotential_b - 1/Ka * this.waterFlux - calcGravityHead();
 		if(Double.isNaN(this.waterPotential)) this.waterPotential = inputWaterPotential;
 	}
 	//hydraulic conductivity per meter length of shoot calculated by diameter

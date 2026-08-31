@@ -840,6 +840,9 @@ module PlantBase extends PlantIdentifier
 	/** Cumulative number of guarded PlantBase fallbacks for this plant (unitless). */
 	public int ctPlantBaseFallbackCount = 0;
 
+	/** True only after a genuinely converged hourly CT solution is committed. */
+	public boolean ctHasAcceptedHourlyState = false;
+
 	/** Residual A + B Phi at the accepted or retained PlantBase state (unit: g C h⁻¹). */
 	public double ctPlantBaseResidual = 0.0;
 
@@ -870,7 +873,27 @@ module PlantBase extends PlantIdentifier
     public void initializeCarbonTransport() {
 		this.r = 0;
 		this.xp = 0;
-		this.cpb = this.cpt = 0.001;
+		double initialPhi = 0.001;
+		if (Double.isNaN(initialPhi) || Double.isInfinite(initialPhi)
+				|| initialPhi < carbonTransport.CT_PHI_FLOOR) {
+			initialPhi = carbonTransport.SOURCEcp;
+			if (Double.isNaN(initialPhi) || Double.isInfinite(initialPhi)
+					|| initialPhi < carbonTransport.CT_PHI_FLOOR) {
+				initialPhi = carbonTransport.CT_PHI_FLOOR;
+			}
+		}
+		this.cpb = this.cpt = initialPhi;
+		double initialSugar = carbonTransport.sugarFromCp(this.cpt);
+		if (!Double.isNaN(initialSugar) && !Double.isInfinite(initialSugar)
+				&& initialSugar > 0.0) {
+			this.sugarConcentration_phloem = initialSugar;
+			this.sugarConcentration_phloem_pre = initialSugar;
+		}
+		try {
+			this.ctHasAcceptedHourlyState = false;
+		} catch (NoSuchFieldError compatibilityError) {
+			// Compatibility with legacy saved graphs that predate this state flag.
+		}
 		this.ctPlantBaseFallbackUsed = 0;
 		this.ctPlantBaseFallbackReason = 0;
 		this.ctPlantBaseFallbackCount = 0;

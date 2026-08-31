@@ -21,6 +21,11 @@ import static berryComplex.*;
 import static virtualFruit.*;
 import static diagnosticTables.*;
 
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.TreeMap;
+
 /**
  * Carbon transport model (XL port of the L+C coupled phloem/xylem framework).
  *
@@ -51,7 +56,9 @@ import static diagnosticTables.*;
  *   <li>{@code updateCarbonPotential(pb, context)} — UNFOLD potentials from PlantBase to its children.</li>
  *   <li>{@code updateFlow(pb, context)} — update organ fluxes j = a + b·cpt and the solve residual.</li>
  *   <li>{@code updateResistence(pb)} — refresh phloem resistance and related transport params.</li>
- *   <li>Repeat 1–5 until the residual is at most {@code MAXERROR} or the iteration limit is exceeded.</li>
+ *   <li>Repeat 1–5 until the existing mixed flux and PlantBase boundary
+ *       criteria pass, or the exact iteration limit is reached. Whole-plant
+ *       and simple-root closure remain explicit diagnostics.</li>
  *   <li>{@code updateCarbonStatus(pb)} — compute per-organ sugar, loading/leakage/unloading and Mcf.</li>
  * </ol></p>
  *
@@ -248,8 +255,9 @@ import static diagnosticTables.*;
  *       {@code j = a + b * cpt} and accumulates the convergence residual.</li>
  *   <li>{@code updateResistence(pb)} updates concentration-dependent resistance
  *       and transport parameters from the latest local carbon concentration.</li>
- *   <li>The loop repeats until the convergence residual is at most {@code MAXERROR} or the iteration
- *       guard is reached.</li>
+ *   <li>The loop repeats until mixed absolute/relative flux and PlantBase
+ *       boundary criteria pass, or the exact iteration guard is reached.
+ *       Closure and coverage are reported independently.</li>
  *   <li>{@code updateCarbonStatus(pb)} updates final organ sugar concentration,
  *       carbon allocation state, carbon flux, and Munch counter-flow terms.</li>
  * </ol>
@@ -301,7 +309,8 @@ import static diagnosticTables.*;
 /* #### defines pertinents for the carbon transport model ##################*/
 global double INFTY     = 1e10;      // very large number
 global double EPSILON   = 1.0/INFTY; // very small number different from zero
-global double MAXERROR  = 1e-5;      // error threshold for evaluating carbon flow
+// Retained for saved-project compatibility; active solves use mixed CT_* tolerances.
+global double MAXERROR  = 1e-5;
 
 global boolean debug_CT = false;
 
@@ -311,18 +320,631 @@ global double Serror = 0.0;
 global int error_count = 0;
 
 /** Per-call mutable state for one plant's carbon-transport solve. */
-private class CarbonTransportSolveContext {
+class CarbonTransportSolveContext {
   double convergenceError = 0.0;
+  double relativeFluxError = 0.0;
+  double oldFluxMagnitude = 0.0;
+  double newFluxMagnitude = 0.0;
+  double fluxScale = 1e-12;
+  double fluxNormalizedError = 0.0;
+  double plantBaseResidual = 0.0;
+  double plantBaseRelativeResidual = 0.0;
+  double plantBaseScale = 1e-12;
+  double plantBaseNormalizedError = 0.0;
+  /** Signed graph-closure residual sum(local j) - folded PlantBase j (g C h-1). */
+  double closureResidual = 0.0;
+  double closureScale = 1e-12;
+  double relativeClosureResidual = 0.0;
+  double closureNormalizedError = 0.0;
+  double sumLocalJ = 0.0;
+  double pbFoldedJ = 0.0;
+  double totalLoading = 0.0;
+  double totalUnloading = 0.0;
+  double netFluxResidual = 0.0;
+  double relativeNetFluxResidual = 0.0;
+  double netFluxIdentityResidual = 0.0;
+  double nonlinearMerit = Double.POSITIVE_INFINITY;
+  double previousNonlinearMerit = Double.NaN;
+  double dampingFactor = 0.5;
+  double rawPlantBasePhi = 1e-8;
+  double acceptedPlantBasePhi = 1e-8;
+  boolean converged = false;
+  boolean maxIterationReached = false;
+  boolean invalidUnfoldTrial = false;
+  int invalidUnfoldTrialCount = 0;
+  int totalInvalidUnfoldTrialCount = 0;
+  boolean retryUsed = false;
+  boolean retryConverged = false;
+  boolean solverFallbackUsed = false;
+  boolean bootstrapFallbackUsed = false;
+  int finalIterationLimit = 30;
+  int carbonStatusUpdateCount = 0;
   int iterationCount = 0;
+  boolean failedTrialCaptured = false;
+  double failedTrialPlantBasePhi = 0.0;
+  double failedTrialPlantBaseSugar = 0.0;
+  double failedTrialMinSugar = 0.0;
+  double failedTrialMaxSugar = 0.0;
+  double failedTrialMeanSugar = 0.0;
+  double failedTrialMerit = 0.0;
   int foldStep = 0;
   int unfoldStep = 0;
-
+  long totalGrowingOrganCount = 0;
+  long foldedGrowingOrganCount = 0;
+  long unfoldedGrowingOrganCount = 0;
+  boolean foldCoverageComplete = false;
+  boolean unfoldCoverageComplete = false;
+  boolean simpleRootActive = false;
+  boolean simpleRootTopologyValid = true;
+  boolean simpleRootFoldValid = true;
+  boolean simpleRootUnfoldValid = true;
+  int simpleRootDoubleFoldCount = 0;
+  int simpleRootMinLayer = -1;
+  int simpleRootMaxLayer = -1;
+  int simpleRootLayerCount = 0;
+  long simpleStructuralRootExpected = 0;
+  long simpleStructuralRootFolded = 0;
+  long simpleStructuralRootUnfolded = 0;
+  long simpleFineRootExpected = 0;
+  long simpleFineRootFolded = 0;
+  long simpleFineRootUnfolded = 0;
+  double simpleRootLocalJ = 0.0;
+  double simpleRootFoldedJ = 0.0;
+  double simpleRootClosureResidual = 0.0;
+  double simpleRootRelativeClosureResidual = 0.0;
   double leafA = 0.0, leafB = 0.0, leafJ = 0.0;
   double petioleA = 0.0, petioleB = 0.0, petioleJ = 0.0;
   double shootA = 0.0, shootB = 0.0, shootJ = 0.0;
   double fineRootA = 0.0, fineRootB = 0.0, fineRootJ = 0.0;
   double structuralRootA = 0.0, structuralRootB = 0.0, structuralRootJ = 0.0;
   double fruitA = 0.0, fruitB = 0.0, fruitJ = 0.0;
+  double flowerA = 0.0, flowerB = 0.0, flowerJ = 0.0;
+  double sumLeafStoredJ = 0.0, sumLeafTaylorJ = 0.0;
+  double sumPetioleStoredJ = 0.0, sumPetioleTaylorJ = 0.0;
+  double sumShootStoredJ = 0.0, sumShootTaylorJ = 0.0;
+  double sumFruitStoredJ = 0.0, sumFruitTaylorJ = 0.0;
+  double sumFlowerStoredJ = 0.0, sumFlowerTaylorJ = 0.0;
+  double sumFineRootStoredJ = 0.0, sumFineRootTaylorJ = 0.0;
+  double sumStructuralRootStoredJ = 0.0, sumStructuralRootTaylorJ = 0.0;
+  double sumFruitExactUnloading = 0.0;
+  double sumFruitExactActive = 0.0;
+  double sumFruitExactMassFlow = 0.0;
+  double sumFruitStoredUnloading = 0.0;
+  double fruitLinearizationResidual = 0.0;
+  double fruitLinearizationRelativeResidual = 0.0;
+  double maxFruitLinearizationResidual = 0.0;
+  double maxFruitLinearizationRelativeResidual = 0.0;
+  long maxFruitResidualOrganID = -1L;
+  double fruitStoredVsExactResidual = 0.0;
+  double maxFruitTaylorPointResidual = 0.0;
+  double maxFruitTaylorPointRelativeResidual = 0.0;
+}
+
+/**
+ * Validated, immutable-within-one-solve carbon-transport connectivity.
+ *
+ * <p>Graph discovery is performed once at the start of {@code updateC_Transport}.
+ * Every nonlinear pass then uses only these raw Java-1.5-compatible collections.
+ * This keeps the CT9 ownership and one-transform rules while making the hot path
+ * linear in the number of organs and transport edges.</p>
+ */
+private class CarbonTransportTopology {
+  ArrayList growingOrgans = new ArrayList();
+  TreeMap internodesById = new TreeMap();
+  TreeMap petiolesById = new TreeMap();
+  TreeMap leavesById = new TreeMap();
+  TreeMap fruitsById = new TreeMap();
+  TreeMap flowersById = new TreeMap();
+  TreeMap structuralRootsById = new TreeMap();
+  TreeMap fineRootsById = new TreeMap();
+
+  HashMap parentByInternode = new HashMap();
+  HashMap childInternodesByInternode = new HashMap();
+  HashMap childPetiolesByInternode = new HashMap();
+  HashMap childFruitsByInternode = new HashMap();
+  HashMap childFlowersByInternode = new HashMap();
+  HashMap directLeavesByInternode = new HashMap();
+  HashMap leavesByPetiole = new HashMap();
+  HashMap leafTransportOwner = new HashMap();
+  HashMap petioleOwnerByLeaf = new HashMap();
+
+  ArrayList shootPostOrder = new ArrayList();
+  ArrayList shootPreOrder = new ArrayList();
+  ArrayList basalShootIds = new ArrayList();
+
+  ArrayList structuralRoots = new ArrayList();
+  ArrayList fineRoots = new ArrayList();
+  HashMap fineRootOwnerById = new HashMap();
+  HashMap structuralRootByLayer = new HashMap();
+  HashMap fineRootByLayer = new HashMap();
+  ArrayList simpleStructuralRoots = new ArrayList();
+  ArrayList simpleFineRoots = new ArrayList();
+  ArrayList simpleRootFoldOrder = new ArrayList();
+  ArrayList simpleRootUnfoldOrder = new ArrayList();
+  StructuralRoot simpleBasalRoot = null;
+
+  int simpleRootMinLayer = -1;
+  int simpleRootMaxLayer = -1;
+  int maxLastFoldStep = -1;
+  int maxLastUnfoldStep = -1;
+  int ambiguousLeafOwners = 0;
+  int missingLeafOwners = 0;
+  int ambiguousFineRootOwners = 0;
+  int missingFineRootOwners = 0;
+  boolean valid = true;
+  String error = "";
+
+  void invalidate(String message) {
+    if (valid) error = message;
+    valid = false;
+  }
+
+  void registerPetioleLeaf(Petiole petioleNode, Leaf leafNode) {
+    if (petioleNode == null || leafNode == null) return;
+    Long petioleKey = Long.valueOf(petioleNode.getId());
+    Long leafKey = Long.valueOf(leafNode.getId());
+    if (!petiolesById.containsKey(petioleKey)
+        || !leavesById.containsKey(leafKey)) {
+      invalidate("Petiole-Leaf relation contains an organ outside the collected plant");
+      return;
+    }
+    Long previousOwner = (Long) petioleOwnerByLeaf.get(leafKey);
+    if (previousOwner == null) {
+      petioleOwnerByLeaf.put(leafKey, petioleKey);
+    } else if (previousOwner.longValue() != petioleKey.longValue()) {
+      ambiguousLeafOwners++;
+      invalidate("ambiguous Petiole owners for leafId=" + leafKey
+          + " ownerIds=" + previousOwner + "," + petioleKey);
+    }
+  }
+}
+
+private static ArrayList ctList(HashMap map, Long key) {
+  ArrayList values = (ArrayList) map.get(key);
+  if (values == null) {
+    values = new ArrayList();
+    map.put(key, values);
+  }
+  return values;
+}
+
+/** Generate deterministic child-before-parent and parent-before-child orders. */
+private static boolean generateCarbonShootTraversalOrders(
+    CarbonTransportTopology topology) {
+  HashMap remainingChildren = new HashMap();
+  ArrayList queue = new ArrayList();
+  for (Object keyObject : topology.internodesById.keySet()) {
+    Long key = (Long) keyObject;
+    ArrayList children = ctList(topology.childInternodesByInternode, key);
+    java.util.Collections.sort(children);
+    remainingChildren.put(key, Integer.valueOf(children.size()));
+    if (children.size() == 0) queue.add(key);
+  }
+
+  int queueIndex = 0;
+  while (queueIndex < queue.size()) {
+    Long childId = (Long) queue.get(queueIndex++);
+    topology.shootPostOrder.add(childId);
+    Long parentId = (Long) topology.parentByInternode.get(childId);
+    if (parentId != null) {
+      Integer remaining = (Integer) remainingChildren.get(parentId);
+      if (remaining == null) {
+        topology.invalidate("missing shoot traversal state for parentId=" + parentId);
+        return false;
+      }
+      int next = remaining.intValue() - 1;
+      remainingChildren.put(parentId, Integer.valueOf(next));
+      if (next == 0) queue.add(parentId);
+    }
+  }
+  if (topology.shootPostOrder.size() != topology.internodesById.size()) {
+    topology.invalidate("cycle or unresolved shoot topology: postOrder="
+        + topology.shootPostOrder.size() + " internodes="
+        + topology.internodesById.size());
+    return false;
+  }
+
+  java.util.Collections.sort(topology.basalShootIds);
+  queue.clear();
+  queue.addAll(topology.basalShootIds);
+  queueIndex = 0;
+  HashSet visited = new HashSet();
+  while (queueIndex < queue.size()) {
+    Long parentId = (Long) queue.get(queueIndex++);
+    if (!visited.add(parentId)) {
+      topology.invalidate("duplicate shoot preorder visit at internodeId=" + parentId);
+      return false;
+    }
+    topology.shootPreOrder.add(parentId);
+    queue.addAll(ctList(topology.childInternodesByInternode, parentId));
+  }
+  if (topology.shootPreOrder.size() != topology.internodesById.size()) {
+    topology.invalidate("disconnected shoot topology: preOrder="
+        + topology.shootPreOrder.size() + " internodes="
+        + topology.internodesById.size());
+    return false;
+  }
+  return true;
+}
+
+private static void registerCarbonFineRootOwner(
+    CarbonTransportTopology topology, FineRoot fineRootNode,
+    StructuralRoot rootOwner) {
+  if (topology == null || fineRootNode == null || rootOwner == null) return;
+  Long fineKey = Long.valueOf(fineRootNode.getId());
+  Long ownerKey = Long.valueOf(rootOwner.getId());
+  Long previousOwner = (Long) topology.fineRootOwnerById.get(fineKey);
+  if (previousOwner == null) {
+    topology.fineRootOwnerById.put(fineKey, ownerKey);
+  } else if (previousOwner.longValue() != ownerKey.longValue()) {
+    topology.ambiguousFineRootOwners++;
+  }
+}
+
+/** Validate the existing one-StructuralRoot/one-FineRoot-per-layer route once. */
+private static void validateSimpleCarbonRootTopology(
+    PlantBase pb, CarbonTransportTopology topology) {
+  if (topology.ambiguousFineRootOwners > 0
+      || topology.missingFineRootOwners > 0) {
+    topology.invalidate("invalid simple-root transport ownership: ambiguous="
+        + topology.ambiguousFineRootOwners + " missing="
+        + topology.missingFineRootOwners);
+  }
+  int structuralCount = topology.structuralRoots.size();
+  int fineCount = topology.fineRoots.size();
+  if (structuralCount <= 0) {
+    topology.invalidate("simple-root topology contains no StructuralRoot");
+    return;
+  }
+
+  for (int rootIndex = 0; rootIndex < structuralCount; rootIndex++) {
+    StructuralRoot rootNode = (StructuralRoot) topology.structuralRoots.get(rootIndex);
+    Integer layerKey = Integer.valueOf(rootNode.layer);
+    if (topology.structuralRootByLayer.put(layerKey, rootNode) != null) {
+      topology.invalidate("multiple StructuralRoot nodes at simple-root layer="
+          + rootNode.layer);
+    }
+    if (topology.simpleRootMinLayer < 0
+        || rootNode.layer < topology.simpleRootMinLayer) {
+      topology.simpleRootMinLayer = rootNode.layer;
+    }
+    if (topology.simpleRootMaxLayer < 0
+        || rootNode.layer > topology.simpleRootMaxLayer) {
+      topology.simpleRootMaxLayer = rootNode.layer;
+    }
+  }
+  for (int fineIndex = 0; fineIndex < fineCount; fineIndex++) {
+    FineRoot fineNode = (FineRoot) topology.fineRoots.get(fineIndex);
+    Integer layerKey = Integer.valueOf(fineNode.layer);
+    if (topology.fineRootByLayer.put(layerKey, fineNode) != null) {
+      topology.invalidate("multiple FineRoot nodes at simple-root layer="
+          + fineNode.layer);
+    }
+  }
+
+  int layerCount = topology.simpleRootMaxLayer
+      - topology.simpleRootMinLayer + 1;
+  if (topology.simpleRootMinLayer != 0
+      || structuralCount != layerCount
+      || fineCount != layerCount
+      || layerCount != numofSoilLayers) {
+    topology.invalidate("invalid simple-root layer coverage: min="
+        + topology.simpleRootMinLayer + " max=" + topology.simpleRootMaxLayer
+        + " structuralRoots=" + structuralCount + " fineRoots=" + fineCount
+        + " configuredLayers=" + numofSoilLayers);
+  }
+
+  StructuralRoot previousRoot = null;
+  int layer;
+  for (layer = topology.simpleRootMinLayer;
+      layer <= topology.simpleRootMaxLayer; layer++) {
+    StructuralRoot rootNode = (StructuralRoot)
+        topology.structuralRootByLayer.get(Integer.valueOf(layer));
+    FineRoot fineNode = (FineRoot)
+        topology.fineRootByLayer.get(Integer.valueOf(layer));
+    boolean layerValid = rootNode != null && fineNode != null;
+    if (layerValid) {
+      layerValid = fineNode.parentID == rootNode.getId()
+          && rootNode.frID == fineNode.getId()
+          && fineNode.plantNumber == rootNode.plantNumber
+          && fineNode.layer == rootNode.layer;
+    }
+    if (layerValid && previousRoot == null) {
+      layerValid = pb.childStructuralRootID == rootNode.getId()
+          && rootNode.parentID == pb.getId();
+      topology.simpleBasalRoot = rootNode;
+    } else if (layerValid) {
+      layerValid = rootNode.parentID == previousRoot.getId()
+          && ctStructuralRootHasChildId(previousRoot, rootNode.getId());
+    }
+    if (!layerValid) {
+      topology.invalidate("invalid simple-root ownership at layer=" + layer);
+    }
+    if (rootNode != null) {
+      topology.simpleStructuralRoots.add(rootNode);
+      topology.simpleRootUnfoldOrder.add(rootNode);
+      previousRoot = rootNode;
+    }
+    if (fineNode != null) topology.simpleFineRoots.add(fineNode);
+  }
+  for (int rootIndex = topology.simpleStructuralRoots.size() - 1;
+      rootIndex >= 0; rootIndex--) {
+    topology.simpleRootFoldOrder.add(
+        topology.simpleStructuralRoots.get(rootIndex));
+  }
+}
+
+/** Resolve Petiole--Leaf topology exactly once per hourly solve. */
+private static void collectCarbonPetioleLeafRelations(
+    PlantBase pb, CarbonTransportTopology topology) [
+  petioleOwner:Petiole (-->){1,5} ownedLeaf:Leaf, (
+    petioleOwner.plantNumber == pb.plantNumber
+    && ownedLeaf.plantNumber == pb.plantNumber
+  ) ::> {
+    topology.registerPetioleLeaf(petioleOwner, ownedLeaf);
+  }
+]
+
+private static CarbonTransportTopology buildCarbonTransportTopology(
+    PlantBase pb, GrowingOrgan[] collectedOrgans) {
+  CarbonTransportTopology topology = new CarbonTransportTopology();
+  TreeMap allById = new TreeMap();
+  int organIndex;
+  for (organIndex = 0; organIndex < collectedOrgans.length; organIndex++) {
+    GrowingOrgan organ = collectedOrgans[organIndex];
+    if (organ == null) {
+      topology.invalidate("null GrowingOrgan at collected index=" + organIndex);
+      continue;
+    }
+    if (organ.plantNumber != pb.plantNumber) {
+      topology.invalidate("GrowingOrgan from another plant at id=" + organ.getId());
+      continue;
+    }
+    long organId = organ.getId();
+    Long organKey = Long.valueOf(organId);
+    if (organId <= 0L || allById.put(organKey, organ) != null) {
+      topology.invalidate("duplicate or invalid GrowingOrgan id=" + organId);
+      continue;
+    }
+    topology.maxLastFoldStep = Math.max(
+        topology.maxLastFoldStep, organ.lastFoldStep);
+    topology.maxLastUnfoldStep = Math.max(
+        topology.maxLastUnfoldStep, organ.lastUnfoldStep);
+    if (organ instanceof Internode) topology.internodesById.put(organKey, organ);
+    else if (organ instanceof Petiole) topology.petiolesById.put(organKey, organ);
+    else if (organ instanceof Leaf) topology.leavesById.put(organKey, organ);
+    else if (organ instanceof FruitService) topology.fruitsById.put(organKey, organ);
+    else if (organ instanceof Flower) topology.flowersById.put(organKey, organ);
+    else if (organ instanceof StructuralRoot) topology.structuralRootsById.put(organKey, organ);
+    else if (organ instanceof FineRoot) topology.fineRootsById.put(organKey, organ);
+    else topology.invalidate("unsupported GrowingOrgan class="
+        + organ.getClass().getSimpleName() + " id=" + organId);
+  }
+  topology.growingOrgans.addAll(allById.values());
+  topology.structuralRoots.addAll(topology.structuralRootsById.values());
+  topology.fineRoots.addAll(topology.fineRootsById.values());
+
+  for (Object keyObject : topology.internodesById.keySet()) {
+    Long key = (Long) keyObject;
+    topology.childInternodesByInternode.put(key, new ArrayList());
+    topology.childPetiolesByInternode.put(key, new ArrayList());
+    topology.childFruitsByInternode.put(key, new ArrayList());
+    topology.childFlowersByInternode.put(key, new ArrayList());
+    topology.directLeavesByInternode.put(key, new ArrayList());
+  }
+  for (Object keyObject : topology.petiolesById.keySet()) {
+    topology.leavesByPetiole.put((Long) keyObject, new ArrayList());
+  }
+
+  for (Object keyObject : topology.internodesById.keySet()) {
+    Long childKey = (Long) keyObject;
+    Internode child = (Internode) topology.internodesById.get(childKey);
+    Long parentKey = Long.valueOf(child.parentID);
+    if (topology.internodesById.containsKey(parentKey)) {
+      if (parentKey.longValue() == childKey.longValue()) {
+        topology.invalidate("self-parent internodeId=" + childKey);
+      } else {
+        topology.parentByInternode.put(childKey, parentKey);
+        ctList(topology.childInternodesByInternode, parentKey).add(childKey);
+      }
+    } else if (child.parentID <= 0L || child.parentID == pb.getId()) {
+      topology.basalShootIds.add(childKey);
+    } else {
+      topology.invalidate("missing Internode parent: childId=" + childKey
+          + " parentId=" + child.parentID);
+    }
+  }
+
+  for (Object keyObject : topology.petiolesById.keySet()) {
+    Long childKey = (Long) keyObject;
+    Petiole child = (Petiole) topology.petiolesById.get(childKey);
+    Long parentKey = Long.valueOf(child.parentID);
+    if (topology.internodesById.containsKey(parentKey)) {
+      ctList(topology.childPetiolesByInternode, parentKey).add(child);
+    } else {
+      topology.invalidate("missing Internode owner for Petiole id=" + childKey
+          + " parentId=" + child.parentID);
+    }
+  }
+  for (Object keyObject : topology.fruitsById.keySet()) {
+    Long childKey = (Long) keyObject;
+    FruitService child = (FruitService) topology.fruitsById.get(childKey);
+    Long parentKey = Long.valueOf(child.parentID);
+    if (topology.internodesById.containsKey(parentKey)) {
+      ctList(topology.childFruitsByInternode, parentKey).add(child);
+    } else {
+      topology.invalidate("missing Internode owner for Fruit id=" + childKey
+          + " parentId=" + child.parentID);
+    }
+  }
+  for (Object keyObject : topology.flowersById.keySet()) {
+    Long childKey = (Long) keyObject;
+    Flower child = (Flower) topology.flowersById.get(childKey);
+    Long parentKey = Long.valueOf(child.parentID);
+    if (topology.internodesById.containsKey(parentKey)) {
+      ctList(topology.childFlowersByInternode, parentKey).add(child);
+    } else {
+      topology.invalidate("missing Internode owner for Flower id=" + childKey
+          + " parentId=" + child.parentID);
+    }
+  }
+
+  for (Object fineKeyObject : topology.fineRootsById.keySet()) {
+    Long fineKey = (Long) fineKeyObject;
+    FineRoot fineNode = (FineRoot) topology.fineRootsById.get(fineKey);
+    StructuralRoot pointerParent = (StructuralRoot)
+        topology.structuralRootsById.get(Long.valueOf(fineNode.parentID));
+    registerCarbonFineRootOwner(topology, fineNode, pointerParent);
+  }
+  for (Object rootKeyObject : topology.structuralRootsById.keySet()) {
+    StructuralRoot rootNode = (StructuralRoot)
+        topology.structuralRootsById.get((Long) rootKeyObject);
+    FineRoot linkedFine = (FineRoot)
+        topology.fineRootsById.get(Long.valueOf(rootNode.frID));
+    registerCarbonFineRootOwner(topology, linkedFine, rootNode);
+  }
+  for (Object fineKeyObject : topology.fineRootsById.keySet()) {
+    Long fineKey = (Long) fineKeyObject;
+    FineRoot fineNode = (FineRoot) topology.fineRootsById.get(fineKey);
+    Long ownerKey = (Long) topology.fineRootOwnerById.get(fineKey);
+    fineNode.ctTransportOwnerId = (ownerKey == null)
+        ? -1L : ownerKey.longValue();
+    fineNode.ctTransportOwnerCount = (ownerKey == null) ? 0 : 1;
+    if (ownerKey == null) topology.missingFineRootOwners++;
+  }
+
+  collectCarbonPetioleLeafRelations(pb, topology);
+  for (Object leafKeyObject : topology.leavesById.keySet()) {
+    Long leafKey = (Long) leafKeyObject;
+    Leaf leafNode = (Leaf) topology.leavesById.get(leafKey);
+    Long petioleKey = (Long) topology.petioleOwnerByLeaf.get(leafKey);
+    if (petioleKey != null) {
+      Petiole owner = (Petiole) topology.petiolesById.get(petioleKey);
+      topology.leafTransportOwner.put(leafKey, owner);
+      ctList(topology.leavesByPetiole, petioleKey).add(leafNode);
+      leafNode.ctTransportOwnerId = petioleKey.longValue();
+      leafNode.ctTransportOwnerCount = 1;
+    } else {
+      Long parentKey = Long.valueOf(leafNode.parentID);
+      Internode owner = (Internode) topology.internodesById.get(parentKey);
+      if (owner == null) {
+        topology.missingLeafOwners++;
+        topology.invalidate("missing CT owner for Leaf id=" + leafKey
+            + " parentId=" + leafNode.parentID);
+        leafNode.ctTransportOwnerId = -1L;
+        leafNode.ctTransportOwnerCount = 0;
+      } else {
+        topology.leafTransportOwner.put(leafKey, owner);
+        ctList(topology.directLeavesByInternode, parentKey).add(leafNode);
+        leafNode.ctTransportOwnerId = -1L;
+        leafNode.ctTransportOwnerCount = 0;
+      }
+    }
+  }
+
+  if (topology.internodesById.size() > 0
+      && topology.basalShootIds.size() == 0) {
+    topology.invalidate("no basal Internode for PlantBase id=" + pb.getId());
+  }
+  if (topology.valid) generateCarbonShootTraversalOrders(topology);
+  if (useComplexRoot == false) validateSimpleCarbonRootTopology(pb, topology);
+  return topology;
+}
+
+/** Accepted transport/rate state for one organ before the hourly CT solve. */
+class CarbonTransportOrganState {
+  GrowingOrgan organ;
+  double cpb, cpt, j, r, xp;
+  double sinkSourceA, sinkSourceB, branchFluxA, branchFluxB, err;
+  double structurePriPt, structureSecPt, maintenancePt, reservePt, loadingPt;
+  double structure, structurePri, structureSec, maintenance, reserve;
+  float loading, leakage;
+  double unloading, carbonFlux, munchCounterFlow, biomassSupply, biomassDemand;
+
+  CarbonTransportOrganState(GrowingOrgan target) {
+    organ = target;
+    cpb = target.cpb; cpt = target.cpt; j = target.j;
+    r = target.r; xp = target.xp;
+    sinkSourceA = target.sink_source_a;
+    sinkSourceB = target.sink_source_b;
+    branchFluxA = target.branch_flux_a;
+    branchFluxB = target.branch_flux_b;
+    err = target.err;
+    structurePriPt = target.structureDM_PRI_PT;
+    structureSecPt = target.structureDM_SEC_PT;
+    maintenancePt = target.maintenanceDM_PT;
+    reservePt = target.reserveDM_PT;
+    loadingPt = target.loading_PT;
+    structure = target.structureDM;
+    structurePri = target.structureDM_PRI;
+    structureSec = target.structureDM_SEC;
+    maintenance = target.maintenanceDM;
+    reserve = target.reserveDM;
+    loading = target.loading;
+    leakage = target.leakage;
+    unloading = target.unloading;
+    carbonFlux = target.Cflux;
+    munchCounterFlow = target.Mcf;
+    biomassSupply = target.biomassSupply;
+    biomassDemand = target.biomassDemand;
+  }
+
+  void restore() {
+    if (organ == null) return;
+    organ.cpb = cpb; organ.cpt = cpt; organ.j = j;
+    organ.r = r; organ.xp = xp;
+    organ.sink_source_a = sinkSourceA;
+    organ.sink_source_b = sinkSourceB;
+    organ.branch_flux_a = branchFluxA;
+    organ.branch_flux_b = branchFluxB;
+    organ.err = err;
+    organ.structureDM_PRI_PT = structurePriPt;
+    organ.structureDM_SEC_PT = structureSecPt;
+    organ.maintenanceDM_PT = maintenancePt;
+    organ.reserveDM_PT = reservePt;
+    organ.loading_PT = loadingPt;
+    organ.structureDM = structure;
+    organ.structureDM_PRI = structurePri;
+    organ.structureDM_SEC = structureSec;
+    organ.maintenanceDM = maintenance;
+    organ.reserveDM = reserve;
+    organ.loading = loading;
+    organ.leakage = leakage;
+    organ.unloading = unloading;
+    organ.Cflux = carbonFlux;
+    organ.Mcf = munchCounterFlow;
+    organ.biomassSupply = biomassSupply;
+    organ.biomassDemand = biomassDemand;
+  }
+}
+
+/** Accepted PlantBase and organ transport state used by retry and fallback. */
+class CarbonTransportStateSnapshot {
+  PlantBase plantBase;
+  java.util.ArrayList organStates = new java.util.ArrayList();
+  double cpb, cpt, j, r, xp;
+  double branchFluxA, branchFluxB;
+  double sugar, previousSugar;
+
+  CarbonTransportStateSnapshot(PlantBase target) {
+    plantBase = target;
+    cpb = target.cpb; cpt = target.cpt; j = target.j;
+    r = target.r; xp = target.xp;
+    branchFluxA = target.branch_flux_a;
+    branchFluxB = target.branch_flux_b;
+    sugar = target.sugarConcentration_phloem;
+    previousSugar = target.sugarConcentration_phloem_pre;
+  }
+
+  void restorePlantBase() {
+    if (plantBase == null) return;
+    plantBase.cpb = cpb; plantBase.cpt = cpt; plantBase.j = j;
+    plantBase.r = r; plantBase.xp = xp;
+    plantBase.branch_flux_a = branchFluxA;
+    plantBase.branch_flux_b = branchFluxB;
+    plantBase.sugarConcentration_phloem = sugar;
+    plantBase.sugarConcentration_phloem_pre = previousSugar;
+  }
 }
 
 // CT response is evaluated in sugar concentration domain and linearised d/dPhi.
@@ -332,6 +954,16 @@ static final double CT_DERIV_MAX = 1e9;
 static final double CT_PHI_FLOOR = 1e-8;
 // g C h-1 per unit Phi; guards only numerically degenerate folded boundaries.
 static final double CT_PB_B_ABS_MIN = 1e-12;
+// Numerical solver controls; these do not alter biological source/sink functions.
+static final double CT_ABS_FLUX_TOL = 1e-5; // g C h-1
+static final double CT_REL_FLUX_TOL = 1e-4; // dimensionless
+// A fixed fruit mass-flow boundary restores the original full Newton trial.
+static final double CT_DAMPING_INITIAL = 1.0;
+static final double CT_DAMPING_MIN = 0.05;
+static final double CT_DAMPING_MAX = 1.0;
+static final int CT_MAX_ITERATIONS = 30;
+static final double CT_RETRY_DAMPING_INITIAL = 0.1;
+static final int CT_RETRY_MAX_ITERATIONS = 60;
 
 // defines pertinent to test case 
 // constant source and sink
@@ -542,6 +1174,37 @@ static double sugarFromCp(double cp) {
   double c = Math.sqrt(Math.max(0.0, 2.0 * cp));     // c = √(2cp), guard cp≥0
   return convertPhloemCtoSugar((double) c);
 }
+
+/** Fail before CSV emission when selected PlantBase sugar and Phi disagree. */
+static void verifyPlantBaseSugarForOutput(PlantBase pb,
+        double outputSugar) {
+  if (pb == null) {
+    throw new IllegalStateException(
+        "CT plant-level output requires a selected PlantBase.");
+  }
+  if (!isValidPhi(pb.cpt)) {
+    throw new IllegalStateException("CT plant-level output has invalid PlantBase Phi"
+        + " pbId=" + pb.getId() + " plantNumber=" + pb.plantNumber
+        + " cpt=" + pb.cpt);
+  }
+  double transformedSugar = sugarFromCp(pb.cpt);
+  double comparisonScale = Math.max(1.0, Math.max(
+      Math.abs(transformedSugar), Math.max(
+          Math.abs(pb.sugarConcentration_phloem), Math.abs(outputSugar))));
+  double comparisonTolerance = 1e-12 * comparisonScale;
+  if (!isFiniteCarbonValue(transformedSugar)
+      || !isFiniteCarbonValue(pb.sugarConcentration_phloem)
+      || !isFiniteCarbonValue(outputSugar)
+      || Math.abs(pb.sugarConcentration_phloem - transformedSugar)
+          > comparisonTolerance
+      || Math.abs(outputSugar - transformedSugar) > comparisonTolerance) {
+    throw new IllegalStateException("CT PlantBase/output sugar mismatch"
+        + " pbId=" + pb.getId() + " plantNumber=" + pb.plantNumber
+        + " storedSugar=" + pb.sugarConcentration_phloem
+        + " sugarFromCpt=" + transformedSugar
+        + " outputSugar=" + outputSugar);
+  }
+}
 /** KM in sugar domain → KM in cp domain: cp = 0.5 * c² (with c in gC cm⁻³). 
  * Convert Michaelis constant from sugar-concentration space to potential space.
  *
@@ -614,7 +1277,6 @@ static void lineariseOrgan(GrowingOrgan o) {
   double sugar = sugarFromCp(cp);              // current sugar (used by organ to update PT)
   
   
-  //o.calcPTCTRAM(sugar);                        // update organ-specific PT params from sugar
   o.updateCarbonAllocation(sugar);
   // --- Source (loading) linearisation: sugar-domain response, a + b * cp.
   double loadA = 0.0, loadB = 0.0;
@@ -638,6 +1300,11 @@ static void lineariseOrgan(GrowingOrgan o) {
   double dSEC = dSinkUnloading_fromSugar_dcp(cp, kSEC);
   double dRES = dSinkUnloading_fromSugar_dcp(cp, kRES);
   double dMNT = dSinkUnloading_fromSugar_dcp(cp, kMNT);
+  if (o.shouldUsePreT1PotentialGrowth()) {
+    // Primary potential growth is intentionally carbon-unlimited before T1.
+    fPRI = 1.0;
+    dPRI = 0.0;
+  }
   double sA_pri = o.structureDM_PRI_PT * (fPRI - cp * dPRI);
   double sA_sec = o.structureDM_SEC_PT * (fSEC - cp * dSEC);
   double sA_res = o.reserveDM_PT       * (fRES - cp * dRES);
@@ -657,9 +1324,24 @@ static void lineariseOrgan(GrowingOrgan o) {
 		sB_exu = exuPT * dEXU;
 	}
 
+	/*
+	 * Signed direct transport is not a Michaelis-Menten sink. Fruit overrides
+	 * supply its exact value and analytical dM/dPhi at this Taylor point.
+	 */
+	double massFlowPhi = (cp > CT_CP_MIN) ? cp : CT_CP_MIN;
+	double massFlowSugar = sugarFromCp(massFlowPhi);
+	double massFlow0 = o.getDirectMassFlowCarbon(massFlowSugar);
+	double massFlowB = o.getDirectMassFlowDerivativePhi(
+		massFlowPhi, massFlowSugar);
+	if (Double.isNaN(massFlow0) || Double.isInfinite(massFlow0)) massFlow0 = 0.0;
+	if (Double.isNaN(massFlowB) || Double.isInfinite(massFlowB)) massFlowB = 0.0;
+	double massFlowA = massFlow0 - massFlowPhi * massFlowB;
+
 	// sums
-	double sinkA = (sA_pri + sA_sec + sA_res + sA_mnt + sA_exu);
-	double sinkB = (sB_pri + sB_sec + sB_res + sB_mnt + sB_exu);
+	double sinkA = (sA_pri + sA_sec + sA_res + sA_mnt + sA_exu
+		+ massFlowA);
+	double sinkB = (sB_pri + sB_sec + sB_res + sB_mnt + sB_exu
+		+ massFlowB);
 
   // Combine sources + sinks, convert units once here
   o.sink_source_a = mgTogram * (sinkA + loadA);
@@ -678,6 +1360,7 @@ static void lineariseOrgan(GrowingOrgan o) {
       + " | secA="  + sA_sec + " secB=" + sB_sec
       + " | resA="  + sA_res + " resB=" + sB_res
       + " | mntA="  + sA_mnt + " mntB=" + sB_mnt
+	  + " | massFlowA=" + massFlowA + " massFlowB=" + massFlowB
       + " | A=" + (sinkA + loadA)
       + " | B=" + (sinkB + loadB));
   }
@@ -702,59 +1385,51 @@ static void lineariseOrgan(GrowingOrgan o) {
  * The linearisation results are stored in each organ's {@code sink_source_a} and {@code sink_source_b}
  * fields, and also copied to {@code branch_flux_a} and {@code branch_flux_b}.
  */
-static void linearise(PlantBase pb, CarbonTransportSolveContext ctx) [
-    {
-        ctx.leafA = ctx.leafB = ctx.leafJ = 0.0;
-        ctx.petioleA = ctx.petioleB = ctx.petioleJ = 0.0;
-        ctx.shootA = ctx.shootB = ctx.shootJ = 0.0;
-        ctx.fineRootA = ctx.fineRootB = ctx.fineRootJ = 0.0;
-        ctx.structuralRootA = ctx.structuralRootB = ctx.structuralRootJ = 0.0;
-        ctx.fruitA = ctx.fruitB = ctx.fruitJ = 0.0;
+static void linearise(PlantBase pb, CarbonTransportSolveContext ctx,
+    CarbonTransportTopology topology) {
+  ctx.leafA = ctx.leafB = ctx.leafJ = 0.0;
+  ctx.petioleA = ctx.petioleB = ctx.petioleJ = 0.0;
+  ctx.shootA = ctx.shootB = ctx.shootJ = 0.0;
+  ctx.fineRootA = ctx.fineRootB = ctx.fineRootJ = 0.0;
+  ctx.structuralRootA = ctx.structuralRootB = ctx.structuralRootJ = 0.0;
+  ctx.fruitA = ctx.fruitB = ctx.fruitJ = 0.0;
+  ctx.flowerA = ctx.flowerB = ctx.flowerJ = 0.0;
+
+  for (int organIndex = 0; organIndex < topology.growingOrgans.size(); organIndex++) {
+    GrowingOrgan organ = (GrowingOrgan) topology.growingOrgans.get(organIndex);
+    lineariseOrgan(organ);
+    organ.branch_flux_a = organ.sink_source_a;
+    organ.branch_flux_b = organ.sink_source_b;
+    double jTerm = organ.sink_source_a + organ.sink_source_b * organ.cpt;
+    if (organ instanceof Leaf) {
+      ctx.leafA += organ.sink_source_a; ctx.leafB += organ.sink_source_b; ctx.leafJ += jTerm;
+    } else if (organ instanceof Petiole) {
+      ctx.petioleA += organ.sink_source_a; ctx.petioleB += organ.sink_source_b; ctx.petioleJ += jTerm;
+    } else if (organ instanceof Internode) {
+      ctx.shootA += organ.sink_source_a; ctx.shootB += organ.sink_source_b; ctx.shootJ += jTerm;
+    } else if (organ instanceof FineRoot) {
+      ctx.fineRootA += organ.sink_source_a; ctx.fineRootB += organ.sink_source_b; ctx.fineRootJ += jTerm;
+    } else if (organ instanceof StructuralRoot) {
+      ctx.structuralRootA += organ.sink_source_a; ctx.structuralRootB += organ.sink_source_b; ctx.structuralRootJ += jTerm;
+    } else if (organ instanceof FruitService) {
+      ctx.fruitA += organ.sink_source_a; ctx.fruitB += organ.sink_source_b; ctx.fruitJ += jTerm;
+    } else if (organ instanceof Flower) {
+      ctx.flowerA += organ.sink_source_a; ctx.flowerB += organ.sink_source_b; ctx.flowerJ += jTerm;
     }
+  }
 
-    g:GrowingOrgan, (
-        g.plantNumber == pb.plantNumber
-    ) ::> {
-    	
-        // Perform per-organ sink/source linearisation
-        lineariseOrgan(g);
-
-        // Store branch fluxes for later use
-        g.branch_flux_a = g.sink_source_a;
-        g.branch_flux_b = g.sink_source_b;
-
-        // Accumulate diagnostics by organ type
-        double jTerm = g.sink_source_a + g.sink_source_b * g.cpt;
-
-        if (g instanceof Leaf) {
-            ctx.leafA += g.sink_source_a; ctx.leafB += g.sink_source_b; ctx.leafJ += jTerm;
-        } else if (g instanceof Petiole) {
-            ctx.petioleA += g.sink_source_a; ctx.petioleB += g.sink_source_b; ctx.petioleJ += jTerm;
-        } else if (g instanceof Internode || g instanceof Cordon || g instanceof Trunk) {
-            ctx.shootA += g.sink_source_a; ctx.shootB += g.sink_source_b; ctx.shootJ += jTerm;
-        } else if (g instanceof FineRoot) {
-            ctx.fineRootA += g.sink_source_a; ctx.fineRootB += g.sink_source_b; ctx.fineRootJ += jTerm;
-        } else if (g instanceof StructuralRoot) {
-            ctx.structuralRootA += g.sink_source_a; ctx.structuralRootB += g.sink_source_b; ctx.structuralRootJ += jTerm;
-        } else if (g instanceof FruitService) {
-            ctx.fruitA += g.sink_source_a; ctx.fruitB += g.sink_source_b; ctx.fruitJ += jTerm;
-        }
-    }
-
-    {
-        if (debug_CT) {
-            println(
-                "DEBUG A/B by class   A            B            j\n" +
-                "Leaf:        " + ctx.leafA + "  " + ctx.leafB + "  " + ctx.leafJ + "\n" +
-                "Petiole:     " + ctx.petioleA + "  " + ctx.petioleB + "  " + ctx.petioleJ + "\n" +
-                "Shoot(core): " + ctx.shootA + "  " + ctx.shootB + "  " + ctx.shootJ + "\n" +
-                "FineRoot:    " + ctx.fineRootA + "  " + ctx.fineRootB + "  " + ctx.fineRootJ + "\n" +
-                "StrRoot:     " + ctx.structuralRootA + "  " + ctx.structuralRootB + "  " + ctx.structuralRootJ + "\n" +
-                "Fruit:       " + ctx.fruitA + "  " + ctx.fruitB + "  " + ctx.fruitJ
-            );
-        }
-    }
-]
+  if (debug_CT) {
+    println(
+        "DEBUG A/B by class   A            B            j\n" +
+        "Leaf:        " + ctx.leafA + "  " + ctx.leafB + "  " + ctx.leafJ + "\n" +
+        "Petiole:     " + ctx.petioleA + "  " + ctx.petioleB + "  " + ctx.petioleJ + "\n" +
+        "Shoot(core): " + ctx.shootA + "  " + ctx.shootB + "  " + ctx.shootJ + "\n" +
+        "FineRoot:    " + ctx.fineRootA + "  " + ctx.fineRootB + "  " + ctx.fineRootJ + "\n" +
+        "StrRoot:     " + ctx.structuralRootA + "  " + ctx.structuralRootB + "  " + ctx.structuralRootJ + "\n" +
+        "Fruit:       " + ctx.fruitA + "  " + ctx.fruitB + "  " + ctx.fruitJ + "\n" +
+        "Flower:      " + ctx.flowerA + "  " + ctx.flowerB + "  " + ctx.flowerJ);
+  }
+}
 
 
 /* -------------------------------------------------------------------------- */
@@ -800,297 +1475,687 @@ static void linearise(PlantBase pb, CarbonTransportSolveContext ctx) [
 // Add a global flag to control debug_CT output
 
 
+/** Return -1 for no root parent and -2 when the two root pointers disagree. */
+static long ctStructuralRootParentId(
+    StructuralRoot rootNode, int plantNumber) {
+  long resolvedId = -1L;
+  long firstCandidateId = rootNode.parentID;
+  if (firstCandidateId > 0) {
+    Object firstCandidate = graph().getNodeForId(firstCandidateId);
+    if (firstCandidate instanceof StructuralRoot
+        && ((StructuralRoot) firstCandidate).plantNumber == plantNumber) {
+      resolvedId = firstCandidateId;
+    }
+  }
+  long secondCandidateId = rootNode.verticalParentID;
+  if (secondCandidateId > 0 && secondCandidateId != resolvedId) {
+    Object secondCandidate = graph().getNodeForId(secondCandidateId);
+    if (secondCandidate instanceof StructuralRoot
+        && ((StructuralRoot) secondCandidate).plantNumber == plantNumber) {
+      if (resolvedId > 0) return -2L;
+      resolvedId = secondCandidateId;
+    }
+  }
+  return resolvedId;
+}
+
+static boolean ctRootPointsToPlantBase(StructuralRoot rootNode,
+    PlantBase pb) {
+  return rootNode.parentID == pb.getId()
+      || rootNode.verticalParentID == pb.getId();
+}
+
+/** Whether the explicit StructuralRoot backlink contains one child graph id. */
+static boolean ctStructuralRootHasChildId(
+    StructuralRoot rootNode, long childId) {
+  if (rootNode == null || childId <= 0) return false;
+  int childIndex;
+  int childCount = rootNode.getChildStructuralRootCount();
+  for (childIndex = 0; childIndex < childCount; childIndex++) {
+    if (rootNode.getChildStructuralRootIdAt(childIndex) == childId) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Fold one validated simple-root layer from raw local/lateral/distal terms.
+ * FineRoot currently has r=xp=0, but its inherited transform is retained so
+ * future resistance can be added without changing the assembly contract.
+ */
+static boolean foldSimpleRootSegment(StructuralRoot rootNode,
+    FineRoot fineRootNode, StructuralRoot deeperRoot,
+    CarbonTransportSolveContext ctx) {
+  if (rootNode == null || fineRootNode == null || ctx == null) return false;
+  if (rootNode.lastFoldStep == ctx.foldStep) {
+    ctx.simpleRootDoubleFoldCount++;
+    ctx.simpleRootFoldValid = false;
+    println("ERROR(CT-SIMPLE-ROOT-DOUBLE-FOLD): layer="
+        + rootNode.layer + " id=" + rootNode.getId()
+        + " foldStep=" + ctx.foldStep);
+    return false;
+  }
+  if (fineRootNode.lastFoldStep == ctx.foldStep) {
+    ctx.simpleRootFoldValid = false;
+    println("ERROR(CT-SIMPLE-FINE-ROOT-DOUBLE-FOLD): layer="
+        + fineRootNode.layer + " id=" + fineRootNode.getId()
+        + " foldStep=" + ctx.foldStep);
+    return false;
+  }
+  if (deeperRoot != null && deeperRoot.lastFoldStep != ctx.foldStep) {
+    ctx.simpleRootFoldValid = false;
+    println("ERROR(CT-SIMPLE-ROOT-ORDER): child layer="
+        + deeperRoot.layer + " id=" + deeperRoot.getId()
+        + " was not folded before parent layer=" + rootNode.layer
+        + " id=" + rootNode.getId());
+    return false;
+  }
+
+  fineRootNode.branch_flux_a = fineRootNode.sink_source_a;
+  fineRootNode.branch_flux_b = fineRootNode.sink_source_b;
+  fineRootNode.Update_Branch_Flux();
+  fineRootNode.lastFoldStep = ctx.foldStep;
+
+  double sumA = rootNode.sink_source_a + fineRootNode.branch_flux_a;
+  double sumB = rootNode.sink_source_b + fineRootNode.branch_flux_b;
+  fineRootNode.foldRecv++;
+  if (deeperRoot != null) {
+    sumA += deeperRoot.branch_flux_a;
+    sumB += deeperRoot.branch_flux_b;
+    deeperRoot.foldRecv++;
+  }
+
+  rootNode.branch_flux_a = sumA;
+  rootNode.branch_flux_b = sumB;
+  rootNode.Update_Branch_Flux();
+  rootNode.lastFoldStep = ctx.foldStep;
+  ctx.simpleFineRootFolded++;
+  ctx.simpleStructuralRootFolded++;
+  return true;
+}
+
+/**
+ * Deterministic deepest-to-surface fold for useComplexRoot == false only.
+ * The existing topology-aware complex-root branch remains separate below.
+ */
+static void foldSimpleRootLayers(PlantBase pb,
+    CarbonTransportSolveContext ctx, CarbonTransportTopology topology) {
+  ctx.simpleRootActive = true;
+  ctx.simpleRootTopologyValid = topology.valid;
+  ctx.simpleRootFoldValid = topology.valid;
+  ctx.simpleRootUnfoldValid = topology.valid;
+  ctx.simpleRootDoubleFoldCount = 0;
+  ctx.simpleStructuralRootFolded = 0;
+  ctx.simpleStructuralRootUnfolded = 0;
+  ctx.simpleFineRootFolded = 0;
+  ctx.simpleFineRootUnfolded = 0;
+  ctx.simpleRootMinLayer = topology.simpleRootMinLayer;
+  ctx.simpleRootMaxLayer = topology.simpleRootMaxLayer;
+  ctx.simpleRootLayerCount = topology.simpleStructuralRoots.size();
+  ctx.simpleStructuralRootExpected = topology.simpleStructuralRoots.size();
+  ctx.simpleFineRootExpected = topology.simpleFineRoots.size();
+
+  StructuralRoot deeperRoot = null;
+  for (int foldIndex = 0;
+      foldIndex < topology.simpleRootFoldOrder.size(); foldIndex++) {
+    StructuralRoot rootNode = (StructuralRoot)
+        topology.simpleRootFoldOrder.get(foldIndex);
+    FineRoot fineNode = (FineRoot) topology.fineRootByLayer.get(
+        Integer.valueOf(rootNode.layer));
+    if (!foldSimpleRootSegment(rootNode, fineNode, deeperRoot, ctx)) {
+      ctx.simpleRootFoldValid = false;
+    }
+    deeperRoot = rootNode;
+  }
+  if (topology.simpleBasalRoot != null
+      && topology.simpleBasalRoot.lastFoldStep == ctx.foldStep) {
+    topology.simpleBasalRoot.foldRecv++;
+  } else {
+    ctx.simpleRootFoldValid = false;
+  }
+  ctx.simpleRootFoldValid = ctx.simpleRootFoldValid
+      && ctx.simpleRootDoubleFoldCount == 0
+      && ctx.simpleStructuralRootFolded == ctx.simpleStructuralRootExpected
+      && ctx.simpleFineRootFolded == ctx.simpleFineRootExpected;
+}
+
 static int foldTick = 0;
 static void updateBranchFlux(PlantBase pb, CarbonTransportSolveContext ctx) [
-   {
-		  long scopedOrganCount = count((* g:GrowingOrgan, (
-		    g.plantNumber == pb.plantNumber
-		  ) *));
-		  if (scopedOrganCount > 0) {
-		    int persistedFoldStep = max((* g:GrowingOrgan, (
-		      g.plantNumber == pb.plantNumber
-		    ) *)[lastFoldStep]);
-		    if (foldTick < persistedFoldStep) foldTick = persistedFoldStep;
-		  }
-		  ctx.foldStep = ++foldTick;
-		}
-
-
-		p:Petiole (-->){1,5} l:Leaf, (
-		  p.plantNumber == pb.plantNumber &&
-		  l.plantNumber == pb.plantNumber
-		) ::> {
-		  if (l.lastFoldStep == ctx.foldStep) {
-			if (debug_CT)
-				println("WARN(FOLD): double write Leaf id=" + l.getId());
-		  } else {
-			p.branch_flux_a += l.branch_flux_a;
-			p.branch_flux_b += l.branch_flux_b;
-			l.lastFoldStep = ctx.foldStep;     // mark leaf as folded this tick
-		  }
-
-		  if (p.lastFoldStep == ctx.foldStep) {
-			if (debug_CT) println("WARN(FOLD): double write Petiole id=" + p.getId());
-		  }
-		  p.lastFoldStep = ctx.foldStep;       // petiole participates this tick
-		  p.Update_Branch_Flux();
-		}
-
-		p:Petiole (-->){1,5} l:Leaf, (
-		  p.rank != l.rank &&
-		  p.plantNumber == pb.plantNumber &&
-		  l.plantNumber == pb.plantNumber
-		) ::> {
-	  if (debug_CT) {
-		println("WARN(CT-LEAF): Petiole-Leaf rank mismatch"
-			+ " petioleId=" + p.getId()
-			+ " petioleRank=" + p.rank
-			+ " leafId=" + l.getId()
-			+ " leafRank=" + l.rank
-			+ " leafType=" + l.organType
-			+ " leafParentID=" + l.parentID
-			+ " petioleParentID=" + p.parentID);
-	  }
-	}
-
-
-  // ---- INTERNODE FOLD (level-based, no double counting) ----
   {
-    long scopedInternodeCount = count((* it:Internode, (
-      it.plantNumber == pb.plantNumber
+    long scopedOrganCount = count((* foldScope:GrowingOrgan, (
+      foldScope.plantNumber == pb.plantNumber
     ) *));
-    if (scopedInternodeCount > 0) {
-    int minOrder = min((* it:Internode, (
-      it.plantNumber == pb.plantNumber
-    ) *)[order]);
-    int maxOrder = max((* it:Internode, (
-      it.plantNumber == pb.plantNumber
-    ) *)[order]);
-    
-    for (int o = maxOrder; o >= minOrder; o--) {
-      if (count((* it:Internode, (
-        it.order == o &&
-        it.plantNumber == pb.plantNumber
-      ) *)) == 0) continue;
+    if (scopedOrganCount > 0) {
+      int persistedFoldStep = max((* persistedFold:GrowingOrgan, (
+        persistedFold.plantNumber == pb.plantNumber
+      ) *)[lastFoldStep]);
+      if (foldTick < persistedFoldStep) foldTick = persistedFoldStep;
+    }
+    ctx.foldStep = ++foldTick;
+  }
 
-      int minRank = min((* it:Internode, (
-        it.order == o &&
-        it.plantNumber == pb.plantNumber
-      ) *)[rank]);
-      int maxRank = max((* it:Internode, (
-        it.order == o &&
-        it.plantNumber == pb.plantNumber
-      ) *)[rank]);
+  foldReset:GrowingOrgan, (
+    foldReset.plantNumber == pb.plantNumber
+  ) ::> {
+    foldReset.foldRecv = 0;
+    foldReset.foldExpect = 1;
+    foldReset.ctTransportOwnerId = -1L;
+    foldReset.ctTransportOwnerCount = 0;
+  }
 
-      for (int r = maxRank; r >= minRank; r--) {
-        [
-          nd:Internode, (
-            nd.order == o && nd.rank == r &&
-            nd.plantNumber == pb.plantNumber
-          ) ::> {
-            if (nd.lastFoldStep == ctx.foldStep && debug_CT) {
-              println("WARN(FOLD): double write Internode id=" + nd.getId()
-                      + " order=" + o + " rank=" + r);
-            }
-            nd.lastFoldStep = ctx.foldStep;
+  /* Resolve distinct topological Petiole owners before any Leaf is folded. */
+  petioleOwner:Petiole (-->){1,5} ownedLeaf:Leaf, (
+    petioleOwner.plantNumber == pb.plantNumber
+    && ownedLeaf.plantNumber == pb.plantNumber
+  ) ::> {
+    if (ownedLeaf.ctTransportOwnerId != petioleOwner.getId()) {
+      if (ownedLeaf.ctTransportOwnerCount == 0) {
+        ownedLeaf.ctTransportOwnerId = petioleOwner.getId();
+      } else if (debug_CT) {
+        println("ERROR(CT-LEAF): ambiguous Petiole topology"
+            + " leafId=" + ownedLeaf.getId()
+            + " firstOwner=" + ownedLeaf.ctTransportOwnerId
+            + " additionalOwner=" + petioleOwner.getId()
+            + " plantNumber=" + ownedLeaf.plantNumber);
+      }
+      ownedLeaf.ctTransportOwnerCount++;
+    }
+  }
 
-            double sumA = nd.sink_source_a;
-            double sumB = nd.sink_source_b;
-            int k, n;
-
-            n = nd.getChildInternodeCount();
-            for (k = 0; k < n; k++) {
-              long cid = nd.getChildInternodeIdAt(k);
-              Internode ch = nd.getInternode(cid);
-              if (ch != null &&
-                  ch.plantNumber == pb.plantNumber) {
-                sumA += ch.branch_flux_a;
-                sumB += ch.branch_flux_b;
-                if (ch.lastFoldStep != ctx.foldStep && debug_CT) {
-                  println("ERROR(FOLD): child int id=" + ch.getId()
-                          + " not folded before parent id=" + nd.getId()
-                          + " (order=" + o + " rank=" + r + ")");
-                }
-              }
-            }
-
-           // Petioles
-			n = nd.getChildPetioleCount();
-			for (k = 0; k < n; k++) {
-			  long pid = nd.getChildPetioleIdAt(k);
-			  Petiole p = nd.getPetiole(pid);
-				  if (p != null &&
-				      p.plantNumber == pb.plantNumber) {
-				sumA += p.branch_flux_a;
-				sumB += p.branch_flux_b;
-					if (p.lastFoldStep != ctx.foldStep && debug_CT) {
-				  println("WARN(FOLD): petiole not stamped before parent id=" + nd.getId());
-				}
-					p.lastFoldStep = ctx.foldStep;
-			  }
-			}
-			
-			// Fruits
-			n = nd.getChildFruitCount();
-			for (k = 0; k < n; k++) {
-			  long fid = nd.getChildFruitIdAt(k);
-			  FruitService f = nd.getFruit(fid);
-				  if (f != null &&
-				      f.plantNumber == pb.plantNumber) {
-				sumA += f.branch_flux_a;
-				sumB += f.branch_flux_b;
-					f.lastFoldStep = ctx.foldStep;
-			  }
-			}
-			
-			// Flowers
-			n = nd.getChildFlowerCount();
-			for (k = 0; k < n; k++) {
-			  long fid = nd.getChildFlowerIdAt(k);
-			  Flower fl = nd.getFlower(fid);
-				  if (fl != null &&
-				      fl.plantNumber == pb.plantNumber) {
-				sumA += fl.branch_flux_a;
-				sumB += fl.branch_flux_b;
-					fl.lastFoldStep = ctx.foldStep;
-			  }
-			}
-			
-			nd.branch_flux_a = sumA;
-			nd.branch_flux_b = sumB;
-				nd.lastFoldStep = ctx.foldStep;   // stamp this internode itself
-			nd.Update_Branch_Flux();
-			
-
-          }
-        ]
+  /* Resolve distinct pointer owners for FineRoot terminals. */
+  fineOwner:StructuralRoot, (
+    fineOwner.plantNumber == pb.plantNumber
+  ) ::> {
+    for (FineRoot ownedFineRoot : (* ownedFineQuery:FineRoot, (
+        ownedFineQuery.plantNumber == pb.plantNumber
+        && (ownedFineQuery.parentID == fineOwner.getId()
+            || fineOwner.frID == ownedFineQuery.getId())
+    ) *)) {
+      if (ownedFineRoot.ctTransportOwnerId != fineOwner.getId()) {
+        if (ownedFineRoot.ctTransportOwnerCount == 0) {
+          ownedFineRoot.ctTransportOwnerId = fineOwner.getId();
+        }
+        ownedFineRoot.ctTransportOwnerCount++;
       }
     }
-    }
-  }
-	
-		sd:StructuralRoot sdr:FineRoot,
-		(sdr.parentID == sd.getId()
-		 && sd.frID == sdr.getId()
-			 && sd.plantNumber == pb.plantNumber
-			 && sdr.plantNumber == pb.plantNumber
-			 && sd.ID == sdr.ID) ::> {
-		  sd.branch_flux_a = sd.sink_source_a + sdr.branch_flux_a;
-		  sd.branch_flux_b = sd.sink_source_b + sdr.branch_flux_b;
-			  sdr.lastFoldStep = ctx.foldStep;   // mark terminal
-	  if (debug_CT) println("sd. " + sd.nodeNumber + " sd. " + sd.branch_flux_a);
-		  sd.lastFoldStep = ctx.foldStep;    // this SR participated too
-	  sd.Update_Branch_Flux();
-	}
-	
-		sd:StructuralRoot,
-		( sd.plantNumber == pb.plantNumber &&
-		  sd.layer == max((* it:StructuralRoot,
-							(it.plantNumber == pb.plantNumber &&
-							 it.gridX == sd.gridX &&
-							 it.gridY == sd.gridY) *)[layer]) ) ::> {
-	
-	  StructuralRoot cur = sd;
-	  while (cur != null) {
-		Organ po = cur.getParent();
-		if (po == null) break;
-	
-			if (po instanceof StructuralRoot) {
-			  StructuralRoot par = (StructuralRoot) po;
-			  if (par.plantNumber != pb.plantNumber) break;
-			  par.branch_flux_a += cur.branch_flux_a;
-			  par.branch_flux_b += cur.branch_flux_b;
-			  cur.lastFoldStep = ctx.foldStep;   // child SR stamped
-			  par.Update_Branch_Flux();
-			  par.lastFoldStep = ctx.foldStep;   // parent SR stamped
-		  cur = par;
-		  continue;
-		}
-		break;
-	  }
-	}
-
-
-
-
-		  {
-	    StructuralRoot st =  pb.getChildStructuralRoot();
-	    if (st != null && (st.plantNumber != pb.plantNumber)) st = null;
-	    if(debug_CT) println((st != null) ? ("st: " + st.layer) : "st: none");
-    double sdlA = (st!=null) ? st.branch_flux_a : 0.0;
-    double sdlB = (st!=null) ? st.branch_flux_b : 0.0;
-
-	    Internode tr = pb.getChildInternode();
-	    if (tr != null && (tr.plantNumber != pb.plantNumber)) tr = null;
-
-    double sdrA = (tr!=null) ? tr.branch_flux_a : 0.0;
-    double sdrB = (tr!=null) ? tr.branch_flux_b : 0.0;
-
-    pb.branch_flux_a = sdlA + sdrA;
-    pb.branch_flux_b = sdlB + sdrB;
-
-    if (debug_CT) {
-      println("pb " + pb.branch_flux_a + " sdl " + sdlA + " sdr " + sdrA);
-      println("pb " + pb.branch_flux_b + " sdl " + sdlB + " sdr " + sdrB);
-	      long totalF = count((* g:GrowingOrgan, (
-	        g.plantNumber == pb.plantNumber
-	      ) *));
-	      long foldedF = count((* g:GrowingOrgan, (
-	        g.lastFoldStep == ctx.foldStep &&
-	        g.plantNumber == pb.plantNumber
-	      ) *));
-	      println("FOLD COVERAGE: " + foldedF + "/" + totalF);
-	      long nFlower = count((* f:Flower, (
-	        f.plantNumber == pb.plantNumber
-	      ) *));
-	      long nFlowerFolded = count((* f:Flower, (
-	        f.lastFoldStep == ctx.foldStep &&
-	        f.plantNumber == pb.plantNumber
-	      ) *));
-      println("CT FLOWER FOLD COVERAGE: flower=" + nFlowerFolded + "/" + nFlower);
-    }
   }
 
-	  f:Flower, (
-	    f.plantNumber == pb.plantNumber
-	  ) ::> {
-    if (debug_CT) {
-      if (f.parentID <= 0) {
-        println("WARN(CT-FLOWER): Flower has no transport parent"
-          + " flowerId=" + f.getId()
-          + " rank=" + f.rank
-          + " order=" + f.order
-          + " organType=" + f.organType);
-      } else {
-        Organ flowerParent = f.getParent();
-        if (flowerParent == null) {
-          println("WARN(CT-FLOWER): Flower parent lookup failed"
-            + " flowerId=" + f.getId()
-            + " parentID=" + f.parentID);
-        } else if (!(flowerParent instanceof Internode)) {
-          println("WARN(CT-FLOWER): Flower parent is not transport axis"
-            + " flowerId=" + f.getId()
-            + " parentID=" + f.parentID
-            + " parentClass=" + flowerParent.getClass().getName());
-        } else {
-          Internode axis = (Internode) flowerParent;
-          if (axis.plantNumber != pb.plantNumber) {
-            println("WARN(CT-FLOWER): Flower parent belongs to another plant"
-              + " flowerId=" + f.getId()
-              + " parentID=" + axis.getId());
-          } else if (!axis.hasChildFlowerId(f.getId())) {
-            println("WARN(CT-FLOWER): Parent missing childFlowerId"
-              + " flowerId=" + f.getId()
-              + " parentID=" + axis.getId()
-              + " flowerRank=" + f.rank
-              + " flowerOrder=" + f.order);
-          }
+  /* Leaf is transported through one topological Petiole, or directly via its Internode pointer. */
+  petioleNode:Petiole, (
+    petioleNode.plantNumber == pb.plantNumber
+  ) ::> {
+    double sumA = petioleNode.sink_source_a;
+    double sumB = petioleNode.sink_source_b;
+    for (Leaf leafChild : (* petioleNode (-->){1,5} petioleLeafQuery:Leaf *)) {
+      if (leafChild.plantNumber != pb.plantNumber) continue;
+      if (leafChild.ctTransportOwnerCount == 1
+          && leafChild.ctTransportOwnerId == petioleNode.getId()
+          && leafChild.lastFoldStep != ctx.foldStep) {
+        sumA += leafChild.branch_flux_a;
+        sumB += leafChild.branch_flux_b;
+        leafChild.foldRecv++;
+        leafChild.lastFoldStep = ctx.foldStep;
+        if (debug_CT && petioleNode.rank != leafChild.rank) {
+          println("WARN(CT-LEAF): rank mismatch retained by topology"
+              + " petioleId=" + petioleNode.getId()
+              + " petioleRank=" + petioleNode.rank
+              + " leafId=" + leafChild.getId()
+              + " leafRank=" + leafChild.rank);
+        }
+      } else if (debug_CT && leafChild.ctTransportOwnerCount > 1) {
+        println("ERROR(CT-LEAF): ambiguous Petiole owners"
+            + " leafId=" + leafChild.getId()
+            + " ownerCount=" + leafChild.ctTransportOwnerCount);
+      }
+    }
+    petioleNode.branch_flux_a = sumA;
+    petioleNode.branch_flux_b = sumB;
+    petioleNode.Update_Branch_Flux();
+    petioleNode.lastFoldStep = ctx.foldStep;
+  }
+
+  /* Flowers and FineRoots have real transport resistance and are transformed once. */
+  flowerNode:Flower, (
+    flowerNode.plantNumber == pb.plantNumber
+  ) ::> {
+    flowerNode.branch_flux_a = flowerNode.sink_source_a;
+    flowerNode.branch_flux_b = flowerNode.sink_source_b;
+    flowerNode.Update_Branch_Flux();
+    flowerNode.lastFoldStep = ctx.foldStep;
+  }
+
+  fineRootNode:FineRoot, (
+    useComplexRoot == true
+    && fineRootNode.plantNumber == pb.plantNumber
+  ) ::> {
+    fineRootNode.branch_flux_a = fineRootNode.sink_source_a;
+    fineRootNode.branch_flux_b = fineRootNode.sink_source_b;
+    fineRootNode.Update_Branch_Flux();
+    fineRootNode.lastFoldStep = ctx.foldStep;
+  }
+
+  /* Above-ground axes: collect every pointer-owned child, then transform once. */
+  {
+    long internodeCount = count((* shootCount:Internode, (
+      shootCount.plantNumber == pb.plantNumber
+    ) *));
+    if (internodeCount > 0) {
+      int minOrder = min((* shootMinOrder:Internode, (
+        shootMinOrder.plantNumber == pb.plantNumber
+      ) *)[order]);
+      int maxOrder = max((* shootMaxOrder:Internode, (
+        shootMaxOrder.plantNumber == pb.plantNumber
+      ) *)[order]);
+      for (int shootOrder = maxOrder; shootOrder >= minOrder; shootOrder--) {
+        if (count((* shootAtOrder:Internode, (
+          shootAtOrder.order == shootOrder
+          && shootAtOrder.plantNumber == pb.plantNumber
+        ) *)) == 0) continue;
+        int minRank = min((* shootMinRank:Internode, (
+          shootMinRank.order == shootOrder
+          && shootMinRank.plantNumber == pb.plantNumber
+        ) *)[rank]);
+        int maxRank = max((* shootMaxRank:Internode, (
+          shootMaxRank.order == shootOrder
+          && shootMaxRank.plantNumber == pb.plantNumber
+        ) *)[rank]);
+        for (int shootRank = maxRank; shootRank >= minRank; shootRank--) {
+          [
+            axisNode:Internode, (
+              axisNode.order == shootOrder && axisNode.rank == shootRank
+              && axisNode.plantNumber == pb.plantNumber
+            ) ::> {
+              double sumA = axisNode.sink_source_a;
+              double sumB = axisNode.sink_source_b;
+
+              for (Internode childAxis : (* childAxisQuery:Internode, (
+                  childAxisQuery.plantNumber == pb.plantNumber
+                  && childAxisQuery.parentID == axisNode.getId()
+              ) *)) {
+                if (childAxis.lastFoldStep == ctx.foldStep) {
+                  sumA += childAxis.branch_flux_a;
+                  sumB += childAxis.branch_flux_b;
+                  childAxis.foldRecv++;
+                } else if (debug_CT) {
+                  println("ERROR(FOLD): child axis not ready childId="
+                      + childAxis.getId() + " parentId=" + axisNode.getId());
+                }
+              }
+
+              for (Petiole childPetiole : (* childPetioleQuery:Petiole, (
+                  childPetioleQuery.plantNumber == pb.plantNumber
+                  && childPetioleQuery.parentID == axisNode.getId()
+              ) *)) {
+                if (childPetiole.lastFoldStep == ctx.foldStep) {
+                  sumA += childPetiole.branch_flux_a;
+                  sumB += childPetiole.branch_flux_b;
+                  childPetiole.foldRecv++;
+                }
+              }
+
+              for (FruitService childFruit : (* childFruitQuery:FruitService, (
+                  childFruitQuery.plantNumber == pb.plantNumber
+                  && childFruitQuery.parentID == axisNode.getId()
+              ) *)) {
+                sumA += childFruit.branch_flux_a;
+                sumB += childFruit.branch_flux_b;
+                childFruit.foldRecv++;
+                childFruit.lastFoldStep = ctx.foldStep;
+              }
+
+              for (Flower childFlower : (* childFlowerQuery:Flower, (
+                  childFlowerQuery.plantNumber == pb.plantNumber
+                  && childFlowerQuery.parentID == axisNode.getId()
+              ) *)) {
+                if (childFlower.lastFoldStep == ctx.foldStep) {
+                  sumA += childFlower.branch_flux_a;
+                  sumB += childFlower.branch_flux_b;
+                  childFlower.foldRecv++;
+                }
+              }
+
+              /* Direct-Internode Leaf fallback is used only when no Petiole path exists. */
+              for (Leaf directLeaf : (* directLeafQuery:Leaf, (
+                  directLeafQuery.plantNumber == pb.plantNumber
+                  && directLeafQuery.parentID == axisNode.getId()
+              ) *)) {
+                if (directLeaf.ctTransportOwnerCount == 0) {
+                  sumA += directLeaf.branch_flux_a;
+                  sumB += directLeaf.branch_flux_b;
+                  directLeaf.foldRecv++;
+                  directLeaf.lastFoldStep = ctx.foldStep;
+                }
+              }
+
+              axisNode.branch_flux_a = sumA;
+              axisNode.branch_flux_b = sumB;
+              axisNode.Update_Branch_Flux();
+              axisNode.lastFoldStep = ctx.foldStep;
+            }
+          ]
         }
       }
     }
   }
-  
+
+  /* Complex-root CT folding intentionally unchanged here.
+   * It requires a separate topology-aware audit. */
+  {
+    if (useComplexRoot == true) {
+    long rootCount = count((* rootCountQuery:StructuralRoot, (
+      rootCountQuery.plantNumber == pb.plantNumber
+    ) *));
+    for (int rootPass = 0; rootPass <= rootCount; rootPass++) {
+      [
+        rootNode:StructuralRoot, (
+          rootNode.plantNumber == pb.plantNumber
+          && rootNode.lastFoldStep != ctx.foldStep
+        ) ::> {
+          long rootParentId = ctStructuralRootParentId(
+              rootNode, pb.plantNumber);
+          boolean ready = rootParentId != -2L;
+          double sumA = rootNode.sink_source_a;
+          double sumB = rootNode.sink_source_b;
+
+          for (StructuralRoot childRoot : (* rootChildQuery:StructuralRoot, (
+              rootChildQuery.plantNumber == pb.plantNumber
+          ) *)) {
+            long childParentId = ctStructuralRootParentId(
+                childRoot, pb.plantNumber);
+            if (childParentId == rootNode.getId()) {
+              if (childRoot.lastFoldStep != ctx.foldStep) {
+                ready = false;
+              } else {
+                sumA += childRoot.branch_flux_a;
+                sumB += childRoot.branch_flux_b;
+              }
+            }
+          }
+
+          if (ready) {
+            for (FineRoot childFineRoot : (* rootFineQuery:FineRoot, (
+                rootFineQuery.plantNumber == pb.plantNumber
+            ) *)) {
+              if (childFineRoot.ctTransportOwnerCount == 1
+                  && childFineRoot.ctTransportOwnerId == rootNode.getId()) {
+                if (childFineRoot.lastFoldStep == ctx.foldStep) {
+                  sumA += childFineRoot.branch_flux_a;
+                  sumB += childFineRoot.branch_flux_b;
+                  childFineRoot.foldRecv++;
+                } else {
+                  ready = false;
+                }
+              }
+            }
+          }
+
+          if (ready) {
+            rootNode.branch_flux_a = sumA;
+            rootNode.branch_flux_b = sumB;
+            rootNode.Update_Branch_Flux();
+            rootNode.lastFoldStep = ctx.foldStep;
+            for (StructuralRoot contributedChild : (* contributedRootQuery:StructuralRoot, (
+                contributedRootQuery.plantNumber == pb.plantNumber
+            ) *)) {
+              long contributedParentId = ctStructuralRootParentId(
+                  contributedChild, pb.plantNumber);
+              if (contributedParentId == rootNode.getId()) {
+                contributedChild.foldRecv++;
+              }
+            }
+          }
+        }
+      ]
+    }
+
+    double rootA = 0.0;
+    double rootB = 0.0;
+    int minRootLayer = 0;
+    if (rootCount > 0) {
+      minRootLayer = min((* rootMinLayerQuery:StructuralRoot, (
+        rootMinLayerQuery.plantNumber == pb.plantNumber
+      ) *)[layer]);
+    }
+    for (StructuralRoot basalRoot : (* basalRootQuery:StructuralRoot, (
+        basalRootQuery.plantNumber == pb.plantNumber
+    ) *)) {
+      long basalParentId = ctStructuralRootParentId(
+          basalRoot, pb.plantNumber);
+      boolean isBasal = basalParentId == -1L
+          && (ctRootPointsToPlantBase(basalRoot, pb)
+              || basalRoot.layer == minRootLayer);
+      if (isBasal && basalRoot.lastFoldStep == ctx.foldStep) {
+        rootA += basalRoot.branch_flux_a;
+        rootB += basalRoot.branch_flux_b;
+        basalRoot.foldRecv++;
+      }
+    }
+
+    Internode basalShoot = pb.getChildInternode();
+    if (basalShoot != null && basalShoot.plantNumber != pb.plantNumber) {
+      basalShoot = null;
+    }
+    double shootA = 0.0;
+    double shootB = 0.0;
+    if (basalShoot != null && basalShoot.lastFoldStep == ctx.foldStep) {
+      shootA = basalShoot.branch_flux_a;
+      shootB = basalShoot.branch_flux_b;
+      basalShoot.foldRecv++;
+    }
+    pb.branch_flux_a = rootA + shootA;
+    pb.branch_flux_b = rootB + shootB;
+    }
+  }
+
+  {
+    ctx.totalGrowingOrganCount = count((* foldTotal:GrowingOrgan, (
+      foldTotal.plantNumber == pb.plantNumber
+    ) *));
+    ctx.foldedGrowingOrganCount = count((* foldComplete:GrowingOrgan, (
+      foldComplete.plantNumber == pb.plantNumber
+      && foldComplete.lastFoldStep == ctx.foldStep
+      && foldComplete.foldRecv == foldComplete.foldExpect
+    ) *));
+    ctx.foldCoverageComplete = ctx.foldedGrowingOrganCount
+        == ctx.totalGrowingOrganCount;
+    if (debug_CT) {
+      println("FOLD COVERAGE total=" + ctx.foldedGrowingOrganCount
+          + "/" + ctx.totalGrowingOrganCount
+          + " leaf=" + count((* foldLeaf:Leaf, (foldLeaf.plantNumber == pb.plantNumber && foldLeaf.lastFoldStep == ctx.foldStep && foldLeaf.foldRecv == 1) *))
+          + "/" + count((* foldLeafTotal:Leaf, (foldLeafTotal.plantNumber == pb.plantNumber) *))
+          + " petiole=" + count((* foldPetiole:Petiole, (foldPetiole.plantNumber == pb.plantNumber && foldPetiole.lastFoldStep == ctx.foldStep && foldPetiole.foldRecv == 1) *))
+          + "/" + count((* foldPetioleTotal:Petiole, (foldPetioleTotal.plantNumber == pb.plantNumber) *))
+          + " shoot=" + count((* foldShoot:Internode, (foldShoot.plantNumber == pb.plantNumber && foldShoot.lastFoldStep == ctx.foldStep && foldShoot.foldRecv == 1) *))
+          + "/" + count((* foldShootTotal:Internode, (foldShootTotal.plantNumber == pb.plantNumber) *))
+          + " fruit=" + count((* foldFruit:FruitService, (foldFruit.plantNumber == pb.plantNumber && foldFruit.lastFoldStep == ctx.foldStep && foldFruit.foldRecv == 1) *))
+          + "/" + count((* foldFruitTotal:FruitService, (foldFruitTotal.plantNumber == pb.plantNumber) *))
+          + " flower=" + count((* foldFlower:Flower, (foldFlower.plantNumber == pb.plantNumber && foldFlower.lastFoldStep == ctx.foldStep && foldFlower.foldRecv == 1) *))
+          + "/" + count((* foldFlowerTotal:Flower, (foldFlowerTotal.plantNumber == pb.plantNumber) *))
+          + " structuralRoot=" + count((* foldRoot:StructuralRoot, (foldRoot.plantNumber == pb.plantNumber && foldRoot.lastFoldStep == ctx.foldStep && foldRoot.foldRecv == 1) *))
+          + "/" + count((* foldRootTotal:StructuralRoot, (foldRootTotal.plantNumber == pb.plantNumber) *))
+          + " fineRoot=" + count((* foldFine:FineRoot, (foldFine.plantNumber == pb.plantNumber && foldFine.lastFoldStep == ctx.foldStep && foldFine.foldRecv == 1) *))
+          + "/" + count((* foldFineTotal:FineRoot, (foldFineTotal.plantNumber == pb.plantNumber) *)));
+    }
+  }
+
+  missingFold:GrowingOrgan, (
+    debug_CT && missingFold.plantNumber == pb.plantNumber
+    && (missingFold.lastFoldStep != ctx.foldStep
+        || missingFold.foldRecv != missingFold.foldExpect)
+  ) ::> {
+    println("ERROR(CT-FOLD-COVERAGE): id=" + missingFold.getId()
+        + " class=" + missingFold.getClass().getSimpleName()
+        + " parentID=" + missingFold.parentID
+        + " rank=" + missingFold.rank
+        + " order=" + missingFold.order
+        + " plantNumber=" + missingFold.plantNumber
+        + " foldRecv=" + missingFold.foldRecv);
+  }
 ]
+
+/** O(N+E) CT9-compatible fold used by the production simple-root solve. */
+static void updateBranchFluxCached(PlantBase pb,
+    CarbonTransportSolveContext ctx, CarbonTransportTopology topology) {
+  // Complex-root topology remains on its unchanged legacy path in this branch.
+  if (useComplexRoot == true) {
+    updateBranchFlux(pb, ctx);
+    return;
+  }
+
+  if (foldTick < topology.maxLastFoldStep) {
+    foldTick = topology.maxLastFoldStep;
+  }
+  ctx.foldStep = ++foldTick;
+  ctx.totalGrowingOrganCount = topology.growingOrgans.size();
+  for (int organIndex = 0;
+      organIndex < topology.growingOrgans.size(); organIndex++) {
+    GrowingOrgan organ = (GrowingOrgan) topology.growingOrgans.get(organIndex);
+    organ.foldRecv = 0;
+    organ.foldExpect = 1;
+  }
+
+  for (Object petioleKeyObject : topology.petiolesById.keySet()) {
+    Long petioleKey = (Long) petioleKeyObject;
+    Petiole petioleNode = (Petiole) topology.petiolesById.get(petioleKey);
+    double rawA = petioleNode.sink_source_a;
+    double rawB = petioleNode.sink_source_b;
+    ArrayList ownedLeaves = ctList(topology.leavesByPetiole, petioleKey);
+    for (int leafIndex = 0; leafIndex < ownedLeaves.size(); leafIndex++) {
+      Leaf leafNode = (Leaf) ownedLeaves.get(leafIndex);
+      rawA += leafNode.branch_flux_a;
+      rawB += leafNode.branch_flux_b;
+      leafNode.foldRecv++;
+      leafNode.lastFoldStep = ctx.foldStep;
+      if (debug_CT && petioleNode.rank != leafNode.rank) {
+        println("WARN(CT-LEAF): rank mismatch retained by topology"
+            + " petioleId=" + petioleNode.getId()
+            + " petioleRank=" + petioleNode.rank
+            + " leafId=" + leafNode.getId()
+            + " leafRank=" + leafNode.rank);
+      }
+    }
+    petioleNode.branch_flux_a = rawA;
+    petioleNode.branch_flux_b = rawB;
+    petioleNode.Update_Branch_Flux();
+    petioleNode.lastFoldStep = ctx.foldStep;
+  }
+
+  for (Object flowerKeyObject : topology.flowersById.keySet()) {
+    Flower flowerNode = (Flower) topology.flowersById.get((Long) flowerKeyObject);
+    flowerNode.branch_flux_a = flowerNode.sink_source_a;
+    flowerNode.branch_flux_b = flowerNode.sink_source_b;
+    flowerNode.Update_Branch_Flux();
+    flowerNode.lastFoldStep = ctx.foldStep;
+  }
+
+  for (int orderIndex = 0;
+      orderIndex < topology.shootPostOrder.size(); orderIndex++) {
+    Long axisKey = (Long) topology.shootPostOrder.get(orderIndex);
+    Internode axisNode = (Internode) topology.internodesById.get(axisKey);
+    double sumA = axisNode.sink_source_a;
+    double sumB = axisNode.sink_source_b;
+
+    ArrayList childAxes = ctList(
+        topology.childInternodesByInternode, axisKey);
+    for (int childIndex = 0; childIndex < childAxes.size(); childIndex++) {
+      Long childKey = (Long) childAxes.get(childIndex);
+      Internode child = (Internode) topology.internodesById.get(childKey);
+      if (child.lastFoldStep != ctx.foldStep) {
+        ctx.foldCoverageComplete = false;
+        if (debug_CT) println("ERROR(FOLD): child axis not ready childId="
+            + child.getId() + " parentId=" + axisNode.getId());
+        continue;
+      }
+      sumA += child.branch_flux_a;
+      sumB += child.branch_flux_b;
+      child.foldRecv++;
+    }
+
+    ArrayList petioleChildren = ctList(
+        topology.childPetiolesByInternode, axisKey);
+    for (int childIndex = 0;
+        childIndex < petioleChildren.size(); childIndex++) {
+      Petiole child = (Petiole) petioleChildren.get(childIndex);
+      sumA += child.branch_flux_a;
+      sumB += child.branch_flux_b;
+      child.foldRecv++;
+    }
+    ArrayList fruitChildren = ctList(
+        topology.childFruitsByInternode, axisKey);
+    for (int childIndex = 0;
+        childIndex < fruitChildren.size(); childIndex++) {
+      FruitService child = (FruitService) fruitChildren.get(childIndex);
+      sumA += child.branch_flux_a;
+      sumB += child.branch_flux_b;
+      child.foldRecv++;
+      child.lastFoldStep = ctx.foldStep;
+    }
+    ArrayList flowerChildren = ctList(
+        topology.childFlowersByInternode, axisKey);
+    for (int childIndex = 0;
+        childIndex < flowerChildren.size(); childIndex++) {
+      Flower child = (Flower) flowerChildren.get(childIndex);
+      sumA += child.branch_flux_a;
+      sumB += child.branch_flux_b;
+      child.foldRecv++;
+    }
+    ArrayList directLeaves = ctList(
+        topology.directLeavesByInternode, axisKey);
+    for (int childIndex = 0;
+        childIndex < directLeaves.size(); childIndex++) {
+      Leaf child = (Leaf) directLeaves.get(childIndex);
+      sumA += child.branch_flux_a;
+      sumB += child.branch_flux_b;
+      child.foldRecv++;
+      child.lastFoldStep = ctx.foldStep;
+    }
+
+    axisNode.branch_flux_a = sumA;
+    axisNode.branch_flux_b = sumB;
+    axisNode.Update_Branch_Flux();
+    axisNode.lastFoldStep = ctx.foldStep;
+  }
+
+  foldSimpleRootLayers(pb, ctx, topology);
+  double rootA = (topology.simpleBasalRoot == null)
+      ? 0.0 : topology.simpleBasalRoot.branch_flux_a;
+  double rootB = (topology.simpleBasalRoot == null)
+      ? 0.0 : topology.simpleBasalRoot.branch_flux_b;
+  double shootA = 0.0;
+  double shootB = 0.0;
+  for (int basalIndex = 0;
+      basalIndex < topology.basalShootIds.size(); basalIndex++) {
+    Long basalKey = (Long) topology.basalShootIds.get(basalIndex);
+    Internode basalShoot = (Internode) topology.internodesById.get(basalKey);
+    if (basalShoot.lastFoldStep == ctx.foldStep) {
+      shootA += basalShoot.branch_flux_a;
+      shootB += basalShoot.branch_flux_b;
+      basalShoot.foldRecv++;
+    }
+  }
+  pb.branch_flux_a = rootA + shootA;
+  pb.branch_flux_b = rootB + shootB;
+
+  ctx.foldedGrowingOrganCount = 0;
+  for (int organIndex = 0;
+      organIndex < topology.growingOrgans.size(); organIndex++) {
+    GrowingOrgan organ = (GrowingOrgan) topology.growingOrgans.get(organIndex);
+    if (organ.lastFoldStep == ctx.foldStep
+        && organ.foldRecv == organ.foldExpect) {
+      ctx.foldedGrowingOrganCount++;
+    } else if (debug_CT) {
+      println("ERROR(CT-FOLD-COVERAGE): id=" + organ.getId()
+          + " class=" + organ.getClass().getSimpleName()
+          + " parentID=" + organ.parentID
+          + " foldRecv=" + organ.foldRecv);
+    }
+  }
+  ctx.foldCoverageComplete = ctx.foldedGrowingOrganCount
+      == ctx.totalGrowingOrganCount;
+  if (debug_CT) println("FOLD COVERAGE total="
+      + ctx.foldedGrowingOrganCount + "/" + ctx.totalGrowingOrganCount);
+}
 
 
 
@@ -1139,11 +2204,293 @@ static double validPlantBasePhiOrFloor(double phi) {
     return (isFiniteCarbonValue(sugar) && sugar >= 0.0) ? phi : CT_PHI_FLOOR;
 }
 
+/** Read the explicit accepted-hour marker with legacy saved-graph fallback. */
+static boolean hasAcceptedHourlyCarbonTransportState(PlantBase pb) {
+    if (pb == null) return false;
+    try {
+        return pb.ctHasAcceptedHourlyState;
+    } catch (NoSuchFieldError compatibilityError) {
+        return false;
+    }
+}
+
+/** Write the explicit accepted-hour marker with legacy saved-graph fallback. */
+static void setAcceptedHourlyCarbonTransportState(PlantBase pb,
+        boolean accepted) {
+    if (pb == null) return;
+    try {
+        pb.ctHasAcceptedHourlyState = accepted;
+    } catch (NoSuchFieldError compatibilityError) {
+        // Compatibility with legacy saved graphs that predate this state flag.
+    }
+}
+
+/** Existing CT initialization seed, with only the existing numerical floor as fallback. */
+static double carbonTransportInitializationPhi() {
+    return isValidPhi(SOURCEcp) ? SOURCEcp : CT_PHI_FLOOR;
+}
+
+/**
+ * Make the first pre-solve state internally consistent before it is snapshotted.
+ * This is initialization recovery, not a biological sugar-concentration floor.
+ */
+static void prepareInitialCarbonTransportSnapshotState(PlantBase pb) {
+    double initialPhi = pb.cpt;
+    if (!isValidPhi(initialPhi)) {
+        initialPhi = isValidPhi(pb.cpb)
+            ? pb.cpb : carbonTransportInitializationPhi();
+    }
+    double initialSugar = sugarFromCp(initialPhi);
+    if (!isFiniteCarbonValue(initialSugar) || initialSugar <= 0.0) {
+        initialPhi = carbonTransportInitializationPhi();
+        initialSugar = sugarFromCp(initialPhi);
+    }
+    pb.cpb = initialPhi;
+    pb.cpt = initialPhi;
+    pb.sugarConcentration_phloem = initialSugar;
+    if (!isFiniteCarbonValue(pb.sugarConcentration_phloem_pre)
+            || pb.sugarConcentration_phloem_pre <= 0.0) {
+        pb.sugarConcentration_phloem_pre = initialSugar;
+    }
+
+    double organInitializationPhi = carbonTransportInitializationPhi();
+    for (GrowingOrgan initialOrgan : (* initialStateOrgan:GrowingOrgan, (
+        initialStateOrgan.plantNumber == pb.plantNumber
+    ) *)) {
+        double distalPhi = isValidPhi(initialOrgan.cpt)
+            ? initialOrgan.cpt
+            : (isValidPhi(initialOrgan.cpb)
+                ? initialOrgan.cpb : organInitializationPhi);
+        double basalPhi = isValidPhi(initialOrgan.cpb)
+            ? initialOrgan.cpb : distalPhi;
+        initialOrgan.cpb = basalPhi;
+        initialOrgan.cpt = distalPhi;
+    }
+
+    updateResistence(pb);
+    pb.updateCTRs(Math.sqrt(2.0 * pb.cpt));
+}
+
 static double retainPlantBasePhi(PlantBase pb, double fallbackPhi, int reason) {
     pb.ctPlantBaseFallbackUsed = 1;
     pb.ctPlantBaseFallbackReason = reason;
     pb.ctPlantBaseFallbackCount++;
     return fallbackPhi;
+}
+
+static double clampCtDampingFactor(double alpha) {
+    if (!isFiniteCarbonValue(alpha)) return CT_DAMPING_INITIAL;
+    return Math.max(CT_DAMPING_MIN, Math.min(CT_DAMPING_MAX, alpha));
+}
+
+static double underRelaxPlantBasePhi(double previousPhi, double rawPhi, double alpha) {
+    double previous = validPlantBasePhiOrFloor(previousPhi);
+    double raw = validPlantBasePhiOrFloor(rawPhi);
+    double accepted = previous + clampCtDampingFactor(alpha) * (raw - previous);
+    return validPlantBasePhiOrFloor(accepted);
+}
+
+static void markInvalidUnfoldTrial(CarbonTransportSolveContext ctx) {
+    if (ctx == null) return;
+    ctx.invalidUnfoldTrial = true;
+    ctx.invalidUnfoldTrialCount++;
+    ctx.totalInvalidUnfoldTrialCount++;
+    ctx.converged = false;
+}
+
+/** Claim exactly one transport parent for an unfold write in the current pass. */
+static boolean claimCarbonUnfoldOwner(GrowingOrgan organ, long ownerId,
+        CarbonTransportSolveContext ctx) {
+    if (organ == null || ctx == null) return false;
+    if (organ.lastUnfoldStep == ctx.unfoldStep) {
+        organ.unfoldRecv++;
+        if (debug_CT) {
+            println("ERROR(CT-UNFOLD): ambiguous owner id=" + organ.getId()
+                + " class=" + organ.getClass().getSimpleName()
+                + " firstOwner=" + organ.lastWriterId
+                + " secondOwner=" + ownerId);
+        }
+        return false;
+    }
+    organ.lastUnfoldStep = ctx.unfoldStep;
+    organ.lastWriterId = ownerId;
+    organ.unfoldRecv = 1;
+    return true;
+}
+
+/**
+ * Under-relax one raw child-organ Phi trial without destroying a valid iterate.
+ * Invalid raw or accepted values retain the previous finite Phi and invalidate
+ * the complete nonlinear pass. The numerical floor is initialization/recovery
+ * state only, when no valid previous Phi exists.
+ */
+static double underRelaxOrganPhi(double previousPhi, double trialPhi,
+        double alpha, CarbonTransportSolveContext ctx) {
+    double previous = isValidPhi(previousPhi) ? previousPhi : CT_PHI_FLOOR;
+    if (!isValidPhi(trialPhi)) {
+        markInvalidUnfoldTrial(ctx);
+        return previous;
+    }
+    double accepted = previous
+        + clampCtDampingFactor(alpha) * (trialPhi - previous);
+    if (!isValidPhi(accepted)) {
+        markInvalidUnfoldTrial(ctx);
+        return previous;
+    }
+    return accepted;
+}
+
+/** Unfold one validated simple StructuralRoot and its same-layer FineRoot. */
+static boolean unfoldSimpleRootSegment(StructuralRoot rootNode,
+        FineRoot fineRootNode, double upstreamPhi, long upstreamOwnerId,
+        CarbonTransportSolveContext ctx) {
+    if (rootNode == null || fineRootNode == null || ctx == null) return false;
+    if (!claimCarbonUnfoldOwner(rootNode, upstreamOwnerId, ctx)) {
+        ctx.simpleRootUnfoldValid = false;
+        return false;
+    }
+    rootNode.cpb = upstreamPhi;
+    double rootTrialPhi = rootNode.cpb
+        * (1.0 - rootNode.branch_flux_b * rootNode.r)
+        - rootNode.branch_flux_a * rootNode.r - rootNode.xp;
+    rootNode.cpt = underRelaxOrganPhi(
+        rootNode.cpt, rootTrialPhi, ctx.dampingFactor, ctx);
+    ctx.simpleStructuralRootUnfolded++;
+
+    if (!claimCarbonUnfoldOwner(
+        fineRootNode, rootNode.getId(), ctx)) {
+        ctx.simpleRootUnfoldValid = false;
+        return false;
+    }
+    fineRootNode.cpb = rootNode.cpt;
+    double fineTrialPhi = fineRootNode.cpb
+        * (1.0 - fineRootNode.branch_flux_b * fineRootNode.r)
+        - fineRootNode.branch_flux_a * fineRootNode.r
+        - fineRootNode.xp;
+    fineRootNode.cpt = underRelaxOrganPhi(
+        fineRootNode.cpt, fineTrialPhi,
+        ctx.dampingFactor, ctx);
+    ctx.simpleFineRootUnfolded++;
+    return true;
+}
+
+/** Deterministic surface-to-deep unfold for useComplexRoot == false only. */
+static void unfoldSimpleRootLayers(PlantBase pb,
+    CarbonTransportSolveContext ctx, CarbonTransportTopology topology) {
+  ctx.simpleRootUnfoldValid = ctx.simpleRootTopologyValid
+      && ctx.simpleRootFoldValid;
+  StructuralRoot previousRoot = null;
+  for (int unfoldIndex = 0;
+      unfoldIndex < topology.simpleRootUnfoldOrder.size(); unfoldIndex++) {
+    StructuralRoot rootNode = (StructuralRoot)
+        topology.simpleRootUnfoldOrder.get(unfoldIndex);
+    FineRoot fineNode = (FineRoot) topology.fineRootByLayer.get(
+        Integer.valueOf(rootNode.layer));
+    double upstreamPhi = (previousRoot == null) ? pb.cpt : previousRoot.cpt;
+    long upstreamOwnerId = (previousRoot == null)
+        ? pb.getId() : previousRoot.getId();
+    if (!ctx.simpleRootUnfoldValid
+        || !unfoldSimpleRootSegment(rootNode, fineNode,
+            upstreamPhi, upstreamOwnerId, ctx)) {
+      ctx.simpleRootUnfoldValid = false;
+    }
+    previousRoot = rootNode;
+  }
+  ctx.simpleRootUnfoldValid = ctx.simpleRootUnfoldValid
+      && ctx.simpleStructuralRootUnfolded == ctx.simpleStructuralRootExpected
+      && ctx.simpleFineRootUnfolded == ctx.simpleFineRootExpected;
+}
+
+static double adaptCtDampingFactor(double alpha, double previousMerit, double currentMerit) {
+    double nextAlpha = clampCtDampingFactor(alpha);
+    if (!isFiniteCarbonValue(currentMerit) || currentMerit < 0.0) {
+        return Math.max(CT_DAMPING_MIN, 0.5 * nextAlpha);
+    }
+    if (!isFiniteCarbonValue(previousMerit) || previousMerit < 0.0) {
+        return nextAlpha;
+    }
+    if (currentMerit > 1.05 * previousMerit) {
+        return Math.max(CT_DAMPING_MIN, 0.5 * nextAlpha);
+    }
+    if (currentMerit < 0.7 * previousMerit) {
+        return Math.min(CT_DAMPING_MAX, 1.25 * nextAlpha);
+    }
+    if (currentMerit <= previousMerit) {
+        return Math.min(CT_DAMPING_MAX, nextAlpha + 0.05);
+    }
+    return nextAlpha;
+}
+
+static void resetCarbonTransportPassState(CarbonTransportSolveContext ctx) {
+    ctx.convergenceError = 0.0;
+    ctx.relativeFluxError = 0.0;
+    ctx.oldFluxMagnitude = 0.0;
+    ctx.newFluxMagnitude = 0.0;
+    ctx.invalidUnfoldTrial = false;
+    ctx.invalidUnfoldTrialCount = 0;
+}
+
+static double ctNormalizedError(double absoluteError, double scale) {
+    if (!isFiniteCarbonValue(absoluteError) || absoluteError < 0.0) {
+        return Double.POSITIVE_INFINITY;
+    }
+    double safeScale = isFiniteCarbonValue(scale) ? Math.max(scale, 1e-12) : 1e-12;
+    double relativeError = absoluteError / safeScale;
+    // The solve accepts either criterion, so its merit is the better normalized one.
+    return Math.min(absoluteError / CT_ABS_FLUX_TOL,
+        relativeError / CT_REL_FLUX_TOL);
+}
+
+static boolean ctMixedErrorConverged(double absoluteError, double scale) {
+    if (!isFiniteCarbonValue(absoluteError) || absoluteError < 0.0) {
+        return false;
+    }
+    double safeScale = isFiniteCarbonValue(scale) ? Math.max(scale, 1e-12) : 1e-12;
+    return absoluteError <= CT_ABS_FLUX_TOL
+        || absoluteError / safeScale <= CT_REL_FLUX_TOL;
+}
+
+static boolean ctSolveConverged(double absoluteFluxError, double fluxScale,
+        double plantBaseResidual, double plantBaseScale) {
+    return ctMixedErrorConverged(absoluteFluxError, fluxScale)
+        && ctMixedErrorConverged(plantBaseResidual, plantBaseScale);
+}
+
+/** Exact active fruit unloading at one Phi without updating fruit state (mg C h-1). */
+static double exactFruitActiveUnloadingMg(FruitService fruit, double phi) {
+    if (fruit == null) return 0.0;
+    double activity = fruit.shouldUsePreT1PotentialGrowth()
+        ? 1.0 : SinkUnloading_fromSugar(phi, fruit.km_pri);
+    double exactActive = fruit.structureDM_PRI_PT * activity;
+    return isFiniteCarbonValue(exactActive) ? exactActive : 0.0;
+}
+
+/** Exact signed direct fruit mass flow at one Phi without committing references (mg C h-1). */
+static double exactFruitMassFlowMg(FruitService fruit, double phi) {
+    if (fruit == null) return 0.0;
+    double exactMass = fruit.getDirectMassFlowCarbon(sugarFromCp(phi));
+    return isFiniteCarbonValue(exactMass) ? exactMass : 0.0;
+}
+
+/** Exact intended CTRAM fruit import: active unloading plus signed mass flow (mg C h-1). */
+static double exactFruitUnloadingMg(FruitService fruit, double phi) {
+    return exactFruitActiveUnloadingMg(fruit, phi)
+        + exactFruitMassFlowMg(fruit, phi);
+}
+
+/** Exact derivative of intended fruit import at one Phi (mg C h-1 per Phi). */
+static double exactFruitUnloadingDerivativePhiMg(
+        FruitService fruit, double phi) {
+    if (fruit == null) return 0.0;
+    double activeDerivative = fruit.shouldUsePreT1PotentialGrowth()
+        ? 0.0
+        : fruit.structureDM_PRI_PT
+            * dSinkUnloading_fromSugar_dcp(phi, fruit.km_pri);
+    double sugar = sugarFromCp(phi);
+    double massDerivative = fruit.getDirectMassFlowDerivativePhi(phi, sugar);
+    if (!isFiniteCarbonValue(activeDerivative)) activeDerivative = 0.0;
+    if (!isFiniteCarbonValue(massDerivative)) massDerivative = 0.0;
+    return activeDerivative + massDerivative;
 }
 
 static double solvePlantBasePhi(double branchA, double branchB,
@@ -1173,15 +2520,40 @@ static double solvePlantBasePhi(double branchA, double branchB,
     return candidate;
 }
 
-static void applyGuardedPlantBaseCarbonBoundary(PlantBase pb) {
-    double previousPhi = pb.cpt;
-    pb.cpb = solvePlantBasePhi(
-        pb.branch_flux_a, pb.branch_flux_b, previousPhi, pb);
-    pb.cpt = pb.cpb;
+static void installPlantBaseCarbonBoundary(PlantBase pb, double acceptedPhi) {
+    pb.cpb = acceptedPhi;
+    pb.cpt = acceptedPhi;
     pb.j = pb.branch_flux_a + pb.branch_flux_b * pb.cpt;
     pb.ctPlantBaseResidual = pb.j;
     pb.sugarConcentration_phloem = sugarFromCp(pb.cpt);
     pb.sugarConcentration_phloem_pre = pb.sugarConcentration_phloem;
+}
+
+static void applyGuardedPlantBaseCarbonBoundary(PlantBase pb, double alpha) {
+    double previousPhi = pb.cpt;
+    double rawPhi = solvePlantBasePhi(
+        pb.branch_flux_a, pb.branch_flux_b, previousPhi, pb);
+    installPlantBaseCarbonBoundary(pb,
+        underRelaxPlantBasePhi(previousPhi, rawPhi, alpha));
+}
+
+static void applyGuardedPlantBaseCarbonBoundary(
+        PlantBase pb, CarbonTransportSolveContext ctx) {
+    double previousPhi = pb.cpt;
+    double rawPhi = solvePlantBasePhi(
+        pb.branch_flux_a, pb.branch_flux_b, previousPhi, pb);
+    double acceptedPhi = underRelaxPlantBasePhi(
+        previousPhi, rawPhi, ctx.dampingFactor);
+    installPlantBaseCarbonBoundary(pb, acceptedPhi);
+
+    ctx.rawPlantBasePhi = rawPhi;
+    ctx.acceptedPlantBasePhi = acceptedPhi;
+    ctx.plantBaseResidual = Math.abs(pb.ctPlantBaseResidual);
+    ctx.plantBaseScale = Math.max(Math.max(Math.abs(pb.branch_flux_a),
+        Math.abs(pb.branch_flux_b * acceptedPhi)), 1e-12);
+    ctx.plantBaseRelativeResidual = ctx.plantBaseResidual / ctx.plantBaseScale;
+    ctx.plantBaseNormalizedError = ctNormalizedError(
+        ctx.plantBaseResidual, ctx.plantBaseScale);
 }
 
 static void updateCarbonPotential(PlantBase pb, CarbonTransportSolveContext ctx)
@@ -1199,99 +2571,118 @@ static void updateCarbonPotential(PlantBase pb, CarbonTransportSolveContext ctx)
     ctx.unfoldStep = ++unfoldTick;
   }
 
+  unfoldReset:GrowingOrgan, (
+    unfoldReset.plantNumber == pb.plantNumber
+  ) ::> {
+    unfoldReset.unfoldRecv = 0;
+    unfoldReset.lastWriterId = -1L;
+  }
+
   {
-    applyGuardedPlantBaseCarbonBoundary(pb);
+    applyGuardedPlantBaseCarbonBoundary(pb, ctx);
     //println("pb.cpt: " + pb.cpt + " pb.sugarConcentration_phloem: " + pb.sugarConcentration_phloem);
     if (debug_CT) println("PB A=" + pb.branch_flux_a + " B=" + pb.branch_flux_b + " cpt=" + pb.cpt + " j=" + pb.j);
   }
 
-// --- UNFOLD from PlantBase to Trunk + Structural-Root tree (top-down) ---
+// --- Legacy complex-root unfold plus shared basal shoot unfold ---
 {
-  // 1) PlantBase → basal StructuralRoot (seed) and Trunk
-  StructuralRoot s0 = pb.getChildStructuralRoot();
-  if (s0 != null && (s0.plantNumber != pb.plantNumber)) s0 = null;
-  if (s0 != null) {
-    s0.cpb = pb.cpt;
-    s0.cpt = safePhi(s0.cpb * (1 - s0.branch_flux_b * s0.r) - s0.branch_flux_a * s0.r - s0.xp);
-    if (debug_CT) println("SR-UNFOLD: basal id=" + s0.getId() + " layer=" + s0.layer + " cpb=" + s0.cpb + " cpt=" + s0.cpt);
-    if (s0.lastUnfoldStep == ctx.unfoldStep && debug_CT) println("WARN: double write SR (basal) id=" + s0.getId());
-    s0.lastUnfoldStep = ctx.unfoldStep;
+  if (useComplexRoot == true) {
+  long rootCount = count((* unfoldRootCount:StructuralRoot, (
+    unfoldRootCount.plantNumber == pb.plantNumber
+  ) *));
+  int minRootLayer = 0;
+  if (rootCount > 0) {
+    minRootLayer = min((* unfoldRootMin:StructuralRoot, (
+      unfoldRootMin.plantNumber == pb.plantNumber
+    ) *)[layer]);
+  }
 
-    // 2) Top-down traversal of the structural-root tree
-    //    (DFS using raw ArrayList for Java 1.5 compatibility)
-    java.util.ArrayList stack = new java.util.ArrayList();
-    stack.add(s0);
+  java.util.ArrayList rootStack = new java.util.ArrayList();
+  for (StructuralRoot basalRoot : (* unfoldBasalRoot:StructuralRoot, (
+      unfoldBasalRoot.plantNumber == pb.plantNumber
+  ) *)) {
+    long basalParentId = ctStructuralRootParentId(
+        basalRoot, pb.plantNumber);
+    boolean isBasal = basalParentId == -1L
+        && (ctRootPointsToPlantBase(basalRoot, pb)
+            || basalRoot.layer == minRootLayer);
+    if (isBasal && claimCarbonUnfoldOwner(
+        basalRoot, pb.getId(), ctx)) {
+      basalRoot.cpb = pb.cpt;
+      double basalTrialPhi = basalRoot.cpb
+          * (1.0 - basalRoot.branch_flux_b * basalRoot.r)
+          - basalRoot.branch_flux_a * basalRoot.r - basalRoot.xp;
+      basalRoot.cpt = underRelaxOrganPhi(
+          basalRoot.cpt, basalTrialPhi, ctx.dampingFactor, ctx);
+      rootStack.add(basalRoot);
+    }
+  }
 
-    while (!stack.isEmpty()) {
-      StructuralRoot parent = (StructuralRoot) stack.remove(stack.size() - 1);
-
-      int n = parent.getChildStructuralRootCount();
-      for (int k = 0; k < n; k++) {
-        long cid = parent.getChildStructuralRootIdAt(k);
-        StructuralRoot ch = parent.getStructuralRoot(cid);
-        if (ch == null ||
-            ch.plantNumber != pb.plantNumber) continue;
-
-        ch.cpb = parent.cpt;
-        ch.cpt = safePhi(ch.cpb * (1 - ch.branch_flux_b * ch.r) - ch.branch_flux_a * ch.r - ch.xp);
-
-        if (debug_CT) {
-          println("SR-UNFOLD: parent id=" + parent.getId() + " L" + parent.layer
-                + " -> child id=" + ch.getId() + " L" + ch.layer
-                + " | cpb=" + ch.cpb + " cpt=" + ch.cpt);
-        }
-        if (ch.lastUnfoldStep == ctx.unfoldStep && debug_CT) println("WARN: double write SR id=" + ch.getId());
-        ch.lastUnfoldStep = ctx.unfoldStep;
-
-        stack.add(ch);
+  while (!rootStack.isEmpty()) {
+    StructuralRoot rootParent = (StructuralRoot)
+        rootStack.remove(rootStack.size() - 1);
+    for (StructuralRoot rootChild : (* unfoldRootChild:StructuralRoot, (
+        unfoldRootChild.plantNumber == pb.plantNumber
+    ) *)) {
+      long childParentId = ctStructuralRootParentId(
+          rootChild, pb.plantNumber);
+      if (childParentId == rootParent.getId()
+          && claimCarbonUnfoldOwner(rootChild, rootParent.getId(), ctx)) {
+        rootChild.cpb = rootParent.cpt;
+        double childTrialPhi = rootChild.cpb
+            * (1.0 - rootChild.branch_flux_b * rootChild.r)
+            - rootChild.branch_flux_a * rootChild.r - rootChild.xp;
+        rootChild.cpt = underRelaxOrganPhi(
+            rootChild.cpt, childTrialPhi, ctx.dampingFactor, ctx);
+      rootStack.add(rootChild);
       }
     }
-  } else if (debug_CT) {
-    println("SR-UNFOLD: no basal StructuralRoot under PlantBase.");
+  }
   }
 
-  // Trunk unfold stays as before
-  Internode tr = pb.getChildInternode();
-  if (tr != null && (tr.plantNumber != pb.plantNumber)) tr = null;
-  if (tr != null) {
-    tr.cpb = pb.cpt;
-    tr.cpt = safePhi(tr.cpb * (1 - tr.branch_flux_b * tr.r) - tr.branch_flux_a * tr.r - tr.xp);
-    if (debug_CT) println("unfolding trunk");
-    if (tr.lastUnfoldStep == ctx.unfoldStep && debug_CT) println("WARN: double write trunk id=" + tr.getId());
-    tr.lastUnfoldStep = ctx.unfoldStep;
+  Internode basalShoot = pb.getChildInternode();
+  if (basalShoot != null && basalShoot.plantNumber != pb.plantNumber) {
+    basalShoot = null;
+  }
+  if (basalShoot != null && claimCarbonUnfoldOwner(
+      basalShoot, pb.getId(), ctx)) {
+    basalShoot.cpb = pb.cpt;
+    double shootTrialPhi = basalShoot.cpb
+        * (1.0 - basalShoot.branch_flux_b * basalShoot.r)
+        - basalShoot.branch_flux_a * basalShoot.r - basalShoot.xp;
+    basalShoot.cpt = underRelaxOrganPhi(
+        basalShoot.cpt, shootTrialPhi, ctx.dampingFactor, ctx);
   }
 }
 
-// --- UNFOLD: StructuralRoot → FineRoot (terminal) ---
-	sd:StructuralRoot sdr:FineRoot,
-	(sdr.parentID == sd.getId()
-	 && sd.frID == sdr.getId()
-	 && sd.plantNumber == pb.plantNumber
-	 && sdr.plantNumber == pb.plantNumber
-	 && sd.ID == sdr.ID) ::> {
-	  // FineRoot takes cpb from its parent StructuralRoot cpt
-	  sdr.cpb = sd.cpt;
-
-  // Standard potential update: cpt = cpb*(1 - B*r) - A*r - xp (clamped)
-  sdr.cpt = safePhi(sdr.cpb * (1 - sdr.branch_flux_b * sdr.r)
-                            - sdr.branch_flux_a * sdr.r
-                            - sdr.xp);
-
-  if (debug_CT) {
-    println("FR-UNFOLD: SR id=" + sd.getId() + " L" + sd.layer
-          + " -> FR id=" + sdr.getId()
-          + " | cpb=" + sdr.cpb + " cpt=" + sdr.cpt);
+// --- UNFOLD: StructuralRoot -> uniquely pointer-owned FineRoot ---
+fineRootTerminal:FineRoot, (
+  useComplexRoot == true
+  && fineRootTerminal.plantNumber == pb.plantNumber
+) ::> {
+  if (fineRootTerminal.ctTransportOwnerCount == 1) {
+    Object fineOwnerObject = graph().getNodeForId(
+        fineRootTerminal.ctTransportOwnerId);
+    if (fineOwnerObject instanceof StructuralRoot) {
+    StructuralRoot rootOwner = (StructuralRoot) fineOwnerObject;
+    if (rootOwner.lastUnfoldStep == ctx.unfoldStep
+        && claimCarbonUnfoldOwner(
+            fineRootTerminal, rootOwner.getId(), ctx)) {
+      fineRootTerminal.cpb = rootOwner.cpt;
+      double fineTrialPhi = fineRootTerminal.cpb
+          * (1.0 - fineRootTerminal.branch_flux_b * fineRootTerminal.r)
+          - fineRootTerminal.branch_flux_a * fineRootTerminal.r
+          - fineRootTerminal.xp;
+      fineRootTerminal.cpt = underRelaxOrganPhi(
+          fineRootTerminal.cpt, fineTrialPhi,
+          ctx.dampingFactor, ctx);
+    }
+    }
   }
-
-  // Double-write guard (same pattern as trunk/internodes)
-  if (sdr.lastUnfoldStep == ctx.unfoldStep && debug_CT) {
-    println("WARN: double write FineRoot id=" + sdr.getId());
-  }
-  sdr.lastUnfoldStep = ctx.unfoldStep;
 }
 
 
-//unfolding the shoot
+// Unfold the above-ground transport tree from low order/rank to its children.
   {
     long scopedInternodeCount = count((* it:Internode, (
       it.plantNumber == pb.plantNumber
@@ -1322,58 +2713,57 @@ static void updateCarbonPotential(PlantBase pb, CarbonTransportSolveContext ctx)
           parent.plantNumber == pb.plantNumber
         ) ::> {
           if (debug_CT) println("O" + o + " rank " + r + " id=" + parent.getId() + " cpb=" + parent.cpb + " cpt=" + parent.cpt);
-          int k, n;
-
-          n = parent.getChildInternodeCount();
-          for (k = 0; k < n; k++) {
-            long id = parent.getChildInternodeIdAt(k);
-            Internode ch = parent.getInternode(id);
-            if (ch != null && ch.parentID == parent.getId() &&
-                ch.plantNumber == pb.plantNumber) {
-              if (ch.lastUnfoldStep == ctx.unfoldStep && debug_CT) println("WARN: double write Internode id=" + ch.getId());
-              ch.lastUnfoldStep = ctx.unfoldStep;
+          for (Internode ch : (* unfoldChildAxis:Internode, (
+              unfoldChildAxis.plantNumber == pb.plantNumber
+              && unfoldChildAxis.parentID == parent.getId()
+          ) *)) {
+            if (claimCarbonUnfoldOwner(ch, parent.getId(), ctx)) {
               ch.cpb = parent.cpt;
-              ch.cpt = safePhi(ch.cpb * (1 - ch.branch_flux_b * ch.r) - ch.branch_flux_a * ch.r - ch.xp);
+              double childShootTrialPhi = ch.cpb * (1.0 - ch.branch_flux_b * ch.r)
+                  - ch.branch_flux_a * ch.r - ch.xp;
+              ch.cpt = underRelaxOrganPhi(
+                  ch.cpt, childShootTrialPhi, ctx.dampingFactor, ctx);
               if (debug_CT) println("  -> child int id=" + ch.getId() + " cpb=" + ch.cpb + " cpt=" + ch.cpt);
             }
           }
 
-          n = parent.getChildPetioleCount();
-          for (k = 0; k < n; k++) {
-            Petiole p = parent.getPetiole(parent.getChildPetioleIdAt(k));
-            if (p != null &&
-                p.plantNumber == pb.plantNumber) {
-              if (p.lastUnfoldStep == ctx.unfoldStep && debug_CT) println("WARN: double write Petiole id=" + p.getId());
-              p.lastUnfoldStep = ctx.unfoldStep;
+          for (Petiole p : (* unfoldPetiole:Petiole, (
+              unfoldPetiole.plantNumber == pb.plantNumber
+              && unfoldPetiole.parentID == parent.getId()
+          ) *)) {
+            if (claimCarbonUnfoldOwner(p, parent.getId(), ctx)) {
               p.cpb = parent.cpt;
-              p.cpt = safePhi(p.cpb * (1 - p.branch_flux_b * p.r) - p.branch_flux_a * p.r - p.xp);
+              double petioleTrialPhi = p.cpb * (1.0 - p.branch_flux_b * p.r)
+                  - p.branch_flux_a * p.r - p.xp;
+              p.cpt = underRelaxOrganPhi(
+                  p.cpt, petioleTrialPhi, ctx.dampingFactor, ctx);
               if (debug_CT) println("  -> child petiole id=" + p.getId() + " cpb=" + p.cpb + " cpt=" + p.cpt);
             }
           }
 
-          n = parent.getChildFruitCount();
-          for (k = 0; k < n; k++) {
-            FruitService f = parent.getFruit(parent.getChildFruitIdAt(k));
-            if (f != null &&
-                f.plantNumber == pb.plantNumber) {
-              if (f.lastUnfoldStep == ctx.unfoldStep && debug_CT) println("WARN: double write Fruit id=" + f.getId());
-              f.lastUnfoldStep = ctx.unfoldStep;
+          for (FruitService f : (* unfoldFruit:FruitService, (
+              unfoldFruit.plantNumber == pb.plantNumber
+              && unfoldFruit.parentID == parent.getId()
+          ) *)) {
+            if (claimCarbonUnfoldOwner(f, parent.getId(), ctx)) {
               f.cpb = parent.cpt;
-              f.cpt = safePhi(f.cpb);
+              f.cpt = underRelaxOrganPhi(
+                  f.cpt, f.cpb, ctx.dampingFactor, ctx);
               if (debug_CT) 
               	  println("  -> child fruit id=" + f.getId() + " cpb=" + f.cpb + " cpt=" + f.cpt);
             }
           }
           
-          n = parent.getChildFlowerCount();
-          for (k = 0; k < n; k++) {
-            Flower fl = parent.getFlower(parent.getChildFlowerIdAt(k));
-            if (fl != null &&
-                fl.plantNumber == pb.plantNumber) {
-              if (fl.lastUnfoldStep == ctx.unfoldStep && debug_CT) println("WARN: double write Flower id=" + fl.getId());
-              fl.lastUnfoldStep = ctx.unfoldStep;
+          for (Flower fl : (* unfoldFlower:Flower, (
+              unfoldFlower.plantNumber == pb.plantNumber
+              && unfoldFlower.parentID == parent.getId()
+          ) *)) {
+            if (claimCarbonUnfoldOwner(fl, parent.getId(), ctx)) {
               fl.cpb = parent.cpt;
-              fl.cpt = safePhi(fl.cpb * (1 - fl.branch_flux_b * fl.r) - fl.branch_flux_a * fl.r - fl.xp);
+              double flowerTrialPhi = fl.cpb * (1.0 - fl.branch_flux_b * fl.r)
+                  - fl.branch_flux_a * fl.r - fl.xp;
+              fl.cpt = underRelaxOrganPhi(
+                  fl.cpt, flowerTrialPhi, ctx.dampingFactor, ctx);
               if (debug_CT) println("  -> child flower id=" + fl.getId() + " cpb=" + fl.cpb + " cpt=" + fl.cpt);
             }
           }
@@ -1384,138 +2774,333 @@ static void updateCarbonPotential(PlantBase pb, CarbonTransportSolveContext ctx)
     }
   }
 
-	sd:Petiole (-->){1,5} sdr:Leaf, (
-	  sd.rank == sdr.rank &&
-	  sd.plantNumber == pb.plantNumber &&
-	  sdr.plantNumber == pb.plantNumber
-	) ::> {
-	  sd.cpb = safePhi(sd.cpb);
-	  sd.cpt = safePhi(sd.cpt);
-	
-	  sdr.cpb = sd.cpt;
-	  sdr.cpt = sdr.cpb;
-	  
-	  if (sdr.lastUnfoldStep == ctx.unfoldStep && debug_CT) {
-		println("WARN: double write Leaf id=" + sdr.getId());
-	  }
-	  sdr.lastUnfoldStep = ctx.unfoldStep;
-	}
-
-	p:Petiole (-->){1,5} l:Leaf, (
-	  p.rank != l.rank &&
-	  p.plantNumber == pb.plantNumber &&
-	  l.plantNumber == pb.plantNumber
-	) ::> {
-	  if (debug_CT) {
-		println("WARN(CT-LEAF): Petiole-Leaf rank mismatch"
-			+ " petioleId=" + p.getId()
-			+ " petioleRank=" + p.rank
-			+ " leafId=" + l.getId()
-			+ " leafRank=" + l.rank
-			+ " leafType=" + l.organType
-			+ " leafParentID=" + l.parentID
-			+ " petioleParentID=" + p.parentID);
-	  }
-	}
+  /* Resolve each Leaf once. Rank mismatch is reported but never gates transport. */
+  unfoldLeaf:Leaf, (
+    unfoldLeaf.plantNumber == pb.plantNumber
+  ) ::> {
+    GrowingOrgan leafOwner = null;
+    if (unfoldLeaf.ctTransportOwnerCount == 1) {
+      Object leafOwnerObject = graph().getNodeForId(
+          unfoldLeaf.ctTransportOwnerId);
+      if (leafOwnerObject instanceof Petiole) {
+        leafOwner = (Petiole) leafOwnerObject;
+      }
+    } else if (unfoldLeaf.ctTransportOwnerCount == 0) {
+      Organ biologicalParent = unfoldLeaf.getParent();
+      if (biologicalParent instanceof Internode
+          && biologicalParent.plantNumber == pb.plantNumber) {
+        leafOwner = (Internode) biologicalParent;
+      }
+    }
+    if (leafOwner != null
+        && leafOwner.lastUnfoldStep == ctx.unfoldStep
+        && claimCarbonUnfoldOwner(
+            unfoldLeaf, leafOwner.getId(), ctx)) {
+      unfoldLeaf.cpb = leafOwner.cpt;
+      unfoldLeaf.cpt = underRelaxOrganPhi(
+          unfoldLeaf.cpt, unfoldLeaf.cpb,
+          ctx.dampingFactor, ctx);
+      if (debug_CT && leafOwner instanceof Petiole
+          && leafOwner.rank != unfoldLeaf.rank) {
+        println("WARN(CT-LEAF): rank mismatch retained by topology"
+            + " petioleId=" + leafOwner.getId()
+            + " petioleRank=" + leafOwner.rank
+            + " leafId=" + unfoldLeaf.getId()
+            + " leafRank=" + unfoldLeaf.rank);
+      }
+    }
+  }
 
   {
-    if (debug_CT) 
-    {
-      long total = count((* g:GrowingOrgan, (
-        g.plantNumber == pb.plantNumber
-      ) *));
-      long unfolded = count((* g:GrowingOrgan, (
-        g.lastUnfoldStep == ctx.unfoldStep &&
-        g.plantNumber == pb.plantNumber
-      ) *));
-      println("UNFOLD COVERAGE: " + unfolded + "/" + total);
-      long nLeaf = count((* l:Leaf, (
-        l.plantNumber == pb.plantNumber
-      ) *));
-      long nLeafUnfolded = count((* l:Leaf, (
-        l.lastUnfoldStep == ctx.unfoldStep &&
-        l.plantNumber == pb.plantNumber
-      ) *));
-      long nRosetteLeaf = count((* l:Leaf, (
-        "rosetteLeaf".equals(l.organType) &&
-        l.plantNumber == pb.plantNumber
-      ) *));
-      long nRosetteLeafUnfolded = count((* l:Leaf, (
-        "rosetteLeaf".equals(l.organType) &&
-        l.lastUnfoldStep == ctx.unfoldStep &&
-        l.plantNumber == pb.plantNumber
-      ) *));
-      println("CT LEAF UNFOLD COVERAGE: leaf=" + nLeafUnfolded + "/" + nLeaf
-        + " rosette=" + nRosetteLeafUnfolded + "/" + nRosetteLeaf);
-      long nFlower = count((* f:Flower, (
-        f.plantNumber == pb.plantNumber
-      ) *));
-      long nFlowerUnfolded = count((* f:Flower, (
-        f.lastUnfoldStep == ctx.unfoldStep &&
-        f.plantNumber == pb.plantNumber
-      ) *));
-      println("CT FLOWER UNFOLD COVERAGE: flower=" + nFlowerUnfolded + "/" + nFlower);
-  	}
+    ctx.unfoldedGrowingOrganCount = count((* unfoldComplete:GrowingOrgan, (
+      unfoldComplete.plantNumber == pb.plantNumber
+      && unfoldComplete.lastUnfoldStep == ctx.unfoldStep
+      && unfoldComplete.unfoldRecv == 1
+    ) *));
+    ctx.unfoldCoverageComplete = ctx.unfoldedGrowingOrganCount
+        == ctx.totalGrowingOrganCount;
+    if (debug_CT) {
+      println("UNFOLD COVERAGE total=" + ctx.unfoldedGrowingOrganCount
+          + "/" + ctx.totalGrowingOrganCount
+          + " leaf=" + count((* unfoldLeafDone:Leaf, (unfoldLeafDone.plantNumber == pb.plantNumber && unfoldLeafDone.lastUnfoldStep == ctx.unfoldStep && unfoldLeafDone.unfoldRecv == 1) *))
+          + "/" + count((* unfoldLeafAll:Leaf, (unfoldLeafAll.plantNumber == pb.plantNumber) *))
+          + " petiole=" + count((* unfoldPetioleDone:Petiole, (unfoldPetioleDone.plantNumber == pb.plantNumber && unfoldPetioleDone.lastUnfoldStep == ctx.unfoldStep && unfoldPetioleDone.unfoldRecv == 1) *))
+          + "/" + count((* unfoldPetioleAll:Petiole, (unfoldPetioleAll.plantNumber == pb.plantNumber) *))
+          + " shoot=" + count((* unfoldShootDone:Internode, (unfoldShootDone.plantNumber == pb.plantNumber && unfoldShootDone.lastUnfoldStep == ctx.unfoldStep && unfoldShootDone.unfoldRecv == 1) *))
+          + "/" + count((* unfoldShootAll:Internode, (unfoldShootAll.plantNumber == pb.plantNumber) *))
+          + " fruit=" + count((* unfoldFruitDone:FruitService, (unfoldFruitDone.plantNumber == pb.plantNumber && unfoldFruitDone.lastUnfoldStep == ctx.unfoldStep && unfoldFruitDone.unfoldRecv == 1) *))
+          + "/" + count((* unfoldFruitAll:FruitService, (unfoldFruitAll.plantNumber == pb.plantNumber) *))
+          + " flower=" + count((* unfoldFlowerDone:Flower, (unfoldFlowerDone.plantNumber == pb.plantNumber && unfoldFlowerDone.lastUnfoldStep == ctx.unfoldStep && unfoldFlowerDone.unfoldRecv == 1) *))
+          + "/" + count((* unfoldFlowerAll:Flower, (unfoldFlowerAll.plantNumber == pb.plantNumber) *))
+          + " structuralRoot=" + count((* unfoldRootDone:StructuralRoot, (unfoldRootDone.plantNumber == pb.plantNumber && unfoldRootDone.lastUnfoldStep == ctx.unfoldStep && unfoldRootDone.unfoldRecv == 1) *))
+          + "/" + count((* unfoldRootAll:StructuralRoot, (unfoldRootAll.plantNumber == pb.plantNumber) *))
+          + " fineRoot=" + count((* unfoldFineDone:FineRoot, (unfoldFineDone.plantNumber == pb.plantNumber && unfoldFineDone.lastUnfoldStep == ctx.unfoldStep && unfoldFineDone.unfoldRecv == 1) *))
+          + "/" + count((* unfoldFineAll:FineRoot, (unfoldFineAll.plantNumber == pb.plantNumber) *)));
+    }
+  }
+
+  missingUnfold:GrowingOrgan, (
+    debug_CT && missingUnfold.plantNumber == pb.plantNumber
+    && (missingUnfold.lastUnfoldStep != ctx.unfoldStep
+        || missingUnfold.unfoldRecv != 1)
+  ) ::> {
+    println("ERROR(CT-UNFOLD-COVERAGE): id=" + missingUnfold.getId()
+        + " class=" + missingUnfold.getClass().getSimpleName()
+        + " parentID=" + missingUnfold.parentID
+        + " writerID=" + missingUnfold.lastWriterId
+        + " rank=" + missingUnfold.rank
+        + " order=" + missingUnfold.order
+        + " plantNumber=" + missingUnfold.plantNumber
+        + " unfoldRecv=" + missingUnfold.unfoldRecv);
+  }
+
+]
+
+/** O(N+E) CT9-compatible unfold used by the production simple-root solve. */
+static void updateCarbonPotentialCached(PlantBase pb,
+    CarbonTransportSolveContext ctx, CarbonTransportTopology topology) {
+  // Complex-root topology remains on its unchanged legacy path in this branch.
+  if (useComplexRoot == true) {
+    updateCarbonPotential(pb, ctx);
+    return;
+  }
+
+  if (unfoldTick < topology.maxLastUnfoldStep) {
+    unfoldTick = topology.maxLastUnfoldStep;
+  }
+  ctx.unfoldStep = ++unfoldTick;
+  for (int organIndex = 0;
+      organIndex < topology.growingOrgans.size(); organIndex++) {
+    GrowingOrgan organ = (GrowingOrgan) topology.growingOrgans.get(organIndex);
+    organ.unfoldRecv = 0;
+    organ.lastWriterId = -1L;
+  }
+
+  applyGuardedPlantBaseCarbonBoundary(pb, ctx);
+  unfoldSimpleRootLayers(pb, ctx, topology);
+
+  for (int orderIndex = 0;
+      orderIndex < topology.shootPreOrder.size(); orderIndex++) {
+    Long axisKey = (Long) topology.shootPreOrder.get(orderIndex);
+    Internode axisNode = (Internode) topology.internodesById.get(axisKey);
+    Long parentKey = (Long) topology.parentByInternode.get(axisKey);
+    double upstreamPhi = pb.cpt;
+    long ownerId = pb.getId();
+    if (parentKey != null) {
+      Internode parentNode = (Internode)
+          topology.internodesById.get(parentKey);
+      upstreamPhi = parentNode.cpt;
+      ownerId = parentNode.getId();
+    }
+    if (claimCarbonUnfoldOwner(axisNode, ownerId, ctx)) {
+      axisNode.cpb = upstreamPhi;
+      double axisTrialPhi = axisNode.cpb
+          * (1.0 - axisNode.branch_flux_b * axisNode.r)
+          - axisNode.branch_flux_a * axisNode.r - axisNode.xp;
+      axisNode.cpt = underRelaxOrganPhi(
+          axisNode.cpt, axisTrialPhi, ctx.dampingFactor, ctx);
+    }
+
+    ArrayList petioleChildren = ctList(
+        topology.childPetiolesByInternode, axisKey);
+    for (int childIndex = 0;
+        childIndex < petioleChildren.size(); childIndex++) {
+      Petiole petioleNode = (Petiole) petioleChildren.get(childIndex);
+      if (claimCarbonUnfoldOwner(
+          petioleNode, axisNode.getId(), ctx)) {
+        petioleNode.cpb = axisNode.cpt;
+        double petioleTrialPhi = petioleNode.cpb
+            * (1.0 - petioleNode.branch_flux_b * petioleNode.r)
+            - petioleNode.branch_flux_a * petioleNode.r - petioleNode.xp;
+        petioleNode.cpt = underRelaxOrganPhi(
+            petioleNode.cpt, petioleTrialPhi,
+            ctx.dampingFactor, ctx);
+      }
+      ArrayList ownedLeaves = ctList(topology.leavesByPetiole,
+          Long.valueOf(petioleNode.getId()));
+      for (int leafIndex = 0; leafIndex < ownedLeaves.size(); leafIndex++) {
+        Leaf leafNode = (Leaf) ownedLeaves.get(leafIndex);
+        if (claimCarbonUnfoldOwner(
+            leafNode, petioleNode.getId(), ctx)) {
+          leafNode.cpb = petioleNode.cpt;
+          leafNode.cpt = underRelaxOrganPhi(
+              leafNode.cpt, leafNode.cpb, ctx.dampingFactor, ctx);
+        }
+      }
+    }
+
+    ArrayList fruitChildren = ctList(
+        topology.childFruitsByInternode, axisKey);
+    for (int childIndex = 0;
+        childIndex < fruitChildren.size(); childIndex++) {
+      FruitService fruitNode = (FruitService) fruitChildren.get(childIndex);
+      if (claimCarbonUnfoldOwner(fruitNode, axisNode.getId(), ctx)) {
+        fruitNode.cpb = axisNode.cpt;
+        fruitNode.cpt = underRelaxOrganPhi(
+            fruitNode.cpt, fruitNode.cpb, ctx.dampingFactor, ctx);
+      }
+    }
+    ArrayList flowerChildren = ctList(
+        topology.childFlowersByInternode, axisKey);
+    for (int childIndex = 0;
+        childIndex < flowerChildren.size(); childIndex++) {
+      Flower flowerNode = (Flower) flowerChildren.get(childIndex);
+      if (claimCarbonUnfoldOwner(flowerNode, axisNode.getId(), ctx)) {
+        flowerNode.cpb = axisNode.cpt;
+        double flowerTrialPhi = flowerNode.cpb
+            * (1.0 - flowerNode.branch_flux_b * flowerNode.r)
+            - flowerNode.branch_flux_a * flowerNode.r - flowerNode.xp;
+        flowerNode.cpt = underRelaxOrganPhi(
+            flowerNode.cpt, flowerTrialPhi,
+            ctx.dampingFactor, ctx);
+      }
+    }
+    ArrayList directLeaves = ctList(
+        topology.directLeavesByInternode, axisKey);
+    for (int childIndex = 0;
+        childIndex < directLeaves.size(); childIndex++) {
+      Leaf leafNode = (Leaf) directLeaves.get(childIndex);
+      if (claimCarbonUnfoldOwner(leafNode, axisNode.getId(), ctx)) {
+        leafNode.cpb = axisNode.cpt;
+        leafNode.cpt = underRelaxOrganPhi(
+            leafNode.cpt, leafNode.cpb, ctx.dampingFactor, ctx);
+      }
+    }
+  }
+
+  ctx.unfoldedGrowingOrganCount = 0;
+  for (int organIndex = 0;
+      organIndex < topology.growingOrgans.size(); organIndex++) {
+    GrowingOrgan organ = (GrowingOrgan) topology.growingOrgans.get(organIndex);
+    if (organ.lastUnfoldStep == ctx.unfoldStep && organ.unfoldRecv == 1) {
+      ctx.unfoldedGrowingOrganCount++;
+    } else if (debug_CT) {
+      println("ERROR(CT-UNFOLD-COVERAGE): id=" + organ.getId()
+          + " class=" + organ.getClass().getSimpleName()
+          + " parentID=" + organ.parentID
+          + " writerID=" + organ.lastWriterId
+          + " unfoldRecv=" + organ.unfoldRecv);
+    }
+  }
+  ctx.unfoldCoverageComplete = ctx.unfoldedGrowingOrganCount
+      == ctx.totalGrowingOrganCount;
+  if (debug_CT) println("UNFOLD COVERAGE total="
+      + ctx.unfoldedGrowingOrganCount + "/" + ctx.totalGrowingOrganCount);
 }
 
-	l:Leaf, (
-	  l.lastUnfoldStep != ctx.unfoldStep &&
-	  l.plantNumber == pb.plantNumber
-	) ::> {
-	  if (debug_CT) {
-		println("WARN(CT-LEAF): Leaf not unfolded"
-			+ " leafId=" + l.getId()
-			+ " rank=" + l.rank
-			+ " organType=" + l.organType
-			+ " parentID=" + l.parentID);
-	  }
-	}
+/**
+ * Root-only closure audit for the simple layered route (g C h-1).
+ * This remains diagnostic and does not add a whole-plant convergence gate.
+ */
+static void updateSimpleRootClosureDiagnostics(
+        PlantBase pb, CarbonTransportSolveContext ctx) [
+  {
+    ctx.simpleRootLocalJ = 0.0;
+    ctx.simpleRootFoldedJ = 0.0;
+    ctx.simpleRootClosureResidual = 0.0;
+    ctx.simpleRootRelativeClosureResidual = 0.0;
+    if (useComplexRoot == false) {
+      ctx.simpleRootLocalJ = sum((* simpleClosureSr:StructuralRoot, (
+        simpleClosureSr.plantNumber == pb.plantNumber
+      ) *)[j]) + sum((* simpleClosureFr:FineRoot, (
+        simpleClosureFr.plantNumber == pb.plantNumber
+      ) *)[j]);
+      StructuralRoot basalClosureRoot = first((* simpleClosureBasal:StructuralRoot, (
+        simpleClosureBasal.plantNumber == pb.plantNumber
+        && simpleClosureBasal.layer == ctx.simpleRootMinLayer
+      ) *));
+      if (basalClosureRoot != null) {
+        ctx.simpleRootFoldedJ = basalClosureRoot.branch_flux_a
+            + basalClosureRoot.branch_flux_b * pb.cpt;
+      }
+      ctx.simpleRootClosureResidual = ctx.simpleRootLocalJ
+          - ctx.simpleRootFoldedJ;
+      double simpleRootClosureScale = Math.max(Math.max(
+          Math.abs(ctx.simpleRootLocalJ),
+          Math.abs(ctx.simpleRootFoldedJ)), 1e-12);
+      ctx.simpleRootRelativeClosureResidual = Math.abs(
+          ctx.simpleRootClosureResidual) / simpleRootClosureScale;
 
-	f:Flower, (
-	  f.plantNumber == pb.plantNumber
-	) ::> {
-	  if (debug_CT) {
-		if (f.parentID <= 0) {
-		  println("WARN(CT-FLOWER): Flower has no transport parent"
-			+ " flowerId=" + f.getId()
-			+ " rank=" + f.rank
-			+ " order=" + f.order
-			+ " organType=" + f.organType);
-		} else {
-		  Organ flowerParent = f.getParent();
-		  if (flowerParent == null) {
-			println("WARN(CT-FLOWER): Flower parent lookup failed"
-			  + " flowerId=" + f.getId()
-			  + " parentID=" + f.parentID);
-		  } else if (!(flowerParent instanceof Internode)) {
-			println("WARN(CT-FLOWER): Flower parent is not transport axis"
-			  + " flowerId=" + f.getId()
-			  + " parentID=" + f.parentID
-			  + " parentClass=" + flowerParent.getClass().getName());
-			  } else {
-				Internode axis = (Internode) flowerParent;
-				if (axis.plantNumber != pb.plantNumber) {
-				  println("WARN(CT-FLOWER): Flower parent belongs to another plant"
-					+ " flowerId=" + f.getId()
-					+ " parentID=" + axis.getId());
-				} else if (!axis.hasChildFlowerId(f.getId())) {
-			  println("WARN(CT-FLOWER): Parent missing childFlowerId"
-				+ " flowerId=" + f.getId()
-				+ " parentID=" + axis.getId()
-				+ " flowerRank=" + f.rank
-				+ " flowerOrder=" + f.order);
-			}
-		  }
-		}
-		if (Double.isNaN(f.cpt) || Double.isInfinite(f.cpt) || f.cpt < 0.0) {
-		  println("WARN(CT-FLOWER): Invalid flower cpt"
-			+ " flowerId=" + f.getId()
-			+ " cpt=" + f.cpt
-			+ " parentID=" + f.parentID);
-		}
-	  }
-	}
+      if (debug_CT) {
+        int diagnosticLayer;
+        for (diagnosticLayer = ctx.simpleRootMinLayer;
+            diagnosticLayer <= ctx.simpleRootMaxLayer;
+            diagnosticLayer++) {
+          StructuralRoot diagnosticRoot = first((* simpleDiagSr:StructuralRoot, (
+            simpleDiagSr.plantNumber == pb.plantNumber
+            && simpleDiagSr.layer == diagnosticLayer
+          ) *));
+          if (diagnosticRoot == null) continue;
+          FineRoot diagnosticFine = first((* simpleDiagFr:FineRoot, (
+            simpleDiagFr.plantNumber == pb.plantNumber
+            && simpleDiagFr.layer == diagnosticLayer
+            && simpleDiagFr.parentID == diagnosticRoot.getId()
+            && diagnosticRoot.frID == simpleDiagFr.getId()
+          ) *));
+          StructuralRoot diagnosticChild = first((* simpleDiagChild:StructuralRoot, (
+            simpleDiagChild.plantNumber == pb.plantNumber
+            && simpleDiagChild.layer == diagnosticLayer + 1
+            && simpleDiagChild.parentID == diagnosticRoot.getId()
+          ) *));
+          Object diagnosticParentObject = (diagnosticRoot.parentID > 0)
+              ? graph().getNodeForId(diagnosticRoot.parentID) : null;
+          long diagnosticParentId = (diagnosticParentObject instanceof StructuralRoot)
+              ? ((StructuralRoot) diagnosticParentObject).getId() : -1L;
+          long diagnosticChildId = (diagnosticChild == null)
+              ? -1L : diagnosticChild.getId();
+          double diagnosticSrLocalJ = diagnosticRoot.j;
+          double diagnosticFrLocalJ = (diagnosticFine == null)
+              ? 0.0 : diagnosticFine.j;
+          double diagnosticChildEntryJ = (diagnosticChild == null)
+              ? 0.0 : diagnosticChild.branch_flux_a
+                  + diagnosticChild.branch_flux_b * diagnosticChild.cpb;
+          double diagnosticRawA = diagnosticRoot.sink_source_a
+              + ((diagnosticFine == null) ? 0.0
+                  : diagnosticFine.branch_flux_a)
+              + ((diagnosticChild == null) ? 0.0
+                  : diagnosticChild.branch_flux_a);
+          double diagnosticRawB = diagnosticRoot.sink_source_b
+              + ((diagnosticFine == null) ? 0.0
+                  : diagnosticFine.branch_flux_b)
+              + ((diagnosticChild == null) ? 0.0
+                  : diagnosticChild.branch_flux_b);
+          double diagnosticFoldedEntryJ = diagnosticRoot.branch_flux_a
+              + diagnosticRoot.branch_flux_b * diagnosticRoot.cpb;
+          double diagnosticLocalSubtreeJ = sum((* simpleDiagSubSr:StructuralRoot, (
+            simpleDiagSubSr.plantNumber == pb.plantNumber
+            && simpleDiagSubSr.layer >= diagnosticLayer
+          ) *)[j]) + sum((* simpleDiagSubFr:FineRoot, (
+            simpleDiagSubFr.plantNumber == pb.plantNumber
+            && simpleDiagSubFr.layer >= diagnosticLayer
+          ) *)[j]);
+          double diagnosticSubtreeResidual = diagnosticLocalSubtreeJ
+              - diagnosticFoldedEntryJ;
 
+          println("ROOT-CT layer=" + diagnosticLayer
+              + " SR=" + diagnosticRoot.getId()
+              + " FR=" + ((diagnosticFine == null) ? -1L : diagnosticFine.getId())
+              + " parentSR=" + diagnosticParentId
+              + " childSR=" + diagnosticChildId
+              + " srLocalJ=" + diagnosticSrLocalJ
+              + " frLocalJ=" + diagnosticFrLocalJ
+              + " childFoldedEntryJ=" + diagnosticChildEntryJ
+              + " rawA=" + diagnosticRawA
+              + " rawB=" + diagnosticRawB
+              + " foldedA=" + diagnosticRoot.branch_flux_a
+              + " foldedB=" + diagnosticRoot.branch_flux_b
+              + " cpb=" + diagnosticRoot.cpb
+              + " cpt=" + diagnosticRoot.cpt
+              + " foldedEntryJ=" + diagnosticFoldedEntryJ
+              + " localSubtreeJ=" + diagnosticLocalSubtreeJ
+              + " subtreeResidual=" + diagnosticSubtreeResidual);
+        }
+        println("ROOT-CT CLOSURE local=" + ctx.simpleRootLocalJ
+            + " folded=" + ctx.simpleRootFoldedJ
+            + " residual=" + ctx.simpleRootClosureResidual
+            + " relative=" + ctx.simpleRootRelativeClosureResidual);
+      }
+    }
+  }
 ]
 
 /** --------------------------------------------------------------------------
@@ -1558,30 +3143,116 @@ static void updateCarbonPotential(PlantBase pb, CarbonTransportSolveContext ctx)
  * -------------------------------------------------------------------------- */
 static void updateFlow(PlantBase pb, CarbonTransportSolveContext ctx)
 [
+  {
+    ctx.sumLeafStoredJ = ctx.sumLeafTaylorJ = 0.0;
+    ctx.sumPetioleStoredJ = ctx.sumPetioleTaylorJ = 0.0;
+    ctx.sumShootStoredJ = ctx.sumShootTaylorJ = 0.0;
+    ctx.sumFruitStoredJ = ctx.sumFruitTaylorJ = 0.0;
+    ctx.sumFlowerStoredJ = ctx.sumFlowerTaylorJ = 0.0;
+    ctx.sumFineRootStoredJ = ctx.sumFineRootTaylorJ = 0.0;
+    ctx.sumStructuralRootStoredJ = ctx.sumStructuralRootTaylorJ = 0.0;
+    ctx.sumFruitExactUnloading = 0.0;
+    ctx.sumFruitExactActive = 0.0;
+    ctx.sumFruitExactMassFlow = 0.0;
+    ctx.sumFruitStoredUnloading = 0.0;
+    ctx.maxFruitLinearizationResidual = 0.0;
+    ctx.maxFruitLinearizationRelativeResidual = 0.0;
+    ctx.maxFruitResidualOrganID = -1L;
+    ctx.maxFruitTaylorPointResidual = 0.0;
+    ctx.maxFruitTaylorPointRelativeResidual = 0.0;
+  }
+
   sd:GrowingOrgan, (
     sd.plantNumber == pb.plantNumber
   ) ::>
   {
     double new_j = 0.0;
+    double old_j = isFiniteCarbonValue(sd.j) ? sd.j : 0.0;
+    ctx.oldFluxMagnitude += Math.abs(old_j);
 
     if (sd.cpt >= 0.0 && !Double.isNaN(sd.cpt) && !Double.isInfinite(sd.cpt)) {
       // Linearized sink/source: j = a + b * Φ (Φ stored as cpt here)
       new_j = sd.sink_source_a + sd.sink_source_b * sd.cpt;
 
-      // Residual for this organ and accumulate absolute error
-      sd.err = new_j - sd.j;
-      ctx.convergenceError += Math.abs(sd.err);
-      // Threshold very small currents for stability
-      if (Math.abs(new_j) < EPSILON) {
-        sd.j = 0.0;
+      if (isFiniteCarbonValue(new_j)) {
+        // Residual for this organ and accumulate absolute error (g C h-1).
+        sd.err = new_j - old_j;
+        ctx.convergenceError += Math.abs(sd.err);
+        // Threshold very small currents for stability.
+        if (Math.abs(new_j) < EPSILON) {
+          sd.j = 0.0;
+        } else {
+          sd.j = new_j;
+        }
       } else {
-        sd.j = new_j;
+        // Retain the last finite current-step iterate when reconstruction fails.
+        sd.j = old_j;
+        sd.err = 1.0;
+        ctx.convergenceError += 1.0;
       }
     } else {
-      // Invalid Φ: reset and penalize residual to keep the solver progressing
-      sd.cpt = 1e-5;
+      // Invalid Phi: retain the finite flux and force rollback/retry; never floor
+      // a failed current iterate here because that would destroy accepted history.
+      sd.j = old_j;
       sd.err = 1.0;
       ctx.convergenceError += 1.0;
+      markInvalidUnfoldTrial(ctx);
+    }
+    ctx.newFluxMagnitude += Math.abs(sd.j);
+
+    double localTaylorJ = sd.sink_source_a + sd.sink_source_b * sd.cpt;
+    if (sd instanceof Leaf) {
+      ctx.sumLeafStoredJ += sd.j; ctx.sumLeafTaylorJ += localTaylorJ;
+    } else if (sd instanceof Petiole) {
+      ctx.sumPetioleStoredJ += sd.j; ctx.sumPetioleTaylorJ += localTaylorJ;
+    } else if (sd instanceof Internode || sd instanceof Cordon || sd instanceof Trunk) {
+      ctx.sumShootStoredJ += sd.j; ctx.sumShootTaylorJ += localTaylorJ;
+    } else if (sd instanceof FruitService) {
+      ctx.sumFruitStoredJ += sd.j; ctx.sumFruitTaylorJ += localTaylorJ;
+      FruitService fruit = (FruitService) sd;
+      double finalPhi = Math.max(CT_CP_MIN, fruit.cpt);
+      double exactActiveG = mgTogram
+          * exactFruitActiveUnloadingMg(fruit, finalPhi);
+      double exactMassG = mgTogram
+          * exactFruitMassFlowMg(fruit, finalPhi);
+      double exactUnloadingG = exactActiveG + exactMassG;
+      ctx.sumFruitExactActive += exactActiveG;
+      ctx.sumFruitExactMassFlow += exactMassG;
+      ctx.sumFruitExactUnloading += exactUnloadingG;
+      ctx.sumFruitStoredUnloading += mgTogram * fruit.unloading;
+
+      double fruitResidual = fruit.j - exactUnloadingG;
+      double fruitScale = Math.max(Math.max(
+          Math.abs(fruit.j), Math.abs(exactUnloadingG)), 1e-12);
+      double fruitRelativeResidual = Math.abs(fruitResidual) / fruitScale;
+      if (Math.abs(fruitResidual) > ctx.maxFruitLinearizationResidual) {
+        ctx.maxFruitLinearizationResidual = Math.abs(fruitResidual);
+        ctx.maxFruitResidualOrganID = fruit.getId();
+      }
+      ctx.maxFruitLinearizationRelativeResidual = Math.max(
+          ctx.maxFruitLinearizationRelativeResidual,
+          fruitRelativeResidual);
+
+      /* Non-committing Taylor reconstruction exactly at the final local Phi. */
+      double exactDerivativeG = mgTogram
+          * exactFruitUnloadingDerivativePhiMg(fruit, finalPhi);
+      double finalPointA = exactUnloadingG - finalPhi * exactDerivativeG;
+      double finalPointB = exactDerivativeG;
+      double finalPointResidual = finalPointA + finalPointB * finalPhi
+          - exactUnloadingG;
+      double finalPointScale = Math.max(Math.abs(exactUnloadingG), 1e-12);
+      ctx.maxFruitTaylorPointResidual = Math.max(
+          ctx.maxFruitTaylorPointResidual, Math.abs(finalPointResidual));
+      ctx.maxFruitTaylorPointRelativeResidual = Math.max(
+          ctx.maxFruitTaylorPointRelativeResidual,
+          Math.abs(finalPointResidual) / finalPointScale);
+    } else if (sd instanceof Flower) {
+      ctx.sumFlowerStoredJ += sd.j; ctx.sumFlowerTaylorJ += localTaylorJ;
+    } else if (sd instanceof FineRoot) {
+      ctx.sumFineRootStoredJ += sd.j; ctx.sumFineRootTaylorJ += localTaylorJ;
+    } else if (sd instanceof StructuralRoot) {
+      ctx.sumStructuralRootStoredJ += sd.j;
+      ctx.sumStructuralRootTaylorJ += localTaylorJ;
     }
 
     
@@ -1597,8 +3268,61 @@ static void updateFlow(PlantBase pb, CarbonTransportSolveContext ctx)
     }
   }
 
-  
+
  {
+  updateSimpleRootClosureDiagnostics(pb, ctx);
+  ctx.sumLocalJ = sum((* closureOrgan:GrowingOrgan, (
+    closureOrgan.plantNumber == pb.plantNumber
+  ) *)[j]);
+  ctx.pbFoldedJ = pb.j;
+  ctx.closureResidual = ctx.sumLocalJ - ctx.pbFoldedJ;
+  ctx.closureScale = Math.max(Math.max(
+      ctx.newFluxMagnitude, Math.abs(ctx.pbFoldedJ)), 1e-12);
+  ctx.relativeClosureResidual = Math.abs(ctx.closureResidual)
+      / ctx.closureScale;
+  ctx.closureNormalizedError = ctNormalizedError(
+      Math.abs(ctx.closureResidual), ctx.closureScale);
+
+  ctx.totalLoading = Math.abs(sum((* closureLoad:GrowingOrgan, (
+    closureLoad.plantNumber == pb.plantNumber && closureLoad.j < 0.0
+  ) *)[j]));
+  ctx.totalUnloading = sum((* closureUnload:GrowingOrgan, (
+    closureUnload.plantNumber == pb.plantNumber && closureUnload.j > 0.0
+  ) *)[j]);
+  ctx.netFluxResidual = ctx.totalLoading - ctx.totalUnloading;
+  ctx.relativeNetFluxResidual = Math.abs(ctx.netFluxResidual)
+      / Math.max(Math.max(ctx.totalLoading, ctx.totalUnloading), 1e-12);
+  ctx.netFluxIdentityResidual = ctx.netFluxResidual + ctx.sumLocalJ;
+  /* Fruit-local exactness is diagnostic-only until reduced-scenario evidence
+   * establishes a safe magnitude; it does not participate in ctConverged. */
+  ctx.fruitLinearizationResidual = ctx.sumFruitStoredJ
+      - ctx.sumFruitExactUnloading;
+  ctx.fruitLinearizationRelativeResidual = Math.abs(
+      ctx.fruitLinearizationResidual) / Math.max(Math.max(
+          Math.abs(ctx.sumFruitStoredJ),
+          Math.abs(ctx.sumFruitExactUnloading)), 1e-12);
+  ctx.fruitStoredVsExactResidual = ctx.sumFruitStoredUnloading
+      - ctx.sumFruitExactUnloading;
+
+  ctx.fluxScale = Math.max(Math.max(
+      ctx.newFluxMagnitude, ctx.oldFluxMagnitude), 1e-12);
+  ctx.relativeFluxError = ctx.convergenceError / ctx.fluxScale;
+  ctx.fluxNormalizedError = ctNormalizedError(
+      ctx.convergenceError, ctx.fluxScale);
+  ctx.nonlinearMerit = Math.max(
+      ctx.fluxNormalizedError, ctx.plantBaseNormalizedError);
+  ctx.converged = ctSolveConverged(
+      ctx.convergenceError, ctx.fluxScale,
+      ctx.plantBaseResidual, ctx.plantBaseScale);
+  if (ctx.invalidUnfoldTrial
+      || (ctx.simpleRootActive
+          && (!ctx.simpleRootTopologyValid
+              || !ctx.simpleRootFoldValid
+              || !ctx.simpleRootUnfoldValid))) {
+    ctx.nonlinearMerit = Double.POSITIVE_INFINITY;
+    ctx.converged = false;
+  }
+
   if (debug_CT) {
  //if(true) {
     println(
@@ -1625,19 +3349,212 @@ static void updateFlow(PlantBase pb, CarbonTransportSolveContext ctx)
     
    // After updateFlow() + convergence, add:
 
-  double sumJ = sum((* g:GrowingOrgan, (
-    g.plantNumber == pb.plantNumber
-  ) *)[j]);
-  double pbJ  = pb.j;
-  double net  = sumJ + pbJ;
-
-  println("CLOSURE CHECK  sum(j_organs)=" + sumJ
-        + "  pb.j=" + pbJ
-        + "  net=" + net);
+  println("CLOSURE CHECK  sum(j_organs)=" + ctx.sumLocalJ
+        + "  pb.j=" + ctx.pbFoldedJ
+        + "  sumLocalJ-pb.j=" + ctx.closureResidual
+        + "  relative=" + ctx.relativeClosureResidual);
+  println("FRUIT CHECK  sumFruitJ=" + ctx.sumFruitStoredJ
+        + "  exact=" + ctx.sumFruitExactUnloading
+        + "  storedUnloading=" + ctx.sumFruitStoredUnloading
+        + "  exactActive=" + ctx.sumFruitExactActive
+        + "  exactMassFlow=" + ctx.sumFruitExactMassFlow
+        + "  relative=" + ctx.fruitLinearizationRelativeResidual);
  
   }
  }
 ]
+
+private static void updateSimpleRootClosureDiagnosticsCached(
+    PlantBase pb, CarbonTransportSolveContext ctx,
+    CarbonTransportTopology topology) {
+  ctx.simpleRootLocalJ = 0.0;
+  ctx.simpleRootFoldedJ = 0.0;
+  ctx.simpleRootClosureResidual = 0.0;
+  ctx.simpleRootRelativeClosureResidual = 0.0;
+  if (useComplexRoot == true) return;
+  for (int rootIndex = 0;
+      rootIndex < topology.simpleStructuralRoots.size(); rootIndex++) {
+    StructuralRoot rootNode = (StructuralRoot)
+        topology.simpleStructuralRoots.get(rootIndex);
+    FineRoot fineNode = (FineRoot) topology.simpleFineRoots.get(rootIndex);
+    ctx.simpleRootLocalJ += rootNode.j + fineNode.j;
+  }
+  if (topology.simpleBasalRoot != null) {
+    ctx.simpleRootFoldedJ = topology.simpleBasalRoot.branch_flux_a
+        + topology.simpleBasalRoot.branch_flux_b * pb.cpt;
+  }
+  ctx.simpleRootClosureResidual = ctx.simpleRootLocalJ
+      - ctx.simpleRootFoldedJ;
+  double scale = Math.max(Math.max(
+      Math.abs(ctx.simpleRootLocalJ),
+      Math.abs(ctx.simpleRootFoldedJ)), 1e-12);
+  ctx.simpleRootRelativeClosureResidual = Math.abs(
+      ctx.simpleRootClosureResidual) / scale;
+}
+
+/** O(N) flow reconstruction and closure accumulation without graph queries. */
+static void updateFlowCached(PlantBase pb,
+    CarbonTransportSolveContext ctx, CarbonTransportTopology topology) {
+  ctx.sumLeafStoredJ = ctx.sumLeafTaylorJ = 0.0;
+  ctx.sumPetioleStoredJ = ctx.sumPetioleTaylorJ = 0.0;
+  ctx.sumShootStoredJ = ctx.sumShootTaylorJ = 0.0;
+  ctx.sumFruitStoredJ = ctx.sumFruitTaylorJ = 0.0;
+  ctx.sumFlowerStoredJ = ctx.sumFlowerTaylorJ = 0.0;
+  ctx.sumFineRootStoredJ = ctx.sumFineRootTaylorJ = 0.0;
+  ctx.sumStructuralRootStoredJ = ctx.sumStructuralRootTaylorJ = 0.0;
+  ctx.sumLocalJ = 0.0;
+  ctx.totalLoading = 0.0;
+  ctx.totalUnloading = 0.0;
+
+  for (int organIndex = 0;
+      organIndex < topology.growingOrgans.size(); organIndex++) {
+    GrowingOrgan organ = (GrowingOrgan) topology.growingOrgans.get(organIndex);
+    double oldJ = isFiniteCarbonValue(organ.j) ? organ.j : 0.0;
+    ctx.oldFluxMagnitude += Math.abs(oldJ);
+    double newJ = oldJ;
+    if (isFiniteCarbonValue(organ.cpt) && organ.cpt >= 0.0) {
+      double candidateJ = organ.sink_source_a
+          + organ.sink_source_b * organ.cpt;
+      if (isFiniteCarbonValue(candidateJ)) {
+        organ.err = candidateJ - oldJ;
+        ctx.convergenceError += Math.abs(organ.err);
+        newJ = (Math.abs(candidateJ) < EPSILON) ? 0.0 : candidateJ;
+      } else {
+        organ.err = 1.0;
+        ctx.convergenceError += 1.0;
+      }
+    } else {
+      organ.err = 1.0;
+      ctx.convergenceError += 1.0;
+      markInvalidUnfoldTrial(ctx);
+    }
+    organ.j = newJ;
+    ctx.newFluxMagnitude += Math.abs(newJ);
+    ctx.sumLocalJ += newJ;
+    if (newJ > 0.0) ctx.totalUnloading += newJ;
+    else if (newJ < 0.0) ctx.totalLoading += -newJ;
+
+    double localTaylorJ = organ.sink_source_a
+        + organ.sink_source_b * organ.cpt;
+    if (organ instanceof Leaf) {
+      ctx.sumLeafStoredJ += newJ; ctx.sumLeafTaylorJ += localTaylorJ;
+    } else if (organ instanceof Petiole) {
+      ctx.sumPetioleStoredJ += newJ; ctx.sumPetioleTaylorJ += localTaylorJ;
+    } else if (organ instanceof Internode) {
+      ctx.sumShootStoredJ += newJ; ctx.sumShootTaylorJ += localTaylorJ;
+    } else if (organ instanceof FruitService) {
+      ctx.sumFruitStoredJ += newJ; ctx.sumFruitTaylorJ += localTaylorJ;
+    } else if (organ instanceof Flower) {
+      ctx.sumFlowerStoredJ += newJ; ctx.sumFlowerTaylorJ += localTaylorJ;
+    } else if (organ instanceof FineRoot) {
+      ctx.sumFineRootStoredJ += newJ; ctx.sumFineRootTaylorJ += localTaylorJ;
+    } else if (organ instanceof StructuralRoot) {
+      ctx.sumStructuralRootStoredJ += newJ;
+      ctx.sumStructuralRootTaylorJ += localTaylorJ;
+    }
+  }
+
+  updateSimpleRootClosureDiagnosticsCached(pb, ctx, topology);
+  ctx.pbFoldedJ = pb.j;
+  ctx.closureResidual = ctx.sumLocalJ - ctx.pbFoldedJ;
+  ctx.closureScale = Math.max(Math.max(
+      ctx.newFluxMagnitude, Math.abs(ctx.pbFoldedJ)), 1e-12);
+  ctx.relativeClosureResidual = Math.abs(ctx.closureResidual)
+      / ctx.closureScale;
+  ctx.closureNormalizedError = ctNormalizedError(
+      Math.abs(ctx.closureResidual), ctx.closureScale);
+  ctx.netFluxResidual = ctx.totalLoading - ctx.totalUnloading;
+  ctx.relativeNetFluxResidual = Math.abs(ctx.netFluxResidual)
+      / Math.max(Math.max(ctx.totalLoading, ctx.totalUnloading), 1e-12);
+  ctx.netFluxIdentityResidual = ctx.netFluxResidual + ctx.sumLocalJ;
+  ctx.fluxScale = Math.max(Math.max(
+      ctx.newFluxMagnitude, ctx.oldFluxMagnitude), 1e-12);
+  ctx.relativeFluxError = ctx.convergenceError / ctx.fluxScale;
+  ctx.fluxNormalizedError = ctNormalizedError(
+      ctx.convergenceError, ctx.fluxScale);
+  ctx.nonlinearMerit = Math.max(
+      ctx.fluxNormalizedError, ctx.plantBaseNormalizedError);
+  ctx.converged = ctSolveConverged(
+      ctx.convergenceError, ctx.fluxScale,
+      ctx.plantBaseResidual, ctx.plantBaseScale);
+  if (ctx.invalidUnfoldTrial
+      || !ctx.foldCoverageComplete || !ctx.unfoldCoverageComplete
+      || (ctx.simpleRootActive
+          && (!ctx.simpleRootTopologyValid
+              || !ctx.simpleRootFoldValid
+              || !ctx.simpleRootUnfoldValid))) {
+    ctx.nonlinearMerit = Double.POSITIVE_INFINITY;
+    ctx.converged = false;
+  }
+
+  if (debug_CT) {
+    println("Iter " + ctx.iterationCount
+        + " | sumj=" + ctx.sumLocalJ
+        + " | sum|j|=" + ctx.newFluxMagnitude
+        + " | internode=" + ctx.sumShootStoredJ
+        + " | structuralRoot=" + ctx.sumStructuralRootStoredJ
+        + " | Leaf=" + ctx.sumLeafStoredJ
+        + " | Fruit=" + ctx.sumFruitStoredJ);
+  }
+}
+
+/** Expensive exact fruit checks are evaluated once for the final trial state. */
+static void updateFinalFruitCarbonDiagnostics(
+    CarbonTransportSolveContext ctx, CarbonTransportTopology topology) {
+  ctx.sumFruitExactUnloading = 0.0;
+  ctx.sumFruitExactActive = 0.0;
+  ctx.sumFruitExactMassFlow = 0.0;
+  ctx.sumFruitStoredUnloading = 0.0;
+  ctx.maxFruitLinearizationResidual = 0.0;
+  ctx.maxFruitLinearizationRelativeResidual = 0.0;
+  ctx.maxFruitResidualOrganID = -1L;
+  ctx.maxFruitTaylorPointResidual = 0.0;
+  ctx.maxFruitTaylorPointRelativeResidual = 0.0;
+  for (Object fruitKeyObject : topology.fruitsById.keySet()) {
+    FruitService fruit = (FruitService)
+        topology.fruitsById.get((Long) fruitKeyObject);
+    double finalPhi = Math.max(CT_CP_MIN, fruit.cpt);
+    double exactActiveG = mgTogram
+        * exactFruitActiveUnloadingMg(fruit, finalPhi);
+    double exactMassG = mgTogram
+        * exactFruitMassFlowMg(fruit, finalPhi);
+    double exactUnloadingG = exactActiveG + exactMassG;
+    ctx.sumFruitExactActive += exactActiveG;
+    ctx.sumFruitExactMassFlow += exactMassG;
+    ctx.sumFruitExactUnloading += exactUnloadingG;
+    ctx.sumFruitStoredUnloading += mgTogram * fruit.unloading;
+    double fruitResidual = fruit.j - exactUnloadingG;
+    double fruitScale = Math.max(Math.max(
+        Math.abs(fruit.j), Math.abs(exactUnloadingG)), 1e-12);
+    if (Math.abs(fruitResidual) > ctx.maxFruitLinearizationResidual) {
+      ctx.maxFruitLinearizationResidual = Math.abs(fruitResidual);
+      ctx.maxFruitResidualOrganID = fruit.getId();
+    }
+    ctx.maxFruitLinearizationRelativeResidual = Math.max(
+        ctx.maxFruitLinearizationRelativeResidual,
+        Math.abs(fruitResidual) / fruitScale);
+
+    double exactDerivativeG = mgTogram
+        * exactFruitUnloadingDerivativePhiMg(fruit, finalPhi);
+    double finalPointA = exactUnloadingG - finalPhi * exactDerivativeG;
+    double finalPointResidual = finalPointA
+        + exactDerivativeG * finalPhi - exactUnloadingG;
+    double finalPointScale = Math.max(Math.abs(exactUnloadingG), 1e-12);
+    ctx.maxFruitTaylorPointResidual = Math.max(
+        ctx.maxFruitTaylorPointResidual, Math.abs(finalPointResidual));
+    ctx.maxFruitTaylorPointRelativeResidual = Math.max(
+        ctx.maxFruitTaylorPointRelativeResidual,
+        Math.abs(finalPointResidual) / finalPointScale);
+  }
+  ctx.fruitLinearizationResidual = ctx.sumFruitStoredJ
+      - ctx.sumFruitExactUnloading;
+  ctx.fruitLinearizationRelativeResidual = Math.abs(
+      ctx.fruitLinearizationResidual) / Math.max(Math.max(
+          Math.abs(ctx.sumFruitStoredJ),
+          Math.abs(ctx.sumFruitExactUnloading)), 1e-12);
+  ctx.fruitStoredVsExactResidual = ctx.sumFruitStoredUnloading
+      - ctx.sumFruitExactUnloading;
+}
 
 
 /**
@@ -1659,13 +3576,26 @@ static void updateResistence(PlantBase pb)
 	   g.plantNumber == pb.plantNumber
 	 ) ::>
 	{
-	  double carbon = Math.sqrt(2.0 * g.cpt);	
-	  g.updateCTRs(carbon);
+	  if (isValidPhi(g.cpt)) {
+	    double carbon = Math.sqrt(2.0 * g.cpt);
+	    g.updateCTRs(carbon);
+	  }
 	  //test xp
 	 // g.xp = 0;
 	}
 	
 ]
+
+/** Per-iteration resistance refresh over the cached organ list. */
+static void updateResistenceCached(CarbonTransportTopology topology) {
+  for (int organIndex = 0;
+      organIndex < topology.growingOrgans.size(); organIndex++) {
+    GrowingOrgan organ = (GrowingOrgan) topology.growingOrgans.get(organIndex);
+    if (isValidPhi(organ.cpt)) {
+      organ.updateCTRs(Math.sqrt(2.0 * organ.cpt));
+    }
+  }
+}
 /**
  * Update organ-level carbon status after the transport solve.
  *
@@ -1720,6 +3650,300 @@ static void updateCarbonStatus(PlantBase pb)
 		
 ]
 
+/** Capture the last accepted hourly transport and transient allocation state. */
+static CarbonTransportStateSnapshot snapshotCarbonTransportState(PlantBase pb) {
+  if (pb == null) {
+    throw new IllegalArgumentException("Carbon transport snapshot requires PlantBase.");
+  }
+  CarbonTransportStateSnapshot snapshot =
+      new CarbonTransportStateSnapshot(pb);
+  for (GrowingOrgan transportOrgan : (* snapshotOrgan:GrowingOrgan, (
+      snapshotOrgan.plantNumber == pb.plantNumber
+  ) *)) {
+    snapshot.organStates.add(new CarbonTransportOrganState(transportOrgan));
+  }
+  return snapshot;
+}
+
+/** Cached production overload: no graph query during the hourly solve. */
+static CarbonTransportStateSnapshot snapshotCarbonTransportState(
+    PlantBase pb, CarbonTransportTopology topology) {
+  if (pb == null) {
+    throw new IllegalArgumentException("Carbon transport snapshot requires PlantBase.");
+  }
+  CarbonTransportStateSnapshot snapshot =
+      new CarbonTransportStateSnapshot(pb);
+  for (int organIndex = 0;
+      organIndex < topology.growingOrgans.size(); organIndex++) {
+    GrowingOrgan transportOrgan = (GrowingOrgan)
+        topology.growingOrgans.get(organIndex);
+    snapshot.organStates.add(new CarbonTransportOrganState(transportOrgan));
+  }
+  return snapshot;
+}
+
+/** Restore accepted state and rebuild concentration-dependent resistance. */
+static void restoreCarbonTransportState(PlantBase pb,
+        CarbonTransportStateSnapshot snapshot) {
+  if (pb == null || snapshot == null || snapshot.plantBase != pb) {
+    throw new IllegalArgumentException(
+        "Carbon transport restore requires the matching PlantBase snapshot.");
+  }
+  int stateCount = snapshot.organStates.size();
+  for (int stateIndex = 0; stateIndex < stateCount; stateIndex++) {
+    CarbonTransportOrganState organState =
+        (CarbonTransportOrganState) snapshot.organStates.get(stateIndex);
+    organState.restore();
+  }
+  snapshot.restorePlantBase();
+
+  // Phi is authoritative. Reconstruct the reporting sugar instead of trusting
+  // a cached value that may be zero or stale in an older accepted snapshot.
+  if (isValidPhi(pb.cpt)) {
+    double restoredSugar = sugarFromCp(pb.cpt);
+    if (isFiniteCarbonValue(restoredSugar) && restoredSugar > 0.0) {
+      pb.sugarConcentration_phloem = restoredSugar;
+      if (!isFiniteCarbonValue(pb.sugarConcentration_phloem_pre)
+          || pb.sugarConcentration_phloem_pre <= 0.0) {
+        pb.sugarConcentration_phloem_pre = restoredSugar;
+      }
+    }
+  }
+
+  // updateResistence() is the existing source of truth for r/xp. Recompute it
+  // after restoring Phi so retry never starts from failed-iteration coefficients.
+  updateResistence(pb);
+  if (isValidPhi(pb.cpt)) {
+    pb.updateCTRs(Math.sqrt(2.0 * pb.cpt));
+  }
+}
+
+static boolean shouldStartCarbonTransportRetry(
+        CarbonTransportSolveContext ctx) {
+  return ctx != null && !ctx.converged && ctx.maxIterationReached
+      && !ctx.retryUsed;
+}
+
+/** A complete finite normal trial is a safer retry seed than bootstrap. */
+static boolean shouldWarmStartCarbonTransportRetry(
+        CarbonTransportSolveContext ctx) {
+  return ctx != null && ctx.failedTrialCaptured
+      && ctx.totalInvalidUnfoldTrialCount == 0;
+}
+
+static CarbonTransportSolveContext createCarbonTransportRetryContext(
+        CarbonTransportSolveContext failedNormalContext) {
+  CarbonTransportSolveContext retryContext =
+      new CarbonTransportSolveContext();
+  retryContext.dampingFactor = CT_RETRY_DAMPING_INITIAL;
+  retryContext.retryUsed = true;
+  retryContext.finalIterationLimit = CT_RETRY_MAX_ITERATIONS;
+  if (failedNormalContext != null) {
+    retryContext.totalInvalidUnfoldTrialCount =
+        failedNormalContext.totalInvalidUnfoldTrialCount;
+    retryContext.failedTrialCaptured =
+        failedNormalContext.failedTrialCaptured;
+    retryContext.failedTrialPlantBasePhi =
+        failedNormalContext.failedTrialPlantBasePhi;
+    retryContext.failedTrialPlantBaseSugar =
+        failedNormalContext.failedTrialPlantBaseSugar;
+    retryContext.failedTrialMinSugar =
+        failedNormalContext.failedTrialMinSugar;
+    retryContext.failedTrialMaxSugar =
+        failedNormalContext.failedTrialMaxSugar;
+    retryContext.failedTrialMeanSugar =
+        failedNormalContext.failedTrialMeanSugar;
+    retryContext.failedTrialMerit =
+        failedNormalContext.failedTrialMerit;
+  }
+  return retryContext;
+}
+
+/** Retain the last complete finite nonlinear trial before any rollback. */
+static void captureFailedCarbonTransportTrial(PlantBase pb,
+        CarbonTransportSolveContext ctx) {
+  if (pb == null || ctx == null || ctx.converged
+      || !isFiniteCarbonValue(pb.cpt) || pb.cpt < 0.0
+      || !isFiniteCarbonValue(ctx.nonlinearMerit)
+      || ctx.nonlinearMerit < 0.0) return;
+
+  double plantBaseSugar = sugarFromCp(pb.cpt);
+  if (!isFiniteCarbonValue(plantBaseSugar) || plantBaseSugar < 0.0) return;
+
+  int finiteOrganCount = 0;
+  double minSugar = Double.POSITIVE_INFINITY;
+  double maxSugar = Double.NEGATIVE_INFINITY;
+  double sugarSum = 0.0;
+  for (GrowingOrgan finiteTrialOrgan : (* failedTrialOrgan:GrowingOrgan, (
+      failedTrialOrgan.plantNumber == pb.plantNumber
+  ) *)) {
+    if (!isFiniteCarbonValue(finiteTrialOrgan.cpt)
+        || finiteTrialOrgan.cpt < 0.0) return;
+    double organSugar = sugarFromCp(finiteTrialOrgan.cpt);
+    if (!isFiniteCarbonValue(organSugar) || organSugar < 0.0) return;
+    minSugar = Math.min(minSugar, organSugar);
+    maxSugar = Math.max(maxSugar, organSugar);
+    sugarSum += organSugar;
+    finiteOrganCount++;
+  }
+  if (finiteOrganCount <= 0) {
+    minSugar = plantBaseSugar;
+    maxSugar = plantBaseSugar;
+    sugarSum = plantBaseSugar;
+    finiteOrganCount = 1;
+  }
+
+  ctx.failedTrialCaptured = true;
+  ctx.failedTrialPlantBasePhi = pb.cpt;
+  ctx.failedTrialPlantBaseSugar = plantBaseSugar;
+  ctx.failedTrialMinSugar = minSugar;
+  ctx.failedTrialMaxSugar = maxSugar;
+  ctx.failedTrialMeanSugar = sugarSum
+      / Double.valueOf(finiteOrganCount).doubleValue();
+  ctx.failedTrialMerit = ctx.nonlinearMerit;
+}
+
+/** Cached production overload: no graph query during the nonlinear loop. */
+static void captureFailedCarbonTransportTrial(PlantBase pb,
+        CarbonTransportSolveContext ctx,
+        CarbonTransportTopology topology) {
+  if (pb == null || ctx == null || ctx.converged
+      || !isFiniteCarbonValue(pb.cpt) || pb.cpt < 0.0
+      || !isFiniteCarbonValue(ctx.nonlinearMerit)
+      || ctx.nonlinearMerit < 0.0) return;
+
+  double plantBaseSugar = sugarFromCp(pb.cpt);
+  if (!isFiniteCarbonValue(plantBaseSugar) || plantBaseSugar < 0.0) return;
+
+  int finiteOrganCount = 0;
+  double minSugar = Double.POSITIVE_INFINITY;
+  double maxSugar = Double.NEGATIVE_INFINITY;
+  double sugarSum = 0.0;
+  for (int organIndex = 0;
+      organIndex < topology.growingOrgans.size(); organIndex++) {
+    GrowingOrgan finiteTrialOrgan = (GrowingOrgan)
+        topology.growingOrgans.get(organIndex);
+    if (!isFiniteCarbonValue(finiteTrialOrgan.cpt)
+        || finiteTrialOrgan.cpt < 0.0) return;
+    double organSugar = sugarFromCp(finiteTrialOrgan.cpt);
+    if (!isFiniteCarbonValue(organSugar) || organSugar < 0.0) return;
+    minSugar = Math.min(minSugar, organSugar);
+    maxSugar = Math.max(maxSugar, organSugar);
+    sugarSum += organSugar;
+    finiteOrganCount++;
+  }
+  if (finiteOrganCount <= 0) {
+    minSugar = plantBaseSugar;
+    maxSugar = plantBaseSugar;
+    sugarSum = plantBaseSugar;
+    finiteOrganCount = 1;
+  }
+
+  ctx.failedTrialCaptured = true;
+  ctx.failedTrialPlantBasePhi = pb.cpt;
+  ctx.failedTrialPlantBaseSugar = plantBaseSugar;
+  ctx.failedTrialMinSugar = minSugar;
+  ctx.failedTrialMaxSugar = maxSugar;
+  ctx.failedTrialMeanSugar = sugarSum
+      / Double.valueOf(finiteOrganCount).doubleValue();
+  ctx.failedTrialMerit = ctx.nonlinearMerit;
+}
+
+/** Run exactly one nonlinear attempt with the supplied iteration limit. */
+static void runCarbonTransportAttempt(PlantBase pb,
+        CarbonTransportSolveContext ctx, int iterationLimit,
+        CarbonTransportTopology topology) {
+  ctx.finalIterationLimit = iterationLimit;
+  while (!ctx.converged && ctx.iterationCount < iterationLimit) {
+    ctx.iterationCount++;
+    long iterationStart = System.currentTimeMillis();
+    boolean printPerformance = step <= 2 || debug_CT;
+    resetCarbonTransportPassState(ctx);
+    long phaseStart = System.currentTimeMillis();
+    linearise(pb, ctx, topology);
+    long lineariseMillis = System.currentTimeMillis() - phaseStart;
+    phaseStart = System.currentTimeMillis();
+    updateBranchFluxCached(pb, ctx, topology);
+    long foldMillis = System.currentTimeMillis() - phaseStart;
+    phaseStart = System.currentTimeMillis();
+    updateCarbonPotentialCached(pb, ctx, topology);
+    long unfoldMillis = System.currentTimeMillis() - phaseStart;
+    phaseStart = System.currentTimeMillis();
+    updateFlowCached(pb, ctx, topology);
+    long flowMillis = System.currentTimeMillis() - phaseStart;
+    captureFailedCarbonTransportTrial(pb, ctx, topology);
+    phaseStart = System.currentTimeMillis();
+    updateResistenceCached(topology);
+    long resistanceMillis = System.currentTimeMillis() - phaseStart;
+    long iterationMillis = System.currentTimeMillis() - iterationStart;
+    if (printPerformance) {
+      println("[CTPERF] iter=" + ctx.iterationCount
+          + " linearise ms=" + lineariseMillis);
+      println("[CTPERF] iter=" + ctx.iterationCount
+          + " fold ms=" + foldMillis);
+      println("[CTPERF] iter=" + ctx.iterationCount
+          + " unfold ms=" + unfoldMillis);
+      println("[CTPERF] iter=" + ctx.iterationCount
+          + " flow ms=" + flowMillis);
+      println("[CTPERF] iter=" + ctx.iterationCount
+          + " resistance ms=" + resistanceMillis);
+      println("[CTPERF] iter=" + ctx.iterationCount
+          + " total ms=" + iterationMillis);
+    }
+    if (ctx.iterationCount == 1 && !ctx.retryUsed) {
+      touchRunProgress("carbon_iteration_1_complete");
+    }
+    heartbeatRunProgress();
+    if (debug && printFlag) {
+      println("error_count " + ctx.iterationCount
+          + " Serror " + ctx.convergenceError);
+      double sumFlux = sum((* attemptFlux:GrowingOrgan, (
+        attemptFlux.plantNumber == pb.plantNumber
+      ) *)[j]);
+      double sumAbsFlux = sum(Math.abs((* attemptAbsFlux:GrowingOrgan, (
+        attemptAbsFlux.plantNumber == pb.plantNumber
+      ) *)[j]));
+      println("sumFlux " + sumFlux);
+      println("RelativeError "
+          + ((sumAbsFlux > 0.0) ? sumFlux / sumAbsFlux : 0.0));
+    }
+    double completedMerit = ctx.nonlinearMerit;
+    if (!ctx.converged && ctx.iterationCount < iterationLimit) {
+      ctx.dampingFactor = adaptCtDampingFactor(
+          ctx.dampingFactor, ctx.previousNonlinearMerit, completedMerit);
+    }
+    ctx.previousNonlinearMerit = completedMerit;
+  }
+  ctx.maxIterationReached = !ctx.converged
+      && ctx.iterationCount >= iterationLimit;
+}
+
+/** Commit a converged hour, or restore without promoting bootstrap state. */
+static boolean finalizeCarbonTransportState(PlantBase pb,
+        CarbonTransportStateSnapshot snapshot,
+        CarbonTransportSolveContext ctx) {
+  if (ctx.converged) {
+    updateCarbonStatus(pb);
+    ctx.carbonStatusUpdateCount++;
+    ctx.retryConverged = ctx.retryUsed;
+    setAcceptedHourlyCarbonTransportState(pb, true);
+    return true;
+  }
+  boolean bootstrapFallback =
+      !hasAcceptedHourlyCarbonTransportState(pb);
+  restoreCarbonTransportState(pb, snapshot);
+  ctx.solverFallbackUsed = true;
+  ctx.retryConverged = false;
+  ctx.bootstrapFallbackUsed = bootstrapFallback;
+  if (bootstrapFallback) {
+    updateCarbonStatus(pb);
+    ctx.carbonStatusUpdateCount++;
+    // Initialization is usable provisionally, but it is not a converged hour.
+    setAcceptedHourlyCarbonTransportState(pb, false);
+  }
+  return false;
+}
+
 
 /**
  * Write compact carbon-transport mass-balance diagnostics for each solved step.
@@ -1729,22 +3953,11 @@ static void updateCarbonStatus(PlantBase pb)
  * positive sink fluxes. No explicit storage/boundary term is available here,
  * so netFluxResidual is reported as totalLoading - totalUnloading.</p>
  */
-static void writeCtMassBalanceDiagnostics(PlantBase pb, int iterationCount, double convergenceError) {
+static void writeCtMassBalanceDiagnostics(
+        PlantBase pb, CarbonTransportSolveContext ctx) {
   long organCount = count((* gCount:GrowingOrgan, (
     gCount.plantNumber == pb.plantNumber
   ) *));
-  double totalLoading = Math.abs(sum((* gLoad:GrowingOrgan, (
-    gLoad.j < 0.0 &&
-    gLoad.plantNumber == pb.plantNumber
-  ) *)[j]));
-  double totalUnloading = sum((* gUnload:GrowingOrgan, (
-    gUnload.j > 0.0 &&
-    gUnload.plantNumber == pb.plantNumber
-  ) *)[j]);
-  double netFluxResidual = totalLoading - totalUnloading;
-  double relativeFluxResidual = Math.abs(netFluxResidual)
-      / Math.max(Math.max(Math.abs(totalLoading), Math.abs(totalUnloading)), 1e-12);
-
   double minCp = 0.0;
   double maxCp = 0.0;
   double meanCp = 0.0;
@@ -1782,12 +3995,12 @@ static void writeCtMassBalanceDiagnostics(PlantBase pb, int iterationCount, doub
   row.day = day;
   row.hour = hourOfDay;
   row.useCPStyleCTResponse = true;
-  row.iterationCount = iterationCount;
-  row.convergenceError = convergenceError;
-  row.totalLoading = totalLoading;
-  row.totalUnloading = totalUnloading;
-  row.netFluxResidual = netFluxResidual;
-  row.relativeFluxResidual = relativeFluxResidual;
+  row.iterationCount = ctx.iterationCount;
+  row.convergenceError = ctx.convergenceError;
+  row.totalLoading = ctx.totalLoading;
+  row.totalUnloading = ctx.totalUnloading;
+  row.netFluxResidual = ctx.netFluxResidual;
+  row.relativeFluxResidual = ctx.relativeNetFluxResidual;
   row.minCp = minCp;
   row.maxCp = maxCp;
   row.meanCp = meanCp;
@@ -1799,6 +4012,96 @@ static void writeCtMassBalanceDiagnostics(PlantBase pb, int iterationCount, doub
   row.ctPlantBaseFallbackCount = pb.ctPlantBaseFallbackCount;
   row.ctPlantBaseResidual = pb.ctPlantBaseResidual;
   row.ctPlantBaseDenominator = pb.ctPlantBaseDenominator;
+  row.absoluteFluxError = ctx.convergenceError;
+  row.relativeFluxConvergenceError = ctx.relativeFluxError;
+  row.ctPlantBaseAbsoluteResidual = ctx.plantBaseResidual;
+  row.ctPlantBaseRelativeResidual = ctx.plantBaseRelativeResidual;
+  row.ctDampingFactor = ctx.dampingFactor;
+  row.ctRawPlantBasePhi = ctx.rawPlantBasePhi;
+  row.ctAcceptedPlantBasePhi = ctx.acceptedPlantBasePhi;
+  row.ctConverged = ctx.converged;
+  row.ctMaxIterationReached = ctx.maxIterationReached;
+  row.ctNonlinearMerit = ctx.nonlinearMerit;
+  row.ctRetryUsed = ctx.retryUsed;
+  row.ctRetryConverged = ctx.retryConverged;
+  row.ctSolverFallbackUsed = ctx.solverFallbackUsed;
+  row.ctInvalidUnfoldTrialCount = ctx.totalInvalidUnfoldTrialCount;
+  row.ctFinalIterationLimit = ctx.finalIterationLimit;
+  row.ctBootstrapFallbackUsed = ctx.bootstrapFallbackUsed;
+  row.ctHasAcceptedHourlyState =
+      hasAcceptedHourlyCarbonTransportState(pb);
+  row.ctStoredPlantBaseSugar = pb.sugarConcentration_phloem;
+  row.ctPlantBaseSugarFromPhi = isValidPhi(pb.cpt)
+      ? sugarFromCp(pb.cpt) : 0.0;
+  row.ctAcceptedHourlyPlantBaseSugar = row.ctHasAcceptedHourlyState
+      ? row.ctPlantBaseSugarFromPhi : 0.0;
+  row.ctFailedTrialPlantBasePhi = ctx.failedTrialPlantBasePhi;
+  row.ctFailedTrialPlantBaseSugar = ctx.failedTrialPlantBaseSugar;
+  row.ctFailedTrialMinSugar = ctx.failedTrialMinSugar;
+  row.ctFailedTrialMaxSugar = ctx.failedTrialMaxSugar;
+  row.ctFailedTrialMeanSugar = ctx.failedTrialMeanSugar;
+  row.ctFailedTrialMerit = ctx.failedTrialMerit;
+  row.sumLocalJ = ctx.sumLocalJ;
+  row.pbFoldedJ = ctx.pbFoldedJ;
+  row.closureResidual = ctx.closureResidual;
+  row.closureScale = ctx.closureScale;
+  row.relativeClosureResidual = ctx.relativeClosureResidual;
+  row.closureNormalizedError = ctx.closureNormalizedError;
+  row.netFluxIdentityResidual = ctx.netFluxIdentityResidual;
+  row.totalGrowingOrganCount = ctx.totalGrowingOrganCount;
+  row.foldedGrowingOrganCount = ctx.foldedGrowingOrganCount;
+  row.unfoldedGrowingOrganCount = ctx.unfoldedGrowingOrganCount;
+  row.foldCoverageComplete = ctx.foldCoverageComplete;
+  row.unfoldCoverageComplete = ctx.unfoldCoverageComplete;
+  row.sumLeafJ = ctx.sumLeafStoredJ;
+  row.sumLeafTaylorJ = ctx.sumLeafTaylorJ;
+  row.sumPetioleJ = ctx.sumPetioleStoredJ;
+  row.sumPetioleTaylorJ = ctx.sumPetioleTaylorJ;
+  row.sumShootJ = ctx.sumShootStoredJ;
+  row.sumShootTaylorJ = ctx.sumShootTaylorJ;
+  row.sumFruitJ = ctx.sumFruitStoredJ;
+  row.sumFruitTaylorJ = ctx.sumFruitTaylorJ;
+  row.sumFlowerJ = ctx.sumFlowerStoredJ;
+  row.sumFlowerTaylorJ = ctx.sumFlowerTaylorJ;
+  row.sumFineRootJ = ctx.sumFineRootStoredJ;
+  row.sumFineRootTaylorJ = ctx.sumFineRootTaylorJ;
+  row.sumStructuralRootJ = ctx.sumStructuralRootStoredJ;
+  row.sumStructuralRootTaylorJ = ctx.sumStructuralRootTaylorJ;
+  row.sumFruitExactUnloading = ctx.sumFruitExactUnloading;
+  row.sumFruitExactActive = ctx.sumFruitExactActive;
+  row.sumFruitExactMassFlow = ctx.sumFruitExactMassFlow;
+  row.sumFruitStoredUnloading = ctx.sumFruitStoredUnloading;
+  row.fruitLinearizationResidual = ctx.fruitLinearizationResidual;
+  row.fruitLinearizationRelativeResidual =
+      ctx.fruitLinearizationRelativeResidual;
+  row.maxFruitLinearizationResidual =
+      ctx.maxFruitLinearizationResidual;
+  row.maxFruitLinearizationRelativeResidual =
+      ctx.maxFruitLinearizationRelativeResidual;
+  row.maxFruitResidualOrganID = ctx.maxFruitResidualOrganID;
+  row.fruitStoredVsExactResidual = ctx.fruitStoredVsExactResidual;
+  row.maxFruitTaylorPointResidual = ctx.maxFruitTaylorPointResidual;
+  row.maxFruitTaylorPointRelativeResidual =
+      ctx.maxFruitTaylorPointRelativeResidual;
+  row.simpleRootActive = ctx.simpleRootActive;
+  row.simpleRootTopologyValid = ctx.simpleRootTopologyValid;
+  row.simpleRootFoldValid = ctx.simpleRootFoldValid;
+  row.simpleRootUnfoldValid = ctx.simpleRootUnfoldValid;
+  row.simpleRootDoubleFoldCount = ctx.simpleRootDoubleFoldCount;
+  row.simpleRootMinLayer = ctx.simpleRootMinLayer;
+  row.simpleRootMaxLayer = ctx.simpleRootMaxLayer;
+  row.simpleRootLayerCount = ctx.simpleRootLayerCount;
+  row.simpleStructuralRootExpected = ctx.simpleStructuralRootExpected;
+  row.simpleStructuralRootFolded = ctx.simpleStructuralRootFolded;
+  row.simpleStructuralRootUnfolded = ctx.simpleStructuralRootUnfolded;
+  row.simpleFineRootExpected = ctx.simpleFineRootExpected;
+  row.simpleFineRootFolded = ctx.simpleFineRootFolded;
+  row.simpleFineRootUnfolded = ctx.simpleFineRootUnfolded;
+  row.simpleRootLocalJ = ctx.simpleRootLocalJ;
+  row.simpleRootFoldedJ = ctx.simpleRootFoldedJ;
+  row.simpleRootClosureResidual = ctx.simpleRootClosureResidual;
+  row.simpleRootRelativeClosureResidual =
+      ctx.simpleRootRelativeClosureResidual;
   DiagnosticTableCoordinator.writeCarbonTransportMassBalance(row);
 }
 
@@ -1812,18 +4115,31 @@ static void writeCtMassBalanceDiagnostics(PlantBase pb, int iterationCount, doub
  *   <li>{@link #updateCarbonPotential(PlantBase, CarbonTransportSolveContext)} — unfold cp across the plant graph</li>
  *   <li>{@link #updateFlow(PlantBase, CarbonTransportSolveContext)} — update j and residuals</li>
  *   <li>{@link #updateResistence(PlantBase)} — refresh transport coefficients</li>
- *   <li>Repeat steps 1–5 while the residual exceeds {@code MAXERROR} and the
- *       iteration count is at most 20; print diagnostics if {@code printFlag}.</li>
+ *   <li>Repeat steps 1–5 until mixed flux-change and PlantBase boundary
+ *       criteria pass, or exactly {@code CT_MAX_ITERATIONS} passes are used.</li>
  *   <li>{@link #updateCarbonStatus(PlantBase)} — final per-organ status & Mcf.</li>
  * </ol></p>
  *
  * <p><b>Convergence control</b>
  * <ul>
- *   <li>The per-call convergence error is the sum of absolute per-organ residuals.</li>
- *   <li>{@code MAXERROR} and the per-call iteration count bound the iteration.</li>
- *   <li>On excessive passes (e.g., 200), fallback assigns {@code j = a + b·cpt}
- *       and stops the run safely.</li>
- * </ul></p>
+ *   <li>The flux criterion combines absolute and graph-scale relative error.</li>
+ *   <li>The PlantBase boundary residual must also pass its mixed criterion, so
+ *       small damping cannot create false convergence.</li>
+ *   <li>Whole-plant closure and fold/unfold coverage remain diagnostic-only in
+ *       this isolation patch. Invalid simple-root topology or incomplete
+ *       simple-root fold/unfold coverage still invalidates the solve.</li>
+ *   <li>Fruit solved-current versus pure exact-unloading residuals are emitted
+ *       separately for diagnosis and are not an additional convergence gate.</li>
+ *   <li>Adaptive damping is based on the previous complete nonlinear pass.</li>
+	 *   <li>The normal solve starts with the configured initial damping. A failed
+	 *       30-pass solve is retried once with alpha 0.1 and a 60-pass limit. A
+	 *       complete finite normal trial warm-starts that retry; invalid trials first
+	 *       roll back to the pre-attempt state.</li>
+ *   <li>If the first retry also fails, the initialized state is restored and
+ *       used once as a non-converged bootstrap without marking it accepted.</li>
+ *   <li>After one converged hourly state exists, a failed retry restores that
+ *       accepted pre-hour state without committing the failed iterate.</li>
+	 * </ul></p>
  *
  * <p><b>Scope</b> — Only organs matching the supplied plant identity are read or updated.</p>
  *
@@ -1835,61 +4151,91 @@ static void updateC_Transport(PlantBase pb)
 		if (pb == null) {
 			throw new IllegalArgumentException("Carbon transport requires a PlantBase instance.");
 		}
-		CarbonTransportSolveContext ctx = new CarbonTransportSolveContext();
-
-		//waterFlowEst();
-		//waterPotential();
-		linearise(pb, ctx);
-		updateBranchFlux(pb, ctx);
-		updateCarbonPotential(pb, ctx);
-		updateFlow(pb, ctx);
-		updateResistence(pb);
-		//
-		while((ctx.convergenceError > MAXERROR ) && ctx.iterationCount <= 20)
-		{
-			ctx.iterationCount++;
-			ctx.convergenceError = 0.0;
-			linearise(pb, ctx);
-			updateBranchFlux(pb, ctx);
-			updateCarbonPotential(pb, ctx);
-			updateFlow(pb, ctx);
-			updateResistence(pb);
-			if (debug && printFlag) { println("error_count " + ctx.iterationCount + " Serror " + ctx.convergenceError); }
-			if (debug && printFlag) {
-				double sumFlux = sum((* gFlux:GrowingOrgan, (
-				  gFlux.plantNumber == pb.plantNumber
-				) *)[j]);
-				double sumAbsFlux = sum(Math.abs((* gAbsFlux:GrowingOrgan, (
-				  gAbsFlux.plantNumber == pb.plantNumber
-				) *)[j]));
-				println("sumFlux " + sumFlux);
-				println("RelativeError " + ((sumAbsFlux > 0.0) ? sumFlux / sumAbsFlux : 0.0));
-			}
-
-			if (ctx.iterationCount > 20) // too many passes?
-	        {	// report problem
-	        [
-	         sd:GrowingOrgan, (
-	           sd.err > MAXERROR &&
-	           sd.plantNumber == pb.plantNumber
-	         ) ::>
-         {
-			sd.j = sd.sink_source_a + sd.sink_source_b * sd.cpt; 
-         	 //if (printFlag) { println("rank " + sd.rank  + " j " + sd.j + " cpt " + sd.cpt + " err " + sd.err); }
-		 }
-		]
-		 if (debug && printFlag) { println("carbon transport does not convergening well"); }
-		 
-		 //continueRunning = false;
-		 
-		// break;
-        }
-      
-
+		long solveStart = System.currentTimeMillis();
+		boolean printPerformance = step <= 2 || debug_CT;
+		touchRunProgress("carbon_start", "started");
+		if (printPerformance) println("[CTPERF] step=" + step + " start");
+		long topologyStart = System.currentTimeMillis();
+		GrowingOrgan[] collectedOrgans = array((* ctTopologyOrgan:GrowingOrgan, (
+			ctTopologyOrgan.plantNumber == pb.plantNumber
+		) *));
+		CarbonTransportTopology topology = buildCarbonTransportTopology(
+			pb, collectedOrgans);
+		long topologyMillis = System.currentTimeMillis() - topologyStart;
+		if (printPerformance) {
+			println("[CTPERF] topology/owner-resolution ms=" + topologyMillis);
+			println("[CTPERF] growingOrgans=" + topology.growingOrgans.size()
+				+ " internodes=" + topology.internodesById.size()
+				+ " petioles=" + topology.petiolesById.size()
+				+ " leaves=" + topology.leavesById.size()
+				+ " fruits=" + topology.fruitsById.size()
+				+ " flowers=" + topology.flowersById.size()
+				+ " structuralRoots=" + topology.structuralRoots.size()
+				+ " fineRoots=" + topology.fineRoots.size());
+			println("[CTPERF] owners ambiguousLeaves="
+				+ topology.ambiguousLeafOwners + " missingLeaves="
+				+ topology.missingLeafOwners + " ambiguousFineRoots="
+				+ topology.ambiguousFineRootOwners + " missingFineRoots="
+				+ topology.missingFineRootOwners);
 		}
-		updateCarbonStatus(pb);
+		if (!topology.valid) {
+			touchRunProgress("carbon_topology_complete", "failed");
+			throw new IllegalStateException("Invalid carbon-transport topology: "
+				+ topology.error + " ambiguousLeafOwners="
+				+ topology.ambiguousLeafOwners + " missingLeafOwners="
+				+ topology.missingLeafOwners + " ambiguousFineRootOwners="
+				+ topology.ambiguousFineRootOwners + " missingFineRootOwners="
+				+ topology.missingFineRootOwners);
+		}
+		touchRunProgress("carbon_topology_complete");
+		boolean hadAcceptedHourlyState =
+			hasAcceptedHourlyCarbonTransportState(pb);
+		if (!hadAcceptedHourlyState) {
+			prepareInitialCarbonTransportSnapshotState(pb);
+		}
+		CarbonTransportStateSnapshot acceptedState =
+			snapshotCarbonTransportState(pb, topology);
+		CarbonTransportSolveContext ctx = new CarbonTransportSolveContext();
+		ctx.dampingFactor = CT_DAMPING_INITIAL;
+		ctx.finalIterationLimit = CT_MAX_ITERATIONS;
+
+		// Each pass is one complete re-linearise/fold/unfold/reconstruct cycle.
+		runCarbonTransportAttempt(pb, ctx, CT_MAX_ITERATIONS, topology);
+		if (shouldStartCarbonTransportRetry(ctx)) {
+			if (!shouldWarmStartCarbonTransportRetry(ctx)) {
+				restoreCarbonTransportState(pb, acceptedState);
+			}
+			CarbonTransportSolveContext retryContext =
+				createCarbonTransportRetryContext(ctx);
+			runCarbonTransportAttempt(
+				pb, retryContext, CT_RETRY_MAX_ITERATIONS, topology);
+			ctx = retryContext;
+		}
+
+		updateFinalFruitCarbonDiagnostics(ctx, topology);
+		boolean accepted = finalizeCarbonTransportState(
+			pb, acceptedState, ctx);
+		if (!accepted) {
+			if (!hadAcceptedHourlyState) {
+				println("WARN(CT): first solve failed; using initialized transport state for bootstrap");
+			} else {
+				println("WARN(CT): normal solve and single retry failed for plant "
+					+ pb.plantNumber + "; restored accepted pre-hour transport state");
+			}
+		}
 		if(outputCarbonTransportDiagnostics) {
-			writeCtMassBalanceDiagnostics(pb, ctx.iterationCount, ctx.convergenceError);
+			writeCtMassBalanceDiagnostics(pb, ctx);
+		}
+		touchRunProgress("carbon_solve_complete",
+			accepted ? "accepted" : "fallback");
+		if (printPerformance) {
+			println("[CTPERF] coverage folded="
+				+ ctx.foldedGrowingOrganCount + "/"
+				+ ctx.totalGrowingOrganCount + " unfolded="
+				+ ctx.unfoldedGrowingOrganCount + "/"
+				+ ctx.totalGrowingOrganCount);
+			println("[CTPERF] solve total ms="
+				+ (System.currentTimeMillis() - solveStart));
 		}
 
 

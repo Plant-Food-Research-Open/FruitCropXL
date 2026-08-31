@@ -955,6 +955,8 @@ module GrowingOrgan extends Organ implements TransportOrgan
 	double synRate;
 	/** "Starch" hydrolysis rate */
 	double hydRate;
+	/** Late-season "starch" hydrolysis rate (h-1). */
+	double hydRateLate;
 	/** MAXIMUM PERCENTAGE OF RESERVE IN RELATION TO dry mass 
 		for grapevine, zufferey et al 2001. 30% TNC values of above 30 % DW could
 		this is from 1/0.45 gDW / gC * 0.444 gC / gStarch * 0.225 gStarch/ gDW
@@ -1036,6 +1038,9 @@ module GrowingOrgan extends Organ implements TransportOrgan
 	 int lastFoldStep = -1;      // which fold pass wrote me
 	 int foldRecv = 0;           // how many child writes I received this pass
 	 int foldExpect = 0;         // how many child writes I should receive
+	 int unfoldRecv = 0;         // how many transport parents unfolded me this pass
+	 long ctTransportOwnerId = -1L; // unique CT owner resolved for this pass
+	 int ctTransportOwnerCount = 0; // distinct CT owners resolved for this pass
 
 	
 	///////////// for carbon transport — multiple children per type /////////////
@@ -1690,6 +1695,23 @@ module GrowingOrgan extends Organ implements TransportOrgan
     // Java 1.5-safe default (others return 0)
     double getExudationPT() { return 0.0; }
 
+    /**
+     * Signed direct carbon transport evaluated outside the generic sink channels.
+     * Default is zero; fruit implementations may return mg C h-1.
+     */
+    double getDirectMassFlowCarbon(double sugarConcentration_phloem) {
+        return 0.0;
+    }
+
+    /**
+     * Derivative of signed direct carbon transport with respect to carbon
+     * potential Phi (mg C h-1 per Phi unit).
+     */
+    double getDirectMassFlowDerivativePhi(double cp,
+            double sugarConcentration_phloem) {
+        return 0.0;
+    }
+
     void updateCarbonAllocation(double sugarConcentration) {
 		// Check if the sugar concentration in phloem is greater than 0
 			calcPTCTRAM(sugarConcentration);
@@ -1875,7 +1897,7 @@ module GrowingOrgan extends Organ implements TransportOrgan
 	}
 
 	/**
-	 * Loads constant reserve synthesis and early-season reserve hydrolysis rates.
+	 * Loads constant reserve synthesis and early-/late-season reserve hydrolysis rates.
 	 */
 	void configureReserveTurnover(CategoryStore config, double defaultHydRate, double defaultSynRate) {
 		hydRate = config.getDouble("HYDROLYSIS_RATE", defaultHydRate);
@@ -1890,8 +1912,23 @@ module GrowingOrgan extends Organ implements TransportOrgan
 			synRate = 0.0;
 		}
 
-		if (synRate > hydRate) {
-			println("[Config] WARN: SYNTHESIS_RATE is above HYDROLYSIS_RATE; reserve hydrolysis will strengthen late season.");
+		double defaultHydRateLate = 0.05 * hydRate;
+		try {
+			hydRateLate = config.getDouble("HYDROLYSIS_RATE_LATE");
+		} catch (RuntimeException e) {
+			// Compatibility fallback: legacy files use 5% of the validated early hydrolysis rate.
+			hydRateLate = defaultHydRateLate;
+		}
+		if (Double.isNaN(hydRateLate) || Double.isInfinite(hydRateLate) || hydRateLate < 0.0) {
+			println("[Config] WARN: HYDROLYSIS_RATE_LATE is invalid; using 5% of HYDROLYSIS_RATE.");
+			hydRateLate = defaultHydRateLate;
+		}
+
+		if (hydRateLate >= hydRate && hydRate > 0.0) {
+			println("[Config] WARN: HYDROLYSIS_RATE_LATE is not below HYDROLYSIS_RATE; hydrolysis will not decline late season.");
+		}
+		if (hydRateLate >= synRate && synRate > 0.0) {
+			println("[Config] WARN: HYDROLYSIS_RATE_LATE is not below SYNTHESIS_RATE; late-season reserve refill may remain constrained.");
 		}
 	}
 
@@ -1926,12 +1963,13 @@ module GrowingOrgan extends Organ implements TransportOrgan
 	 * Seasonally adjusts reserve hydrolysis rate (h-1).
 	 *
 	 * HYDROLYSIS_RATE defines early remobilization strength. Late-season
-	 * hydrolysis approaches the constant SYNTHESIS_RATE, using the reserve-KM
-	 * timing so storage priority and reserve leakage change together.
+	 * hydrolysis approaches HYDROLYSIS_RATE_LATE, using the reserve-KM timing
+	 * so storage priority and reserve leakage change together. SYNTHESIS_RATE
+	 * remains an independent reserve-storage coefficient.
 	 */
 	double adjustHydRateSeasonally(int daysSinceWinterSolstice) {
 		double beta = getReserveSeasonBeta(daysSinceWinterSolstice);
-		double rate = hydRate + (synRate - hydRate) * beta;
+		double rate = hydRate * (1.0 - beta) + hydRateLate * beta;
 		if (Double.isNaN(rate) || Double.isInfinite(rate)) rate = hydRate;
 		if (rate < 0.0) rate = 0.0;
 		return rate;

@@ -93,6 +93,15 @@ private class PhloemConcentrationCandidateException extends RuntimeException {
 	 }
 
 /**
+ * Evaluate the common-pool mass-balance residual at one candidate sugar
+ * concentration. Kept as a small diagnostic seam so determinism can be
+ * regression-tested without changing the solver itself.
+ */
+static double evaluatePhloemSugarConcentrationResidual(PlantBase pb, double sugarConcentration) {
+	return new PhloemSugarConcentrationResidual(pb).value(sugarConcentration);
+}
+
+/**
  * Calculate the phloem sugar concentration using a stable numerical solver.
  * <p>
  * This method:

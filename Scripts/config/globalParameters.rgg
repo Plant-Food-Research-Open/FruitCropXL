@@ -11,6 +11,8 @@ import java.io.OutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.FileWriter;
+import java.io.PrintWriter;
 import java.io.IOException;
 import java.util.Properties;
 import java.util.Map;
@@ -47,6 +49,7 @@ global String MODEL_ID = "FruitCropModel";
 
 /* default single shoot with apple virtual fruit and root for fast testing */
 global String FILE_NAME_MODEL_OPTIONS = "model.options.default.json";
+//global String FILE_NAME_MODEL_OPTIONS = "model.options.FOPS-D34-singleUpright-50Fruit.json";
 //global String FILE_NAME_MODEL_OPTIONS = "model.options.water.grid.example.json";
 //global String FILE_NAME_MODEL_OPTIONS = "model.options.dynamicApple.leafInspect.carbon.json";
 //global String FILE_NAME_MODEL_OPTIONS = "model.options.dynamicApple.leafInspect.pot.json";
@@ -1248,6 +1251,7 @@ global String plantLevelOutputFilePath;
 global String meanFruitOutputFilePath;
 global String fieldLevelOutputFilePath;
 global String waterFluxSolverDebugOutputFilePath;
+global String runProgressOutputFilePath;
 
 global String plantLevelMetadataFilePath;
 global String meanFruitMetadataFilePath;
@@ -1259,12 +1263,88 @@ global String waterFluxSolverDebugMetadataFilePath;
  */
 static HashMap csvWriters = new HashMap();
 
+/** Wall-clock heartbeat used by the headless watchdog. */
+static volatile long runProgressHeartbeatMillis = 0L;
+/** Wall-clock origin for the elapsedMs column in run-progress.csv. */
+static long runProgressStartMillis = 0L;
+
+private static void createEmptyOutputPlaceholder(String filePath) {
+	FileOutputStream placeholder = null;
+	try {
+		File file = new File(filePath);
+		File parent = file.getParentFile();
+		if (parent != null && !parent.exists()) parent.mkdirs();
+		placeholder = new FileOutputStream(file, false);
+		placeholder.flush();
+	} catch (IOException e) {
+		throw new RuntimeException("Cannot create output placeholder: " + filePath, e);
+	} finally {
+		if (placeholder != null) {
+			try { placeholder.close(); } catch (IOException ignored) { }
+		}
+	}
+}
+
+/** Refresh the watchdog heartbeat without adding a progress row. */
+static void heartbeatRunProgress() {
+	runProgressHeartbeatMillis = System.currentTimeMillis();
+}
+
+static long getRunProgressHeartbeatMillis() {
+	return runProgressHeartbeatMillis;
+}
+
+/**
+ * Append and flush one coarse run-stage row. This intentionally avoids
+ * per-organ logging so it remains cheap for full imported architectures.
+ */
+static void touchRunProgress(String stage) {
+	touchRunProgress(stage, "ok");
+}
+
+static synchronized void touchRunProgress(String stage, String status) {
+	long now = System.currentTimeMillis();
+	if (runProgressStartMillis <= 0L) runProgressStartMillis = now;
+	runProgressHeartbeatMillis = now;
+	if (runProgressOutputFilePath == null || runProgressOutputFilePath.length() == 0) return;
+
+	PrintWriter writer = null;
+	try {
+		File file = new File(runProgressOutputFilePath);
+		boolean writeHeader = !file.exists() || file.length() == 0L;
+		writer = new PrintWriter(new FileWriter(file, true));
+		if (writeHeader) {
+			writer.println("timestamp,step,year,dayOfYear,hourOfDay,stage,status,elapsedMs");
+		}
+		String wallClock = new java.text.SimpleDateFormat(
+			"yyyy-MM-dd'T'HH:mm:ss.SSSZ").format(new java.util.Date(now));
+		writer.println(wallClock + "," + step + "," + year + "," + dayOfYear + ","
+			+ hourOfDay + "," + stage + "," + status + ","
+			+ (now - runProgressStartMillis));
+		writer.flush();
+	} catch (IOException e) {
+		throw new RuntimeException("Cannot write run progress: " + runProgressOutputFilePath, e);
+	} finally {
+		if (writer != null) writer.close();
+	}
+}
+
 static void initCsvWriters(String outputTable_name) {
 	// Init file paths
 	plantLevelOutputFilePath = PATH_OUTPUT + "plant-level" + "-" + outputTable_name + ".csv";
 	meanFruitOutputFilePath = PATH_OUTPUT + "mean-fruit"+ "-" + outputTable_name + ".csv";
 	fieldLevelOutputFilePath = PATH_OUTPUT + "field-level"+ "-" + outputTable_name + ".csv";
 	waterFluxSolverDebugOutputFilePath = PATH_OUTPUT + "waterFluxSolverDebug_" + outputTable_name + ".csv";
+	runProgressOutputFilePath = PATH_OUTPUT + "run-progress.csv";
+	runProgressStartMillis = System.currentTimeMillis();
+	runProgressHeartbeatMillis = runProgressStartMillis;
+
+	// Standard biological rows still begin at step 1. These empty files only
+	// make successful output initialization visible before physiology finishes.
+	createEmptyOutputPlaceholder(plantLevelOutputFilePath);
+	createEmptyOutputPlaceholder(meanFruitOutputFilePath);
+	createEmptyOutputPlaceholder(fieldLevelOutputFilePath);
+	createEmptyOutputPlaceholder(runProgressOutputFilePath);
 
 	plantLevelMetadataFilePath = PATH_OUTPUT + "plant-level.metadata.json";
 	meanFruitMetadataFilePath = PATH_OUTPUT + "mean-fruit.metadata.json";
@@ -1285,4 +1365,5 @@ static void initCsvWriters(String outputTable_name) {
 	csvWriters.put(plantLevelOutputFilePath, new StepwiseCsvWriter(plantLevelOutputFilePath, csvMapper));
 	csvWriters.put(meanFruitOutputFilePath, new StepwiseCsvWriter(meanFruitOutputFilePath, csvMapper));
 	csvWriters.put(fieldLevelOutputFilePath, new StepwiseCsvWriter(fieldLevelOutputFilePath, csvMapper));
+	touchRunProgress("initialized");
 }

@@ -3,6 +3,10 @@ import org.apache.commons.math3.analysis.solvers.*;
 import org.apache.commons.math3.exception.NoBracketingException;
 import org.apache.commons.math3.exception.TooManyEvaluationsException;
 import org.apache.commons.math3.exception.NumberIsTooLargeException;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.TreeMap;
 
 import static plantBase.*;
 import static absOrgan.*;
@@ -109,74 +113,529 @@ public static double updateWaterFlux(PlantBase pb)
 	}
 
 
+/** Lightweight, rebuilt-per-update topology for above-ground hydraulics. */
+private class WaterShootTopology {
+	/** Long internode id -> Internode, sorted by id for deterministic traversal. */
+	TreeMap internodesById = new TreeMap();
+	/** Long child id -> Long parent id; basal ids are absent. */
+	HashMap parentByInternode = new HashMap();
+	/** Long parent id -> ArrayList<Long> child ids. */
+	HashMap childrenByInternode = new HashMap();
+	/** Long internode id -> ArrayList<Leaf>. */
+	HashMap leavesByInternode = new HashMap();
+	/** Long internode id -> Double direct-leaf potential demand (mg water s-1). */
+	HashMap localLeafPotential = new HashMap();
+	/** Long internode id -> Double folded subtree potential demand (mg water s-1). */
+	HashMap subtreePotential = new HashMap();
+	ArrayList basalInternodes = new ArrayList();
+	ArrayList postOrder = new ArrayList();
+	ArrayList preOrder = new ArrayList();
+	boolean valid = true;
+	String error = "";
+	int unassignedLeaves = 0;
+	int multiplyAssignedLeaves = 0;
+	int duplicateInternodeIds = 0;
+	double potentialLeafSum = 0.0;
+	double basalFoldedPotential = 0.0;
+	int foldedCount = 0;
+	int unfoldedCount = 0;
+
+	void invalidate(String message) {
+		if (valid) error = message;
+		valid = false;
+	}
+}
+
+/** Test-facing result for the shared deterministic fold/order implementation. */
+class WaterHydraulicTestResult {
+	public boolean valid = true;
+	public String error = "";
+	public double[] subtreePotential;
+	public double[] waterFlux;
+	public int[] foldCount;
+	public int[] unfoldCount;
+}
+
+private static double mapDouble(HashMap values, Long key) {
+	Double value = (Double) values.get(key);
+	return (value == null) ? 0.0 : value.doubleValue();
+}
+
+/**
+ * Generate child-before-parent and parent-before-child orders from explicit ids.
+ * All work after graph collection is ordinary Java collection traversal.
+ */
+private static boolean generateWaterTraversalOrders(
+		TreeMap nodesById, HashMap parentById, HashMap childrenById,
+		ArrayList basalIds, ArrayList postOrder, ArrayList preOrder,
+		String[] error) {
+	HashMap remainingChildren = new HashMap();
+	ArrayList queue = new ArrayList();
+	for (Object keyObject : nodesById.keySet()) {
+		Long key = (Long) keyObject;
+		ArrayList children = (ArrayList) childrenById.get(key);
+		if (children == null) children = new ArrayList();
+		java.util.Collections.sort(children);
+		childrenById.put(key, children);
+		remainingChildren.put(key, Integer.valueOf(children.size()));
+		if (children.size() == 0) queue.add(key);
+	}
+
+	int queueIndex = 0;
+	while (queueIndex < queue.size()) {
+		Long childId = (Long) queue.get(queueIndex++);
+		postOrder.add(childId);
+		Long parentId = (Long) parentById.get(childId);
+		if (parentId != null) {
+			Integer remaining = (Integer) remainingChildren.get(parentId);
+			if (remaining == null) {
+				error[0] = "missing remaining-child state for parentId=" + parentId;
+				return false;
+			}
+			int next = remaining.intValue() - 1;
+			remainingChildren.put(parentId, Integer.valueOf(next));
+			if (next == 0) queue.add(parentId);
+		}
+	}
+	if (postOrder.size() != nodesById.size()) {
+		error[0] = "cycle or unresolved shoot topology: postOrder="
+			+ postOrder.size() + " internodes=" + nodesById.size();
+		return false;
+	}
+
+	java.util.Collections.sort(basalIds);
+	queue.clear();
+	queue.addAll(basalIds);
+	queueIndex = 0;
+	HashSet visited = new HashSet();
+	while (queueIndex < queue.size()) {
+		Long parentId = (Long) queue.get(queueIndex++);
+		if (!visited.add(parentId)) {
+			error[0] = "cycle or duplicate preorder visit at internodeId=" + parentId;
+			return false;
+		}
+		preOrder.add(parentId);
+		ArrayList children = (ArrayList) childrenById.get(parentId);
+		if (children != null) queue.addAll(children);
+	}
+	if (preOrder.size() != nodesById.size()) {
+		error[0] = "disconnected shoot topology: preOrder="
+			+ preOrder.size() + " internodes=" + nodesById.size();
+		return false;
+	}
+	return true;
+}
+
+private static WaterShootTopology buildWaterShootTopology(
+		PlantBase pb, Internode[] internodes, Leaf[] leaves) {
+	WaterShootTopology topology = new WaterShootTopology();
+	int index;
+	for (index = 0; index < internodes.length; index++) {
+		Internode segment = internodes[index];
+		if (segment == null) {
+			topology.invalidate("null internode at collected index=" + index);
+			continue;
+		}
+		long id = segment.getId();
+		Long key = Long.valueOf(id);
+		if (id <= 0L) {
+			topology.invalidate("invalid internode id=" + id);
+			continue;
+		}
+		if (topology.internodesById.containsKey(key)) {
+			topology.duplicateInternodeIds++;
+			topology.invalidate("duplicate internode id=" + id);
+			continue;
+		}
+		topology.internodesById.put(key, segment);
+		topology.childrenByInternode.put(key, new ArrayList());
+		topology.leavesByInternode.put(key, new ArrayList());
+		topology.localLeafPotential.put(key, Double.valueOf(0.0));
+	}
+
+	for (Object keyObject : topology.internodesById.keySet()) {
+		Long childKey = (Long) keyObject;
+		Internode child = (Internode) topology.internodesById.get(childKey);
+		PlantBase owner = null;
+		try {
+			owner = child.getPlantBase();
+		} catch (RuntimeException e) {
+			owner = null;
+		}
+		if (owner != pb) {
+			topology.invalidate("internodeId=" + childKey
+				+ " is not associated with PlantBase id=" + pb.getId());
+			continue;
+		}
+		long parentIdValue = child.parentID;
+		if (parentIdValue == childKey.longValue()) {
+			topology.invalidate("self-parent internodeId=" + childKey);
+			continue;
+		}
+		Long parentKey = Long.valueOf(parentIdValue);
+		Internode parent = (Internode) topology.internodesById.get(parentKey);
+		if (parent != null) {
+			if (parent.plantNumber != pb.plantNumber) {
+				topology.invalidate("internodeId=" + childKey
+					+ " has parentId=" + parentKey + " from another plant");
+				continue;
+			}
+			topology.parentByInternode.put(childKey, parentKey);
+			((ArrayList) topology.childrenByInternode.get(parentKey)).add(childKey);
+		} else if (parentIdValue <= 0L || parentIdValue == pb.getId()) {
+			topology.basalInternodes.add(childKey);
+		} else {
+			Object unresolvedParent = child.getNode(parentIdValue);
+			if (unresolvedParent instanceof Internode) {
+				Internode otherParent = (Internode) unresolvedParent;
+				topology.invalidate("internodeId=" + childKey + " has parentId="
+					+ parentIdValue + " outside plant=" + pb.plantNumber
+					+ " parentPlant=" + otherParent.plantNumber);
+			} else {
+				topology.invalidate("missing internode parent: internodeId="
+					+ childKey + " parentId=" + parentIdValue);
+			}
+		}
+	}
+
+	TreeMap leafById = new TreeMap();
+	for (index = 0; index < leaves.length; index++) {
+		Leaf currentLeaf = leaves[index];
+		if (currentLeaf == null) {
+			topology.unassignedLeaves++;
+			topology.invalidate("null leaf at collected index=" + index);
+			continue;
+		}
+		Long leafKey = Long.valueOf(currentLeaf.getId());
+		if (currentLeaf.getId() <= 0L || leafById.containsKey(leafKey)) {
+			topology.multiplyAssignedLeaves++;
+			topology.invalidate("duplicate or invalid leaf id=" + currentLeaf.getId());
+			continue;
+		}
+		leafById.put(leafKey, currentLeaf);
+		Long parentKey = Long.valueOf(currentLeaf.parentID);
+		Internode leafParent = (Internode) topology.internodesById.get(parentKey);
+		if (leafParent == null) {
+			topology.unassignedLeaves++;
+			topology.invalidate("missing leaf parent: leafId=" + leafKey
+				+ " parentId=" + currentLeaf.parentID);
+			continue;
+		}
+		if (leafParent.plantNumber != pb.plantNumber) {
+			topology.unassignedLeaves++;
+			topology.invalidate("leafId=" + leafKey + " parentId=" + parentKey
+				+ " belongs to another plant");
+			continue;
+		}
+		double potential = currentLeaf.waterFluxPotential;
+		if (Double.isNaN(potential) || Double.isInfinite(potential)) {
+			topology.invalidate("non-finite leaf waterFluxPotential: leafId=" + leafKey);
+			continue;
+		}
+		((ArrayList) topology.leavesByInternode.get(parentKey)).add(currentLeaf);
+		double local = mapDouble(topology.localLeafPotential, parentKey) + potential;
+		topology.localLeafPotential.put(parentKey, Double.valueOf(local));
+		topology.potentialLeafSum += potential;
+	}
+
+	// Audit stored child lists only for contradictory duplicate ownership. Missing
+	// entries are allowed because Leaf.parentID and Internode.parentID are primary.
+	HashMap registeredInternodeOwner = new HashMap();
+	HashMap registeredLeafOwner = new HashMap();
+	for (Object keyObject : topology.internodesById.keySet()) {
+		Long ownerKey = (Long) keyObject;
+		Internode owner = (Internode) topology.internodesById.get(ownerKey);
+		int childIndex;
+		for (childIndex = 0; childIndex < owner.getChildInternodeCount(); childIndex++) {
+			Long childKey = Long.valueOf(owner.getChildInternodeIdAt(childIndex));
+			if (!topology.internodesById.containsKey(childKey)) continue;
+			Long previousOwner = (Long) registeredInternodeOwner.put(childKey, ownerKey);
+			if (previousOwner != null && previousOwner.longValue() != ownerKey.longValue()) {
+				topology.invalidate("duplicate internode parent assignment: internodeId="
+					+ childKey + " parentIds=" + previousOwner + "," + ownerKey);
+			}
+		}
+		for (childIndex = 0; childIndex < owner.getChildLeafCount(); childIndex++) {
+			Long leafKey = Long.valueOf(owner.getChildLeafIdAt(childIndex));
+			if (!leafById.containsKey(leafKey)) continue;
+			Long previousOwner = (Long) registeredLeafOwner.put(leafKey, ownerKey);
+			if (previousOwner != null && previousOwner.longValue() != ownerKey.longValue()) {
+				topology.multiplyAssignedLeaves++;
+				topology.invalidate("multiply assigned leafId=" + leafKey
+					+ " parentIds=" + previousOwner + "," + ownerKey);
+			}
+		}
+	}
+
+	if (topology.internodesById.size() > 0 && topology.basalInternodes.size() == 0) {
+		topology.invalidate("no basal internode for PlantBase id=" + pb.getId());
+	}
+	if (topology.valid) {
+		String[] orderError = new String[] { "" };
+		if (!generateWaterTraversalOrders(topology.internodesById,
+				topology.parentByInternode, topology.childrenByInternode,
+				topology.basalInternodes, topology.postOrder, topology.preOrder,
+				orderError)) {
+			topology.invalidate(orderError[0]);
+		}
+	}
+	return topology;
+}
+
+private static boolean closeHydraulicFlux(double left, double right) {
+	double scale = Math.max(1.0, Math.max(Math.abs(left), Math.abs(right)));
+	return Math.abs(left - right) <= 1.0e-8 * scale;
+}
+
+private static void reportInvalidWaterTopology(PlantBase pb, WaterShootTopology topology) {
+	println("[WATER_TOPOLOGY] INVALID plant=" + pb.plantNumber
+		+ " error=" + topology.error
+		+ " unassignedLeaves=" + topology.unassignedLeaves
+		+ " multiplyAssignedLeaves=" + topology.multiplyAssignedLeaves
+		+ " duplicateInternodeIds=" + topology.duplicateInternodeIds
+		+ " basalSegments=" + topology.basalInternodes.size()
+		+ " potentialLeafSum=" + topology.potentialLeafSum
+		+ " basalFoldedPotential=" + topology.basalFoldedPotential
+		+ " residual=" + (topology.basalFoldedPotential - pb.waterFluxPotential));
+}
+
+private static void foldShootWaterFlux(PlantBase pb, WaterShootTopology topology) {
+	for (int orderIndex = 0; orderIndex < topology.postOrder.size(); orderIndex++) {
+		Long segmentKey = (Long) topology.postOrder.get(orderIndex);
+		double subtree = mapDouble(topology.localLeafPotential, segmentKey);
+		ArrayList children = (ArrayList) topology.childrenByInternode.get(segmentKey);
+		for (int childIndex = 0; childIndex < children.size(); childIndex++) {
+			Long childKey = (Long) children.get(childIndex);
+			subtree += mapDouble(topology.subtreePotential, childKey);
+		}
+		topology.subtreePotential.put(segmentKey, Double.valueOf(subtree));
+		Internode segment = (Internode) topology.internodesById.get(segmentKey);
+		segment.waterFlux = pb.f_waterFlux * subtree; // mg water s-1
+		topology.foldedCount++;
+	}
+
+	for (int basalIndex = 0; basalIndex < topology.basalInternodes.size(); basalIndex++) {
+		Long basalKey = (Long) topology.basalInternodes.get(basalIndex);
+		topology.basalFoldedPotential += mapDouble(topology.subtreePotential, basalKey);
+	}
+	double expectedActual = pb.f_waterFlux * pb.waterFluxPotential;
+	double basalActual = pb.f_waterFlux * topology.basalFoldedPotential;
+	if (!closeHydraulicFlux(topology.basalFoldedPotential, pb.waterFluxPotential)
+			|| !closeHydraulicFlux(basalActual, expectedActual)) {
+		topology.invalidate("shoot hydraulic flux conservation failed");
+		reportInvalidWaterTopology(pb, topology);
+		throw new IllegalStateException(topology.error);
+	}
+}
+
+/** Preserve the existing axial equation while reusing one geometry refresh. */
+private static void updateSegmentWaterPotential(
+		Internode segment, double boundaryWaterPotential) {
+	double gravityHead = segment.calcGravityHead();
+	segment.waterPotential_b = boundaryWaterPotential;
+	segment.waterPotential = boundaryWaterPotential
+		- 1 / segment.Ka * segment.waterFlux - gravityHead;
+	if (Double.isNaN(segment.waterPotential)) segment.waterPotential = inputWaterPotential;
+	segment.calcKa();
+	segment.waterPotential = boundaryWaterPotential
+		- 1 / segment.Ka * segment.waterFlux - gravityHead;
+	if (Double.isNaN(segment.waterPotential)) segment.waterPotential = inputWaterPotential;
+}
+
+private static void unfoldShootWaterPotential(PlantBase pb, WaterShootTopology topology) {
+	for (int orderIndex = 0; orderIndex < topology.preOrder.size(); orderIndex++) {
+		Long segmentKey = (Long) topology.preOrder.get(orderIndex);
+		Internode segment = (Internode) topology.internodesById.get(segmentKey);
+		Long parentKey = (Long) topology.parentByInternode.get(segmentKey);
+		double boundary = pb.xylemWaterPotential;
+		if (parentKey != null) {
+			Internode parent = (Internode) topology.internodesById.get(parentKey);
+			boundary = Math.min(parent.waterPotential, pb.xylemWaterPotential);
+		}
+		updateSegmentWaterPotential(segment, boundary);
+		topology.unfoldedCount++;
+	}
+}
+
+/**
+ * Pure collection fixture used by unit tests. It shares the production
+ * deterministic order generator without requiring graph-bound organ ids.
+ */
+public static WaterHydraulicTestResult testWaterHydraulicFold(
+		long[] ids, long[] parentIds, long[] basalIds,
+		long[] leafParentIds, double[] leafPotentials, double fWaterFlux) {
+	WaterHydraulicTestResult result = new WaterHydraulicTestResult();
+	int count = (ids == null) ? 0 : ids.length;
+	result.subtreePotential = new double[count];
+	result.waterFlux = new double[count];
+	result.foldCount = new int[count];
+	result.unfoldCount = new int[count];
+	if (ids == null || parentIds == null || ids.length != parentIds.length
+			|| leafParentIds == null || leafPotentials == null
+			|| leafParentIds.length != leafPotentials.length) {
+		result.valid = false;
+		result.error = "invalid synthetic topology array lengths";
+		return result;
+	}
+
+	TreeMap nodes = new TreeMap();
+	HashMap parents = new HashMap();
+	HashMap children = new HashMap();
+	HashMap local = new HashMap();
+	HashMap subtree = new HashMap();
+	HashSet basalSet = new HashSet();
+	ArrayList basal = new ArrayList();
+	ArrayList post = new ArrayList();
+	ArrayList pre = new ArrayList();
+	if (basalIds != null) {
+		for (int i = 0; i < basalIds.length; i++) {
+			Long key = Long.valueOf(basalIds[i]);
+			if (basalSet.add(key)) basal.add(key);
+		}
+	}
+	for (int i = 0; i < ids.length; i++) {
+		Long key = Long.valueOf(ids[i]);
+		if (nodes.containsKey(key)) {
+			int previousIndex = ((Integer) nodes.get(key)).intValue();
+			result.valid = false;
+			result.error = (parentIds[previousIndex] == parentIds[i])
+				? "duplicate internode ID=" + ids[i]
+				: "duplicate parent assignment for internode ID=" + ids[i];
+			return result;
+		}
+		nodes.put(key, Integer.valueOf(i));
+		children.put(key, new ArrayList());
+		local.put(key, Double.valueOf(0.0));
+	}
+	for (int i = 0; i < ids.length; i++) {
+		Long key = Long.valueOf(ids[i]);
+		long parentValue = parentIds[i];
+		if (parentValue == ids[i]) {
+			result.valid = false;
+			result.error = "self-parent internode ID=" + ids[i];
+			return result;
+		}
+		if (parentValue <= 0L) {
+			if (!basalSet.contains(key)) {
+				result.valid = false;
+				result.error = "disconnected internode ID=" + ids[i];
+				return result;
+			}
+		} else {
+			Long parentKey = Long.valueOf(parentValue);
+			if (!nodes.containsKey(parentKey)) {
+				result.valid = false;
+				result.error = "missing internode parent ID=" + parentValue
+					+ " for internode ID=" + ids[i];
+				return result;
+			}
+			if (basalSet.contains(key)) {
+				result.valid = false;
+				result.error = "basal internode also has parent ID=" + ids[i];
+				return result;
+			}
+			parents.put(key, parentKey);
+			((ArrayList) children.get(parentKey)).add(key);
+		}
+	}
+	for (int i = 0; i < leafParentIds.length; i++) {
+		Long parentKey = Long.valueOf(leafParentIds[i]);
+		if (!nodes.containsKey(parentKey)) {
+			result.valid = false;
+			result.error = "missing leaf parent ID=" + leafParentIds[i];
+			return result;
+		}
+		local.put(parentKey, Double.valueOf(
+			mapDouble(local, parentKey) + leafPotentials[i]));
+	}
+	String[] orderError = new String[] { "" };
+	if (!generateWaterTraversalOrders(nodes, parents, children, basal,
+			post, pre, orderError)) {
+		result.valid = false;
+		result.error = orderError[0];
+		return result;
+	}
+	for (int i = 0; i < post.size(); i++) {
+		Long key = (Long) post.get(i);
+		double folded = mapDouble(local, key);
+		ArrayList childIds = (ArrayList) children.get(key);
+		for (int c = 0; c < childIds.size(); c++) {
+			folded += mapDouble(subtree, (Long) childIds.get(c));
+		}
+		subtree.put(key, Double.valueOf(folded));
+		int inputIndex = ((Integer) nodes.get(key)).intValue();
+		result.subtreePotential[inputIndex] = folded;
+		result.waterFlux[inputIndex] = fWaterFlux * folded;
+		result.foldCount[inputIndex]++;
+	}
+	for (int i = 0; i < pre.size(); i++) {
+		Long key = (Long) pre.get(i);
+		int inputIndex = ((Integer) nodes.get(key)).intValue();
+		result.unfoldCount[inputIndex]++;
+	}
+	return result;
+}
+
 public static void updatePlantWaterPotential(PlantBase pb) {
+	long totalStart = System.currentTimeMillis();
+	long topologyStart = totalStart;
+	touchRunProgress("water_start", "started");
 
-  // one‑time init, keep your safety update + ordering pass
-  if (pb.wpInitDone == false && step <= 2) {
-    
-      [
-        g:Internode, (g.plantNumber == pb.plantNumber) ::> { g.update(); }
-      ]
-    
-    pb.updateOrder();
-    println("update water ----------------------------");
-    pb.wpInitDone = true;
-  }
-  
-  //WATER FLUX CAN BE UPDATED IN PARALLEL 
-  [ 
-  	  it:Internode, (it.plantNumber == pb.plantNumber) ::> { 
-  	 //actual function 
-  	it.updateWaterFlux();
-	//taskManager.add(it.wftask); 
-  } 
-	//{solveTasksSafely();} 
-  ]
+	// Keep the established first-pass pointer/state refresh. Order/rank are no
+	// longer used to drive hydraulics.
+	if (pb.wpInitDone == false && step <= 2) {
+		[
+			hydraulicInitSegment:Internode,
+			(hydraulicInitSegment.plantNumber == pb.plantNumber) ::> {
+				hydraulicInitSegment.update();
+			}
+		]
+		println("update water ----------------------------");
+		pb.wpInitDone = true;
+	}
 
-  // --- Unfold along the shoot network, order by order, rank by rank ---
-  {
-    // Derive min/max order present in the graph
-    int minOrder = min((* it:Internode, (it.plantNumber == pb.plantNumber) *)[order]);
-    int maxOrder = max((* it:Internode, (it.plantNumber == pb.plantNumber) *)[order]);
+	Internode[] collectedInternodes = array((* hydraulicSegment:Internode,
+		(hydraulicSegment.plantNumber == pb.plantNumber) *));
+	Leaf[] collectedLeaves = array((* hydraulicLeaf:Leaf,
+		(hydraulicLeaf.plantNumber == pb.plantNumber) *));
+	WaterShootTopology topology = buildWaterShootTopology(
+		pb, collectedInternodes, collectedLeaves);
+	long topologyMillis = System.currentTimeMillis() - topologyStart;
+	if (step == 1) {
+		println("[WPERF] step=1 internodes=" + collectedInternodes.length
+			+ " leaves=" + collectedLeaves.length);
+		println("[WPERF] topology ms=" + topologyMillis);
+	}
+	if (!topology.valid) {
+		reportInvalidWaterTopology(pb, topology);
+		touchRunProgress("water_topology_complete", "failed");
+		throw new IllegalStateException("Invalid shoot hydraulic topology: " + topology.error);
+	}
+	touchRunProgress("water_topology_complete");
 
-    for (int o = minOrder; o <= maxOrder; o++) {
-      // skip empty orders
-      if (count((* it:Internode, (it.plantNumber == pb.plantNumber && it.order == o) *)) == 0) continue;
+	long foldStart = System.currentTimeMillis();
+	foldShootWaterFlux(pb, topology);
+	long foldMillis = System.currentTimeMillis() - foldStart;
+	if (topology.foldedCount != collectedInternodes.length) {
+		throw new IllegalStateException("Incomplete shoot hydraulic fold: folded="
+			+ topology.foldedCount + " expected=" + collectedInternodes.length);
+	}
+	touchRunProgress("water_flux_fold_complete");
 
-      // ranks within this order
-      int minRank = min((* it:Internode, (it.plantNumber == pb.plantNumber && it.order == o) *)[rank]);
-      int maxRank = max((* it:Internode, (it.plantNumber == pb.plantNumber && it.order == o) *)[rank]);
-
-      for (int r = minRank; r <= maxRank; r++) {
-
-        // visit every parent internode at (order=o, rank=r) for this plant
-        [ parent:Internode, (parent.plantNumber == pb.plantNumber && 
-        	parent.order == o && parent.rank == r) ::> {
-
-            // 1) Update the parent segment’s own water state first
-            parent.updateWaterPotential();
-
-            int k, n;
-            // 2) Propagate to child internodes (next order)
-            n = parent.getChildInternodeCount();
-            for (k = 0; k < n; k++) {
-              long id = parent.getChildInternodeIdAt(k);
-              Internode ch = parent.getInternode(id);
-              if (ch != null && ch.parentID == parent.getId()) {
-                // optional double-write guard if you reuse lastUnfoldStep
-                // if (ch.lastUnfoldStep == currentUnfoldTick) println("WARN: double write Internode id=" + ch.getId());
-                // ch.lastUnfoldStep = currentUnfoldTick;
-
-                ch.updateWaterPotential();
-                // debug:  println("WP unfold: O" + o + " R" + r + " parent " + parent.getId() + " -> child internode " + ch.getId());
-              }
-            }
-
-
-        } ] // end pattern block
-      } // ranks
-    } // orders
-  } // scope
+	long unfoldStart = System.currentTimeMillis();
+	unfoldShootWaterPotential(pb, topology);
+	long unfoldMillis = System.currentTimeMillis() - unfoldStart;
+	if (topology.unfoldedCount != collectedInternodes.length) {
+		throw new IllegalStateException("Incomplete shoot hydraulic unfold: unfolded="
+			+ topology.unfoldedCount + " expected=" + collectedInternodes.length);
+	}
+	touchRunProgress("water_potential_unfold_complete");
+	long totalMillis = System.currentTimeMillis() - totalStart;
+	if (step == 1) {
+		println("[WPERF] flux-fold ms=" + foldMillis);
+		println("[WPERF] potential-unfold ms=" + unfoldMillis);
+		println("[WPERF] total ms=" + totalMillis);
+	}
 }
 
 

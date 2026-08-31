@@ -151,9 +151,31 @@ public module VirtualFruit extends FruitService {
 	initialized properly first*/
 	private boolean delayExecutionFlag = true; // Tracks execution delay
 
-	double sugarConcentration_phloem_pre; 
-	// Optional debug hook for MM scaling in calcUnloading (default off for compatibility).
+	/**
+	 * Sugar concentration (g sugar g-1 solution) associated with the cached
+	 * JFruit2 active-plus-mass-flow demand in unloadingPerFruit. The legacy field name is retained
+	 * for serialized GroIMP graph compatibility; carbon-solver candidates must
+	 * never update it.
+	 */
+	double sugarConcentration_phloem_pre;
+	/** Cached JFruit2 active sugar import, converted to mg C h-1 per fruit. */
+	double activeUnloadingReference = 0.0;
+	/** Signed previous accepted JFruit2 mass flow retained for the next hour (mg C h-1 per fruit). */
+	double massFlowUnloadingReference = 0.0;
+	/** Accepted JFruit2 phloem water flow paired with the mass-flow reference (g water h-1). */
+	double massFlowWaterFlowReference = 0.0;
+	/** Distinguishes an accepted zero-flow reference from an uninitialized saved-graph field. */
+	boolean massFlowUnloadingReferenceInitialized = false;
+	private static final double VF_MASS_FLOW_WATER_EPS = 1.0e-12;
+	private static final double VF_MASS_FLOW_SUGAR_EPS = 1.0e-9;
+	private static final double VF_MASS_FLOW_PHI_EPS = 1.0e-10;
+	/** Effective FruitCropXL sugar concentration represented by the latest Cpm sent to JFruit2. */
+	private double lastVirtualFruitInputSugar = Double.NaN;
+	// Optional debug hook for VirtualFruit carbon-demand reconstruction (default off for compatibility).
 	private static final boolean VF_DEBUG_MM = false;
+	// Initialization-only fallback used before any valid JFruit2 input/reference exists (g sugar g-1 solution).
+	private static final double VF_REFERENCE_SUGAR_FALLBACK = 1e-2;
+	private static final double VF_MM_MIN = 1e-8;
 	String outputFilePath;
 	// JFruit2 requires cP > 0; cP is derived from cpm, so keep a tiny positive floor on cpm (mol/L).
 	private static final double VF_CPM_MIN_MOL_PER_L = 1e-6;
@@ -430,7 +452,7 @@ public module VirtualFruit extends FruitService {
 
 		double w0 = FRUIT_FRESH_WEIGHT * mgTogram;
 		if (isFiniteVF(s.freshWeight_mg) && s.freshWeight_mg > 0) {
-			w0 = s.freshWeight_mg * mgTogram;
+			w0 = s.freshWeight_mg * mgTogram - s.dryWeight_mg * mgTogram;
 		}
 
 		double s0 = FRUIT_DRY_WEIGHT * mgTogram;
@@ -560,6 +582,23 @@ public module VirtualFruit extends FruitService {
 	void calcCpm(double sugarConcentration_phloem) {
 		this.Cpm = Math.min(0.69, convertSugarToMol(sugarConcentration_phloem));
 	}
+
+	/**
+	 * Inverse of convertSugarToMol for the Cpm value actually supplied to JFruit2.
+	 * This also gives file-backed vessel inputs a reference in FruitCropXL sugar units.
+	 */
+	public static double virtualFruitSugarFromCpm(double cpmMolPerL) {
+		if (Double.isNaN(cpmMolPerL) || Double.isInfinite(cpmMolPerL) || cpmMolPerL <= 0.0) {
+			return Double.NaN;
+		}
+		double molarMass = MOL_SURCROSE;
+		if ("apple".equalsIgnoreCase(species)) {
+			double sorbitolFraction = 0.75;
+			molarMass = sorbitolFraction * MOL_SORBITOL
+				+ (1.0 - sorbitolFraction) * MOL_SURCROSE;
+		}
+		return cpmMolPerL * molarMass / 1000.0;
+	}
 	
 	@Override
 	public void initializeCarbonTransport() {
@@ -570,6 +609,12 @@ public module VirtualFruit extends FruitService {
 		//this.cpt = SOURCEcp - cpn * length * SOURCEj * Rs;
 		//this.cpb = SOURCEcp - (cpn - 1) * length * SOURCEj * Rs;
 		this.j = j;
+		try {
+			initializeVirtualFruitMassFlowReference(sugarFromCp(this.cpt));
+		} catch (RuntimeException e) {
+			// Compatibility fallback: the primed JFruit2 input seam may initialize it later.
+			massFlowUnloadingReferenceInitialized = false;
+		}
 	}
 	@Override
 	public void updateCTRs(double carbonConcentration) {
@@ -764,6 +809,12 @@ public module VirtualFruit extends FruitService {
 		values[4] = ro;		   //cm/h  40- 370	
 		lastInputCpmMolPerL = cpmInputMolPerL;
 		lastInputCpmMolPerCm3 = cpmInputMolPerCm3;
+		try {
+			lastVirtualFruitInputSugar = virtualFruitSugarFromCpm(cpmInputMolPerL);
+		} catch (RuntimeException e) {
+			// Compatibility fallback for legacy rows/species state: do not establish a new reference.
+			lastVirtualFruitInputSugar = Double.NaN;
+		}
 		
 		if (debug && printFlag) { println(Arrays.toString(values)); }
 		//this is needed to passing the values to the virtual fruit
@@ -1038,15 +1089,30 @@ private static Double firstNum(JsonNode row, String[] keys) {
 				solubleSugar = sugarConcentration_fruit * waterMass_g / mgTogram;
 			}
 		}
-		if (species.equals("apple") &&((active & Active.SUGAR2) != 0)) {
-			unloadingPerFruit = maintenanceDM + ( (1 - FRACTION_SORBITOL) * CARBON_FRACTION_SUCROSE +  FRACTION_SORBITOL * CARBON_FRACTION_SORBITOL) * 
-		 						(sugarUptake_active + sugarUptake_passive + sugarUptake_massflow)/mgTogram; 
-			unloading = unloadingPerFruit; 		 						
+		double carbonFactor = getVirtualFruitImportCarbonFactor();
+		double activeCarbon = carbonFactor * sugarUptake_active / mgTogram;
+		double massFlowCarbon = carbonFactor * sugarUptake_massflow / mgTogram;
+
+		boolean validSyncedDemand = isFiniteVF(activeCarbon) && activeCarbon >= 0.0
+			&& isFiniteVF(massFlowCarbon) && isFiniteVF(waterUptake_phloem);
+		if (validSyncedDemand) {
+			commitVirtualFruitImportReferences(
+				activeCarbon, massFlowCarbon, lastVirtualFruitInputSugar,
+				waterUptake_phloem);
+			/*
+			 * Passive uptake is deliberately ignored. JFruit2 maintenance respiration
+			 * is internal and is not an additional FruitCropXL phloem sink.
+			 */
+			unloadingPerFruit = activeUnloadingReference + massFlowUnloadingReference;
 		} else {
-			unloadingPerFruit = maintenanceDM + (CARBON_FRACTION_SUCROSE) * 
-		 						(sugarUptake_active + sugarUptake_passive + sugarUptake_massflow)/mgTogram;
-		 	unloading = unloadingPerFruit;
+			activeUnloadingReference = 0.0;
+			/* Keep the last accepted physical mass flow if this output is unusable. */
+			unloadingPerFruit = massFlowUnloadingReference;
 		}
+
+		// Populate realised fields at the accepted/reference state without mutating the frozen reference.
+		calcPTCTRAM(resolveVirtualFruitReferenceSugar());
+		calcUnloading(resolveVirtualFruitReferenceSugar());
 		
 	}
 	
@@ -1061,27 +1127,181 @@ private static Double firstNum(JsonNode row, String[] keys) {
 	 */
 
 
+public static double sanitizeVirtualFruitDemand(double value) {
+	return (Double.isNaN(value) || Double.isInfinite(value) || value < 0.0) ? 0.0 : value;
+}
+
+/** Preserve the sign of finite JFruit2 transport fluxes. */
+public static double sanitizeSignedVirtualFruitMassFlow(double value) {
+	return (Double.isNaN(value) || Double.isInfinite(value)) ? 0.0 : value;
+}
+
+/** Exact lagged hydraulic mass-flow function used by CP and by CTRAM hooks. */
+public static double laggedVirtualFruitMassFlowCarbon(double massFlowReference,
+		double phloemSugarReference, double phloemWaterFlowReference,
+		double candidatePhloemSugar) {
+	double safeReference = sanitizeSignedVirtualFruitMassFlow(massFlowReference);
+	if (phloemWaterFlowReference > VF_MASS_FLOW_WATER_EPS
+			&& phloemSugarReference > VF_MASS_FLOW_SUGAR_EPS
+			&& !Double.isNaN(phloemSugarReference)
+			&& !Double.isInfinite(phloemSugarReference)
+			&& !Double.isNaN(candidatePhloemSugar)
+			&& !Double.isInfinite(candidatePhloemSugar)) {
+		double slopeSugar = safeReference / phloemSugarReference;
+		if (!Double.isNaN(slopeSugar) && !Double.isInfinite(slopeSugar)) {
+			return sanitizeSignedVirtualFruitMassFlow(
+				slopeSugar * candidatePhloemSugar);
+		}
+	}
+	return safeReference;
+}
+
+/** Analytical derivative dM/dPhi for inward lagged mass flow. */
+public static double laggedVirtualFruitMassFlowDerivativePhi(
+		double massFlowReference, double phloemSugarReference,
+		double phloemWaterFlowReference, double phi,
+		double candidatePhloemSugar) {
+	if (phloemWaterFlowReference <= VF_MASS_FLOW_WATER_EPS
+			|| phloemSugarReference <= VF_MASS_FLOW_SUGAR_EPS
+			|| phi <= VF_MASS_FLOW_PHI_EPS
+			|| Double.isNaN(phloemSugarReference)
+			|| Double.isInfinite(phloemSugarReference)
+			|| Double.isNaN(phi) || Double.isInfinite(phi)
+			|| Double.isNaN(candidatePhloemSugar)
+			|| Double.isInfinite(candidatePhloemSugar)) {
+		return 0.0;
+	}
+	double slopeSugar = sanitizeSignedVirtualFruitMassFlow(massFlowReference)
+		/ phloemSugarReference;
+	double derivative = slopeSugar * candidatePhloemSugar / (2.0 * phi);
+	return sanitizeSignedVirtualFruitMassFlow(derivative);
+}
+
+public static double reconstructVirtualFruitPotentialGrowth(double activeReference,
+		double mmReference, boolean preT1) {
+	double safeActive = sanitizeVirtualFruitDemand(activeReference);
+	if (preT1) return safeActive;
+	double safeMm = sanitizeVirtualFruitDemand(mmReference);
+	if (safeMm < VF_MM_MIN) safeMm = VF_MM_MIN;
+	return safeActive / safeMm;
+}
+
+public static double realiseVirtualFruitDemand(double potential, double limiter) {
+	return sanitizeVirtualFruitDemand(potential) * sanitizeVirtualFruitDemand(limiter);
+}
+
+private double getVirtualFruitImportCarbonFactor() {
+	if ("apple".equals(species) && ((active & Active.SUGAR2) != 0)) {
+		return (1 - FRACTION_SORBITOL) * CARBON_FRACTION_SUCROSE
+			+ FRACTION_SORBITOL * CARBON_FRACTION_SORBITOL;
+	}
+	return CARBON_FRACTION_SUCROSE;
+}
+
+void commitVirtualFruitImportReferences(double activeCarbon,
+		double massFlowCarbon, double acceptedPhloemSugar,
+		double acceptedPhloemWaterFlow) {
+	try {
+		activeUnloadingReference = sanitizeVirtualFruitDemand(activeCarbon);
+		massFlowUnloadingReference = sanitizeSignedVirtualFruitMassFlow(massFlowCarbon);
+		sugarConcentration_phloem_pre = isFiniteVF(acceptedPhloemSugar)
+			? acceptedPhloemSugar : 0.0;
+		massFlowWaterFlowReference = sanitizeSignedVirtualFruitMassFlow(
+			acceptedPhloemWaterFlow);
+		massFlowUnloadingReferenceInitialized = true;
+	} catch (RuntimeException e) {
+		// Compatibility fallback for legacy saved graphs lacking the added reference.
+		activeUnloadingReference = 0.0;
+		massFlowUnloadingReference = 0.0;
+		sugarConcentration_phloem_pre = 0.0;
+		massFlowWaterFlowReference = 0.0;
+		massFlowUnloadingReferenceInitialized = false;
+	}
+}
+
+private void initializeVirtualFruitMassFlowReference(double initializedPhloemSugar) {
+	if (massFlowUnloadingReferenceInitialized) return;
+	if (isFiniteVF(massFlowUnloadingReference)
+		&& massFlowUnloadingReference != 0.0) {
+		massFlowUnloadingReferenceInitialized = true;
+		return;
+	}
+	try {
+		if (input == null || !input.isValid()) return;
+		ObjectNode initializedOutput = getJsonValues();
+		JsonNode initializedMassFlow = initializedOutput != null
+			? initializedOutput.get("masfls") : null;
+		JsonNode initializedWaterFlow = initializedOutput != null
+			? initializedOutput.get("up") : null;
+		if (initializedMassFlow != null && initializedMassFlow.isNumber()) {
+			double massFlowSugar = initializedMassFlow.asDouble();
+			double waterFlow = initializedWaterFlow != null
+				&& initializedWaterFlow.isNumber()
+				? initializedWaterFlow.asDouble() : 0.0;
+			double massFlowCarbon = getVirtualFruitImportCarbonFactor()
+				* massFlowSugar / mgTogram;
+			if (isFiniteVF(massFlowSugar) && isFiniteVF(massFlowCarbon)
+					&& isFiniteVF(waterFlow)) {
+				sugarUptake_massflow = massFlowSugar;
+				commitVirtualFruitImportReferences(activeUnloadingReference,
+					massFlowCarbon, initializedPhloemSugar, waterFlow);
+			}
+		}
+	} catch (RuntimeException e) {
+		/* Compatibility fallback: retry after legacy JFruit2 state has been primed. */
+	}
+}
+
+private double resolveVirtualFruitReferenceSugar() {
+	double referenceSugar = sugarConcentration_phloem_pre;
+	if (!(referenceSugar > 0.0) || Double.isNaN(referenceSugar) || Double.isInfinite(referenceSugar)) {
+		referenceSugar = lastVirtualFruitInputSugar;
+	}
+	if (!(referenceSugar > 0.0) || Double.isNaN(referenceSugar) || Double.isInfinite(referenceSugar)) {
+		referenceSugar = virtualFruitSugarFromCpm(lastInputCpmMolPerL);
+	}
+	if (!(referenceSugar > 0.0) || Double.isNaN(referenceSugar) || Double.isInfinite(referenceSugar)) {
+		referenceSugar = VF_REFERENCE_SUGAR_FALLBACK;
+	}
+	return referenceSugar;
+}
+
 @Override
-void calcPTCTRAM(double sc) 
-{   					
+void calcPTCTRAM(double sc)
+{
 	if (!calcCarbonAllocation) {
 		resetCarbonAllocationOffState();
 		return;
 	}
-	
-	calcUnloading(sc);
-	sugarConcentration_phloem_pre = sc; // update previous sugar at end of timestep for next MM scaling
-	structureDM_PRI_PT = unloading;
-	structureDM_SEC_PT = 0; 
-			
-	maintenanceDM_PT = maintenanceDM; 
-	
-	reserveDM_PT = 0;
-	
-	loading_PT =  0; 
-	
-	//println("structureDM_PRI_PT: " + structureDM_PRI_PT);
-	
+
+	double activeReference = sanitizeVirtualFruitDemand(activeUnloadingReference);
+	double referenceSugar = resolveVirtualFruitReferenceSugar();
+	double mmReference = sinkUnloading(referenceSugar, this.km_pri);
+
+	structureDM_PRI_PT = reconstructVirtualFruitPotentialGrowth(
+		activeReference, mmReference,
+		shouldUsePreT1PotentialGrowth());
+	structureDM_SEC_PT = 0.0;
+	maintenanceDM_PT = 0.0;
+	reserveDM_PT = 0.0;
+	loading_PT = 0.0;
+}
+
+@Override
+double getDirectMassFlowCarbon(double sugarConcentration_phloem) {
+	if (!massFlowUnloadingReferenceInitialized) return 0.0;
+	return laggedVirtualFruitMassFlowCarbon(massFlowUnloadingReference,
+		sugarConcentration_phloem_pre, massFlowWaterFlowReference,
+		sugarConcentration_phloem);
+}
+
+@Override
+double getDirectMassFlowDerivativePhi(double cp,
+		double sugarConcentration_phloem) {
+	if (!massFlowUnloadingReferenceInitialized) return 0.0;
+	return laggedVirtualFruitMassFlowDerivativePhi(
+		massFlowUnloadingReference, sugarConcentration_phloem_pre,
+		massFlowWaterFlowReference, cp, sugarConcentration_phloem);
 }
 
 	
@@ -1093,31 +1313,31 @@ void calcUnloading(double sugarConcentration_phloem) {
 		return;
 	}
     
-	// ---------- Scale the per-fruit demand by MM factor (previous vs current sugar) ----------
-    double s_prev = sugarConcentration_phloem_pre;
-    if (s_prev <= 0f || Double.isNaN(s_prev) || Double.isInfinite(s_prev)) s_prev = sugarConcentration_phloem;
+	double fPri = sinkUnloading(sugarConcentration_phloem, this.km_pri);
+	if (Double.isNaN(fPri) || Double.isInfinite(fPri) || fPri < 0.0) fPri = 0.0;
+	if (fPri > 1.0) fPri = 1.0;
+	if (shouldUsePreT1PotentialGrowth()) fPri = 1.0;
 
-    float mm_prev = sinkUnloading(s_prev, this.km_pri);
-    if (mm_prev < 1e-8f) mm_prev = 1e-8f;  // avoid division by ~0
-    float mm_curr = sinkUnloading(sugarConcentration_phloem, this.km_pri);
-    if (shouldUsePreT1PotentialGrowth()) {
-        // Pre-T1 mode keeps virtual-fruit potential demand without carbon down-scaling.
-        mm_curr = mm_prev;
-    }
-
-    // NOTE: unloadingPerFruit is mg·h⁻¹ (from VF sync); keep units in mg·h⁻¹ here.
-    unloading   = unloadingPerFruit <= 0 ? 0.1 : (unloadingPerFruit * (mm_curr / mm_prev)); // mg/h
-    structureDM = unloading;
+	structureDM_PRI = realiseVirtualFruitDemand(structureDM_PRI_PT, fPri);
+	structureDM_SEC = 0.0;
+	structureDM = structureDM_PRI; // mg C h-1; JFruit2 maintenance remains internal.
+	double realisedMassFlow = getDirectMassFlowCarbon(sugarConcentration_phloem);
+	unloading = structureDM_PRI + realisedMassFlow; // signed direct transport; mg C h-1 per fruit.
+	unloadingPerFruit = unloading;
 
     if ((debug && printFlag) || (VF_DEBUG_MM && printFlag)) { 
-        float mm_ratio = mm_curr / mm_prev;
         println("VF.calcUnloading"
-            + " s_prev=" + s_prev
+			+ " s_ref=" + resolveVirtualFruitReferenceSugar()
             + " s_curr=" + sugarConcentration_phloem
-            + " mm_prev=" + mm_prev
-            + " mm_curr=" + mm_curr
-            + " ratio=" + mm_ratio
+			+ " activeReference=" + activeUnloadingReference
+			+ " massFlowReference=" + massFlowUnloadingReference
+			+ " massFlowDirect=" + realisedMassFlow
+			+ " mmReference=" + sinkUnloading(resolveVirtualFruitReferenceSugar(), this.km_pri)
+			+ " mmCurrent=" + fPri
             + " unloadingPerFruit(mg/h)=" + unloadingPerFruit
+			+ " structureDM_PRI_PT(mg/h)=" + structureDM_PRI_PT
+			+ " structureDM_PRI(mg/h)=" + structureDM_PRI
+			+ " massFlowRealised(mg/h)=" + realisedMassFlow
             + " -> unloading(mg/h)=" + unloading);
            }
     
@@ -1314,17 +1534,15 @@ void calcUnloading(double sugarConcentration_phloem) {
 			sc_curr = 1e-2;
 		}
 
-		// Keep stored previous sugar for MM scaling; initialize once if absent/invalid.
-		double sc_prev = sugarConcentration_phloem_pre;
-		if (!(sc_prev > 0) || Double.isNaN(sc_prev) || Double.isInfinite(sc_prev)) {
-			sc_prev = sc_curr;
-			sugarConcentration_phloem_pre = sc_curr;
-		} else {
-			sugarConcentration_phloem_pre = sc_prev;
-		}
-
 		calcCpm(sc_curr);                   // sets this.Cpm in mol/L (capped)
 		double cpmMolPerL = this.Cpm;
+		try {
+			// Track the effective sugar represented by the Cpm actually supplied to JFruit2.
+			lastVirtualFruitInputSugar = virtualFruitSugarFromCpm(cpmMolPerL);
+		} catch (RuntimeException e) {
+			// Compatibility fallback: a failed input conversion must not replace the accepted reference.
+			lastVirtualFruitInputSugar = Double.NaN;
+		}
 	
 		// --- Emit fields as your updateInput(inputVesselConditions==true) expects ---
 		n.put("T",    Tc);          // °C  -> fromArray adds 273.15
@@ -1426,6 +1644,8 @@ private void processInput(JsonNode row) {
         lastPushedMin      = nowMin;
         isFirstUpdate      = false;
         delayExecutionFlag = true;   // step next tick
+		/* The primed JFruit2 state supplies the accepted reference for the first solve. */
+		initializeVirtualFruitMassFlowReference(lastVirtualFruitInputSugar);
         return;
     }
 
@@ -1448,8 +1668,13 @@ private void processInput(JsonNode row) {
 	}
 
 	private void resetCarbonAllocationOffState() {
-		// Carbon allocation is disabled: expose zero fruit demand (mg C h-1) and keep JFruit2 state frozen.
+		// Carbon allocation is disabled: expose zero fruit demand (mg C h-1); JFruit2 remains unadvanced.
 		unloadingPerFruit = 0.0;
+		activeUnloadingReference = 0.0;
+		massFlowUnloadingReference = 0.0;
+		sugarConcentration_phloem_pre = 0.0;
+		massFlowWaterFlowReference = 0.0;
+		massFlowUnloadingReferenceInitialized = false;
 		unloading = 0.0;
 		structureDM = 0.0;
 		structureDM_PRI = 0.0;

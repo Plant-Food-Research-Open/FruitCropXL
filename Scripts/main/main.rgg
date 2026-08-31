@@ -437,9 +437,12 @@ try {
 				println("[DBG_LEAF_CREATE] LeafSTEM=" + dbgLeafStemCreated
       + " LeafBODY=" + dbgLeafBodyCreated
       + " LeafEND_seen=" + dbgLeafEndNodesSeen);
+		touchRunProgress("architecture_complete");
 				
 		return;
 	 }	
+
+	touchRunProgress("step_start", "started");
 	
 	
 	 /**
@@ -538,6 +541,7 @@ try {
  */
    	updatesService.updates();
 	syncRootBiomassAfterArchitectureRead("step1_after_updates");
+	touchRunProgress("carbon_complete");
         
 /**
  * Trigger development (organogenesis, elongation, etc.) unless using static architecture.
@@ -576,6 +580,7 @@ try {
 	if(useOrganArrays == true) { // FIXME: rename field from Excel as we are now using CSV for output
 			writeOutputToCsv(); 
 		}
+	touchRunProgress("output_complete");
 		
 		
 /**
@@ -737,12 +742,14 @@ if (printFlag && step >= 1) {
     }
 }
 
+	touchRunProgress("step_complete");
   calcSimTime();
   step++;
 	
 } catch (Exception e) {
         System.out.println("⚠️ Exception in run(): " + e.getMessage());
         e.printStackTrace();
+		touchRunProgress("run_exception", "failed");
         // Step will still increment to avoid infinite loops
         step++;
     }
@@ -781,12 +788,14 @@ public void runEnd() {
     while (continueRunning && (step < targetStep) && (calls < ABS_CAP)) {
         // heartbeat before entering run() so watchdog can see activity even if run() blocks intermittently
         lastBeat[0] = System.currentTimeMillis();
+		heartbeatRunProgress();
 
         run();
         calls++;
 
         // heartbeat after returning from run()
         lastBeat[0] = System.currentTimeMillis();
+		heartbeatRunProgress();
 
         // no-progress detector (run() returned but step didn't change)
         if (step == lastStep) {
@@ -828,7 +837,7 @@ public void runEnd(int maxSteps) {
 
     final int ABS_CAP   = (maxSteps < (Integer.MAX_VALUE / 10)) ? (maxSteps * 10) : 100000;
     final int STALL_CAP = 200000;                  // no-step-advance for this many run() calls → hard exit
-    final long STALL_MS = 10L * 60L * 10000L;     // 10 min watchdog
+    final long STALL_MS = 10L * 60L * 1000L;      // 10 min watchdog
     final long[] lastBeat = new long[] { System.currentTimeMillis() };
     final boolean[] done  = new boolean[] { false };
 
@@ -836,9 +845,11 @@ public void runEnd(int maxSteps) {
 
     while ((step < maxSteps) && continueRunning && (calls < ABS_CAP)) {
         lastBeat[0] = System.currentTimeMillis();
+		heartbeatRunProgress();
         run();
         calls++;
         lastBeat[0] = System.currentTimeMillis();
+		heartbeatRunProgress();
 
         if (step == lastStep) {
             stallCount++;
@@ -1635,7 +1646,7 @@ private Thread startWatchdog(final long stallMs, final int exitCode, final Strin
             while (!doneFlag[0]) {
                 try { Thread.sleep(5000L); } catch (InterruptedException ie) { /* ignore */ }
                 long now = System.currentTimeMillis();
-                long last = lastBeatRef[0];
+                long last = Math.max(lastBeatRef[0], getRunProgressHeartbeatMillis());
                 if (!doneFlag[0] && (now - last) > stallMs) {
                     hardExitNow(exitCode, "Watchdog("+tag+"): no progress for "+(now-last)+" ms", true);
                     return;

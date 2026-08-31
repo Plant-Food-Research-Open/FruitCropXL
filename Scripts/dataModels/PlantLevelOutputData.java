@@ -182,7 +182,8 @@ public class PlantLevelOutputData implements Serializable {
 	public double fabsTotRad;
 
 	@JsonProperty(value = "fabsPAR", index = 26)
-	@JsonPropertyDescription("Fraction of absorbed PAR per square meter. This has been scaled by dens FPAR. it is slightly differently from fPARLow, mid and up, which are PAR penetrated to the canopy")
+	@JsonPropertyDescription("Whole-canopy ground-area-normalised absorbed-PAR index." + //
+			"Values can exceed 1 because the reference is PAR incident on a horizontal ground area.")
 	@Tags("Radiation absorption and distribution at 1/3, 2/3, and 3/3 of the canopy. The actual height of the calculation changes with canopy height")
 	public double fabsPAR;
 
