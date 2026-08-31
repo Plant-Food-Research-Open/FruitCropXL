@@ -148,9 +148,12 @@ MODEL_OPTIONS_BASENAME="$(basename "${MODEL_OPTIONS}")"
 if [[ -n "${GROIMP_RUNTIME_HOME:-}" ]]; then
   RUNTIME_HOME="${GROIMP_RUNTIME_HOME}"
   RUNTIME_HOME_IS_TEMP=0
-else
-  RUNTIME_HOME="${REPO_PATH}/tmp/groimp_home_${USER:-user}_$$"
+elif [[ "${GROIMP_ISOLATE_RUNTIME_HOME:-0}" == "1" ]]; then
+  RUNTIME_HOME="${REPO_PATH}/.workspace/tmp/groimp_home_${USER:-user}_$$"
   RUNTIME_HOME_IS_TEMP=1
+else
+  RUNTIME_HOME="${REPO_PATH}/.workspace/tmp/groimp_home_${USER:-user}"
+  RUNTIME_HOME_IS_TEMP=0
 fi
 mkdir -p "${RUNTIME_HOME}" \
          "${RUNTIME_HOME}/.java/.userPrefs" \

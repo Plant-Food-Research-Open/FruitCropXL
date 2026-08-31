@@ -155,7 +155,7 @@ Calculate potential organ growth based on thermal time increments without consid
 - **`surrogateModel`**: timestep-batch inference from a Java/GroIMP-compatible model and feature manifest.
 - **`directInput`**: in leaf gas-exchange test scenarios, use the current meteorological `globalRadiation * fPAR`; otherwise use the generic file-backed direct provider.
 
-The reduced modes do not run GroIMP ray tracing. Empirical and surrogate assets must declare the response, units, supported organ types, spatial resolution, version, and predictor contract. Existing Python `.pkl` files under `SurrogateModel/` cannot be loaded by the Java/GroIMP runtime and are not valid production artifacts without conversion and a verified feature manifest. The leaf gas-exchange test branch of `directInput` needs no separate light asset: it converts `globalRadiation` to incident PAR by multiplying it by environmental `fPAR` exactly once. Generic `directInput` remains file-backed. Missing or unsupported required assets fail by default; a fallback is used only when allowed and explicitly configured and is reported in run provenance.
+The reduced modes do not run GroIMP ray tracing. Empirical and surrogate assets must declare the response, units, supported organ types, spatial resolution, version, and predictor contract. Existing Python `.pkl` files under `Utils/SurrogateModel/` cannot be loaded by the Java/GroIMP runtime and are not valid production artifacts without conversion and a verified feature manifest. The leaf gas-exchange test branch of `directInput` needs no separate light asset: it converts `globalRadiation` to incident PAR by multiplying it by environmental `fPAR` exactly once. Generic `directInput` remains file-backed. Missing or unsupported required assets fail by default; a fallback is used only when allowed and explicitly configured and is reported in run provenance.
 
 The repository includes a provisional leaf-only Beer-Lambert example: [model.options.empiricalRegression.beerLambert.json](Model_scenarios/model.options.empiricalRegression.beerLambert.json) selects [light.interception.model.beer-lambert-lai-above.json](Model_scenarios/light.interception.model.beer-lambert-lai-above.json). It predicts relative PAR as `Ctop * exp(-k * LAI_above + beta_z * height)`, where `LAI_above` is leaf area strictly above the target divided by `focalArea`. The example uses a field-random leaf canopy, selects `fruitModule="simpleFruit"`, and explicitly disables soil-tile light association and light sensors because the provider is leaf-only. Relative empirical-model filenames belong under `Model_scenarios/`; the former `Model_input/` lookup remains only as a deprecated compatibility fallback. The supplied coefficients are an initial fit to one simulated vertical profile, not a multi-canopy validation.
 
@@ -268,36 +268,41 @@ The overall directory is categorized into two main groups: folders essential for
 
 By organizing the folder structure into these categories, the model facilitates both core execution and extensive support for customization, calibration, and visualization, making it adaptable for a wide range of scenarios and environments.
 
-## Installation on local computer
+## Installation and quick start
 
-Follow these instructions to set up the model for execution on your local machine.
+### Recommended: prebuilt Apptainer image
 
-### Prerequisites
+The quickest way to run FruitCropXL is with the prebuilt Apptainer image. The current image bundles GroIMP 2.2.1, OpenJDK 21, the GroIMP plugins, and the FruitCropXL plugin, so these components do not need to be installed separately.
 
-- Ensure Java 17 and GroIMP 2.0 (or later versions) are installed to run the model.
+Apptainer is a Linux container runtime. On Windows, run it inside a Linux environment such as Windows Subsystem for Linux 2 (WSL2); Apptainer cannot run natively on Windows.
 
-### Setup for running on local installation
+1. [Install Apptainer](https://apptainer.org/docs/admin/latest/installation.html) on Linux or inside WSL2.
+2. From the repository root, download the image. The large SIF file is stored under `images/` and is intentionally not committed:
 
-- **External Libraries**: Place the `ext` library into the GroIMP installation folder.
+   ```bash
+   bash bash_scripts/apptainer_pull.sh
+   ```
 
-  - **Linux**:
-    - Copy all files from the `ext_linux` folder into the `ext` folder within your GroIMP installation directory (commonly found in `C/program files/GroIMP 1.6`).
+3. Launch FruitCropXL:
 
-  - **Windows**:
-    - Copy all `.dll` files from the `ext_windows` folder into the `ext` folder.
-    - Additionally, copy the `.jar` files from the `ext_linux` folder into the same `ext` folder.
-
-- **Configuration File**:
-  - Locate the `config.properties.txt` file in the `Util` folder and place it into your GroIMP folder.
-  - Modify the path in the `.txt` file to reflect the location of your model. (Upon running GroIMP, the model generates a file with a default address; however, you'll need to update this address to match your specific path.) Without this file, the model cannot be opened.
-
-### Setup for running through an Apptainer image in Windows Subsystem for Linux
-
-1. Install Apptainer in the Linux environment.
-2. From the repository root, run `bash bash_scripts/apptainer_pull.sh` to download `images/groimp.sif`.
-3. Run `bash groimp_run.sh` to launch the model with the downloaded image.
+   ```bash
+   bash groimp_run.sh
+   ```
 
 For headless commands and scenario options, see the [execution guide](Model_documents/config-execution/execution.md).
+
+#### Docker on Windows
+
+Docker Desktop cannot run an Apptainer `.sif` file directly. To use Docker Desktop on Windows, an equivalent Linux OCI/Docker image must be built from a maintained container recipe and then run with Docker Desktop's WSL2 or Hyper-V Linux-container backend. Repackaging a SIF filesystem as a Docker image may be technically possible, but it does not reliably preserve the image metadata, entry point, mounts, or runtime behaviour and is not a supported FruitCropXL workflow at present. Using the supplied Apptainer image in WSL2 is therefore the recommended Windows route.
+
+### Alternative: local GroIMP installation
+
+Users who do not want to use the container can download GroIMP from the [official GroIMP download site](https://download.grogra.de/). The `Scripts/project.gs` file currently targets GroIMP 2.2.1. GroIMP 2.2 requires Java 21 and supports Java versions up to 25; Java 17 alone is not sufficient for this release.
+
+1. Download the GroIMP 2.2.1 package for your operating system or the **GroIMP with all plugins** archive.
+2. Install a compatible Java runtime (Java 21 is recommended for GroIMP 2.2.1).
+3. Install the FruitCropXL plugin and its third-party libraries supplied with the FruitCropXL distribution into the corresponding GroIMP plugin and `ext` locations. The official GroIMP all-plugins archive contains GroIMP plugins, but not the project-specific FruitCropXL plugin.
+4. If using `config.properties.txt`, update its model path for your local checkout before opening the project.
 
 ### Opening the Model
 

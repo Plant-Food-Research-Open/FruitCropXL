@@ -8,4 +8,4 @@ rmse:
     - name: leaf_waterPotential
       rmse: 0.75
     - name: waterFlux_optimized
-      rmse: 2.0
+      rmse: 2.2

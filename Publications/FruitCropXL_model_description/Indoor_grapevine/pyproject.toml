@@ -1,0 +1,27 @@
+[tool.poetry]
+name = "grapevine-indoor-optimisation"
+version = "0.1.0"
+description = ""
+authors = [
+"Junqi Zhu <junqi.zhu@plantandfood.co.nz>",
+"Chris Van Houtte <Chris.Vanhoutte@plantandfood.co.nz>",
+"Hana Liang <Yongqi.Liang@plantandfood.co.nz>",
+"James Bristow <james.bristow@plantandfood.co.nz>", 
+]
+package-mode = false 
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = ">=3.10,<3.11"
+cookiecutter = "^2.6.0"
+ipykernel = "^6.29.5"
+statsmodels = "^0.14.4"
+pandas = "^2.2"
+numpy = "^1.26"
+matplotlib = "^3.9"
+seaborn = "^0.13"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

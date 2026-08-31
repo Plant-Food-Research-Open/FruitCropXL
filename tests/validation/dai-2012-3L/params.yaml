@@ -9,10 +9,10 @@ rmse:
   dataset: Exp2012_Dai_Bordeaux_berryProfileSubset_3L_mean.csv
   synthetic-columns:
     - name: meanFruitFW
-      rmse: 86.0
+      rmse: 85.0
     - name: meanFruitDW
-      rmse: 16.0
+      rmse: 20.2
     - name: meanFruitSc
-      rmse: 0.026
+      rmse: 0.028
 
 

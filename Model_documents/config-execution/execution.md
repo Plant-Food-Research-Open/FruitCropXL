@@ -50,7 +50,7 @@ unitTest.sh
 Use this when you want to check that a scenario can initiate and run for a few steps.
 
 ```bash
-GROIMP_KEEP_RUNTIME_HOME=1 timeout 420 bash tests/smoke_test/unitTest.sh \
+timeout 420 bash tests/smoke_test/unitTest.sh \
   Xrun \
   default \
   2 \
@@ -108,23 +108,23 @@ timeout 1800 bash tests/smoke_test/unitTest.sh \
 
 Use this for a short multi-day or multi-step local run. The biological meaning of `48` depends on the model step convention of the active scenario, but FruitCropXL commonly operates at hourly resolution for physiology.
 
-### 2.4 Keep GroIMP runtime logs
+### 2.4 Inspect GroIMP runtime logs
 
 ```bash
-GROIMP_KEEP_RUNTIME_HOME=1 bash tests/smoke_test/unitTest.sh \
+bash tests/smoke_test/unitTest.sh \
   Xrun default 2 model.options.default.json
 ```
 
 The script prints something like:
 
 ```text
-Keeping GroIMP runtime home: tmp/groimp_home_<user>_<pid>
+Keeping GroIMP runtime home: .workspace/tmp/groimp_home_<user>
 ```
 
 Then inspect:
 
 ```text
-tmp/groimp_home_<user>_<pid>/.grogra.de-platform/log/platform0-0.xml
+.workspace/tmp/groimp_home_<user>/.grogra.de-platform/log/platform0-0.xml
 ```
 
 ### 2.5 Archive-based run using `Scripts/Scripts.gsz`
@@ -274,8 +274,9 @@ Incorrect if the basename does not exist under `Model_scenarios/`:
 | `PROJECT_FILE` | `Scripts/project.gs` | Project file passed to GroIMP. |
 | `ARCHIVE_TEST=1` | unset / `0` | Uses `Scripts/Scripts.gsz` as default project file. |
 | `MODEL_OPTIONS` | `model.options.default.json` | Environment-level model-options override. The fourth positional argument can also set this. |
-| `GROIMP_RUNTIME_HOME` | temporary folder under `tmp/` | Isolated HOME for GroIMP/Java preferences and logs. |
-| `GROIMP_KEEP_RUNTIME_HOME=1` | unset / `0` | Keeps the temporary runtime HOME after completion. Useful for debugging GroIMP logs. |
+| `GROIMP_RUNTIME_HOME` | `.workspace/tmp/groimp_home_<user>` | Overrides the reusable HOME for GroIMP/Java preferences and logs. |
+| `GROIMP_ISOLATE_RUNTIME_HOME=1` | unset / `0` | Uses a process-specific temporary HOME when concurrent runs need preference-lock isolation. |
+| `GROIMP_KEEP_RUNTIME_HOME=1` | unset / `0` | Keeps a process-specific HOME created with `GROIMP_ISOLATE_RUNTIME_HOME=1`. |
 | `JAVA_OPTS` | internal defaults | Replaces the default Java option array completely. Use carefully. |
 
 Default Java options in the script:
@@ -593,10 +594,10 @@ not necessarily as a full two-day simulation.
 
 ## 11. Runtime-home and log handling
 
-The script isolates GroIMP/Java preferences by overriding `HOME`:
+The script redirects GroIMP/Java preferences by overriding `HOME`:
 
 ```text
-HOME=<repo>/tmp/groimp_home_<user>_<pid>
+HOME=<repo>/.workspace/tmp/groimp_home_<user>
 ```
 
 It also creates:
@@ -606,13 +607,15 @@ It also creates:
 <runtime_home>/.grogra.de-platform/log
 ```
 
-This avoids Java preference lock contention and makes headless runs more reproducible.
+Normal runs reuse this ignored per-user location, preventing process-ID folders from accumulating.
 
-By default, temporary runtime HOME is deleted after the run. Preserve it with:
+For concurrent runs that need preference-lock isolation, request a temporary process-specific home:
 
 ```bash
-GROIMP_KEEP_RUNTIME_HOME=1
+GROIMP_ISOLATE_RUNTIME_HOME=1 bash tests/smoke_test/unitTest.sh
 ```
+
+The isolated home is deleted after the run unless `GROIMP_KEEP_RUNTIME_HOME=1` is also set.
 
 Useful files:
 
@@ -755,7 +758,7 @@ tests/validation/groimp_headless_run.sh      # clearer direct-Java launcher name
 ### Command template
 
 ```bash
-GROIMP_KEEP_RUNTIME_HOME=1 timeout 420 bash tests/smoke_test/unitTest.sh \
+timeout 420 bash tests/smoke_test/unitTest.sh \
   <TEST_TYPE> \
   <VALIDATION_SCENARIO> \
   <NUM_STEPS> \
@@ -765,7 +768,7 @@ GROIMP_KEEP_RUNTIME_HOME=1 timeout 420 bash tests/smoke_test/unitTest.sh \
 ### Most useful command
 
 ```bash
-GROIMP_KEEP_RUNTIME_HOME=1 timeout 420 bash tests/smoke_test/unitTest.sh \
+timeout 420 bash tests/smoke_test/unitTest.sh \
   Xrun \
   default \
   2 \

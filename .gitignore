@@ -37,7 +37,11 @@ Model_visualization/*.png
 Model_documents/softdoc/groimp-javadoc/
 **/.env
 *.log
-local_runs/
+
+# Local AI/developer workspace
+.workspace/
+.agents/
+.codex/
 
 # MacOS
 .DS_Store
@@ -95,8 +99,3 @@ Scenario_file_generation/5_output_tables/.~lock.Heads of the output table.xlsx#
 /Model_documents/FruitCropXL_doc/
 /Model_documents/FruitCropXL_doc_bash/Scripts/
 /Model_documents/FruitCropXL_doc_bash/html/
-.DS_Store
-**/.DS_Store
-.DS_Store
-**/.DS_Store
-FruitCropXL-plant-surrogate-UI/export_models.py

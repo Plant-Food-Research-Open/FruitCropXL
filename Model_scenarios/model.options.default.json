@@ -160,7 +160,7 @@
       "debugLeafExpansion": false,
       "debugLeafExpansionSampleEvery": 24,
       "outputAppleDevelopmentDiagnostics": false,
-      "outputCarbonTransportDiagnostics": false,
+      "outputCarbonTransportDiagnostics": true,
       "outputWaterFluxSolverDebug": false
     },
     "twinningPlanner_options": {

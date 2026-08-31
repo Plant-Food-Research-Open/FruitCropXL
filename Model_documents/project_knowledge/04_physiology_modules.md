@@ -4,7 +4,7 @@
 - `calcLightInterception` is the independent master switch; `lightInterceptionMode` selects `cpu`, `gpu`, `empiricalRegression`, `surrogateModel`, or `directInput`.
 - CPU and GPU use the existing GroIMP ray tracers. Reduced modes populate the same normalized organ-light state without building or computing a ray-tracing scene.
 - Empirical and surrogate providers must declare response units, resolution, version, supported organ types and predictors. In leaf gas-exchange test scenarios, `directInput` needs no separate light asset: it converts `globalRadiation` with environmental `fPAR` exactly once and does not use ray tracing. Generic `directInput` remains file-backed. A missing capability is an initialization error in strict mode.
-- Existing Python `.pkl` artifacts under `SurrogateModel/` are not executable by the Java/GroIMP runtime and require conversion plus a verified feature manifest before they can be used.
+- Existing Python `.pkl` artifacts under `Utils/SurrogateModel/` are not executable by the Java/GroIMP runtime and require conversion plus a verified feature manifest before they can be used.
 - The maintained Beer-Lambert example predicts `relativePAR = Ctop * exp(-k * LAI_above + beta_z * height)`. `LAI_above` is dimensionless eligible leaf area strictly above a target divided by `focalArea`; equal-height leaves share a cumulative value. Its initial height term is disabled and its coefficients are provisional.
 - Field clone/shading behavior is sensitive to `useShadingFactor` and clone settings.
 - `useShadingFactor` remains a correction mechanism and never selects an interception backend.

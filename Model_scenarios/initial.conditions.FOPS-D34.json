@@ -5,8 +5,8 @@
   "category": {
     "organ_age": {
       "PLANT_AGE_DAYS": 3650,
-      "PLANT_AGE_TD_AFTER_BUDBURST":139,
-      "FRUIT_AGE_AFTER_FULLBLOOM": 104,
+      "PLANT_AGE_TD_AFTER_BUDBURST": 39,
+      "FRUIT_AGE_AFTER_FULLBLOOM": 34,
       "BERRY_AGE_AT_VERASION": null,
       "thermalDay_BB_FS": null,
       "thermalDay_FS_VR": null
@@ -55,8 +55,8 @@
       "Nm": 0.019
     },
     "fruit": {
-      "FRUIT_FRESH_WEIGHT": 207602,
-      "FRUIT_DRY_WEIGHT": 21836.22,
+      "FRUIT_FRESH_WEIGHT": 7602,
+      "FRUIT_DRY_WEIGHT": 836.22,
       "CONENTRATION_SOLUBLE_SUGAR": 0.09,
       "CV_FRUIT": 0.3,
       "CONENTRATION_MALIC_INITIAL": 0.02,

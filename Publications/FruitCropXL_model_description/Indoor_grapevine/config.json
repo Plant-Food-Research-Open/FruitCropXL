@@ -1,0 +1,39 @@
+{
+  "base_path": "/output/FruitCropXL/HGU-sim/",
+  "field_space_csv": "field-space_total.csv",
+
+  "vine_folders": {
+    "spur": ["spur_70", "spur_50", "spur_90", "spur_110"],
+    "cane": ["cane_20", "cane_30", "cane_40", "cane_50"]
+  },
+
+  "cane_reconstruct_crop_loads": [320, 400],
+  "cane_known_good_crop_loads": [160, 240],
+
+  "input_cols": ["Ta", "cca", "totalFruitNumber", "incomingRadiation", "leafArea"],
+
+  "plant_targets": [
+    "biomassPlant",
+    "biomassFruit",
+    "biomassInternode",
+    "internodeNSC",
+    "fraction_fruitUnloading",
+    "fraction_structuralRootUnloading",
+    "fraction_internodeUnloading",
+    "phloemSugarConcentration",
+    "harvest_index"
+  ],
+  "fruit_targets": ["meanFruitDW", "meanFruitSc"],
+
+  "predictors": "(cca + totalFruitNumber + leafArea + Ta + incomingRadiation)**2",
+
+  "filter": {
+    "Tmax": [25, 30],
+    "Tmin": [15, 20],
+    "cca": [400, 650, 900, 1200],
+    "inputPAR": [400, 600, 1000, 1200],
+    "ENDING_LEAF_NUMBER": [3, 6, 9, 12]
+  },
+  "apply_filter": true,
+  "save_combined_csv": false
+}
