@@ -1,23 +1,27 @@
-name: Build FruitCropXL Release Candidate
+name: Publish FruitCropXL Release
 
 on:
   workflow_dispatch:
     inputs:
       release_version:
-        description: Release version for the candidate artifact (for example vX.Y.Z)
+        description: Git tag for the permanent release (for example v1.0.0)
         required: true
         type: string
       include_sif:
-        description: Include the large GroIMP SIF in the artifact
+        description: Include the large GroIMP SIF in the release ZIP
         required: true
         default: false
         type: boolean
 
 permissions:
-  contents: read
+  contents: write
+
+concurrency:
+  group: fruitcropxl-release-${{ inputs.release_version }}
+  cancel-in-progress: false
 
 jobs:
-  build-release-candidate:
+  publish-release:
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     env:
@@ -26,9 +30,38 @@ jobs:
       CONTAINER_OCI_DIGEST: ${{ vars.GROIMP_OCI_DIGEST }}
       GROIMP_REGISTRY_USERNAME: ${{ vars.GROIMP_REGISTRY_USERNAME }}
       GROIMP_REGISTRY_TOKEN: ${{ secrets.GROIMP_REGISTRY_TOKEN }}
+      RELEASE_VERSION: ${{ inputs.release_version }}
     steps:
-      - name: Check out the requested commit
-        uses: actions/checkout@v4
+      - name: Check out the requested commit and tags
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Validate and prepare the release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${RELEASE_VERSION}" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]] || {
+            echo "Invalid release tag: ${RELEASE_VERSION}" >&2
+            exit 1
+          }
+          git check-ref-format "refs/tags/${RELEASE_VERSION}" >/dev/null || {
+            echo "Release version is not a valid Git tag: ${RELEASE_VERSION}" >&2
+            exit 1
+          }
+
+          if git rev-parse --verify --quiet "refs/tags/${RELEASE_VERSION}^{commit}" >/dev/null; then
+            TAG_COMMIT="$(git rev-parse "refs/tags/${RELEASE_VERSION}^{commit}")"
+            if [[ "${TAG_COMMIT}" != "${GITHUB_SHA}" ]]; then
+              echo "Tag ${RELEASE_VERSION} already points to ${TAG_COMMIT}, not ${GITHUB_SHA}." >&2
+              echo "Run this workflow from the tagged commit or choose a new version." >&2
+              exit 1
+            fi
+          else
+            # Keep the tag local until the package passes validation. This also
+            # lets release-metadata.json record the intended release tag.
+            git tag "${RELEASE_VERSION}" "${GITHUB_SHA}"
+          fi
 
       - name: Configure Apptainer
         uses: eWaterCycle/setup-apptainer@v2
@@ -54,12 +87,12 @@ jobs:
             bash bash_scripts/apptainer_pull.sh
           fi
 
-      - name: Build and validate release candidate
+      - name: Build and validate the release package
         shell: bash
         run: |
           set -euo pipefail
           ARGS=(
-            --version "${{ inputs.release_version }}"
+            --version "${RELEASE_VERSION}"
             --output-dir build/release
             --container images/groimp.sif
             --container-source "${CONTAINER_SOURCE}"
@@ -72,14 +105,50 @@ jobs:
             ARGS+=(--include-sif)
           fi
           bash bash_scripts/build_release_package.sh "${ARGS[@]}"
-          PACKAGE_DIR="build/release/FruitCropXL-${{ inputs.release_version }}"
+
+          PACKAGE_NAME="FruitCropXL-${RELEASE_VERSION}"
+          PACKAGE_DIR="build/release/${PACKAGE_NAME}"
           (cd "${PACKAGE_DIR}" && sha256sum -c SHA256SUMS)
           bash tests/gsz_test/validate_gsz_structure.sh "${PACKAGE_DIR}/Scripts.gsz"
 
-      - name: Upload release candidate artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: FruitCropXL-${{ inputs.release_version }}
-          path: build/release/FruitCropXL-${{ inputs.release_version }}
-          if-no-files-found: error
-          retention-days: 30
+          # Create the exact ZIP that will be attached to the GitHub Release.
+          (cd build/release && zip -9 -r "${PACKAGE_NAME}.zip" "${PACKAGE_NAME}")
+          sha256sum "build/release/${PACKAGE_NAME}.zip" > \
+            "build/release/${PACKAGE_NAME}.zip.sha256"
+
+      - name: Publish the permanent GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          PACKAGE_NAME="FruitCropXL-${RELEASE_VERSION}"
+          ZIP_PATH="build/release/${PACKAGE_NAME}.zip"
+          CHECKSUM_PATH="${ZIP_PATH}.sha256"
+
+          if gh release view "${RELEASE_VERSION}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            # Deliberately omit --clobber: fail instead of replacing a
+            # same-named asset in an already-published release.
+            gh release upload "${RELEASE_VERSION}" \
+              "${ZIP_PATH}" "${CHECKSUM_PATH}" \
+              --repo "${GITHUB_REPOSITORY}"
+          elif git ls-remote --exit-code --tags origin \
+            "refs/tags/${RELEASE_VERSION}" >/dev/null 2>&1; then
+            gh release create "${RELEASE_VERSION}" \
+              "${ZIP_PATH}" "${CHECKSUM_PATH}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --verify-tag \
+              --title "FruitCropXL ${RELEASE_VERSION}" \
+              --generate-notes
+          else
+            gh release create "${RELEASE_VERSION}" \
+              "${ZIP_PATH}" "${CHECKSUM_PATH}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --target "${GITHUB_SHA}" \
+              --title "FruitCropXL ${RELEASE_VERSION}" \
+              --generate-notes
+          fi
+
+          gh release view "${RELEASE_VERSION}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --json url,tagName,isDraft,isPrerelease

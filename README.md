@@ -291,18 +291,24 @@ Apptainer is a Linux container runtime. On Windows, run it inside a Linux enviro
 
 For headless commands and scenario options, see the [execution guide](Model_documents/config-execution/execution.md).
 
-## Verifying a release candidate
+## Publishing and verifying a release
 
-A release candidate contains the packaged GroIMP project (`Scripts.gsz`),
+Run the **Publish FruitCropXL Release** workflow manually and supply a new tag
+such as `v1.0.0`. After validation, the workflow creates a published GitHub
+Release and permanently attaches `FruitCropXL-v1.0.0.zip` plus its checksum.
+If the tag already exists, it must point to the commit selected for the workflow
+run. Existing release ZIPs are never silently overwritten.
+
+The release ZIP contains the packaged GroIMP project (`Scripts.gsz`),
 `release-metadata.json`, and `SHA256SUMS`. Verify the distributed files from
-inside the candidate directory with:
+inside the extracted release directory with:
 
 ```bash
 sha256sum -c SHA256SUMS
 ```
 
 `release-metadata.json` records the source commit, the packaged-project
-checksum, and the exact GroIMP SIF checksum used to build the candidate. When
+checksum, and the exact GroIMP SIF checksum used to build the release. When
 the registry supplies it, the metadata also records the OCI digest; a tag such
 as `latest` is descriptive and mutable, not an immutable identifier. The SIF
 is not included by default because it is large and separately obtainable.
