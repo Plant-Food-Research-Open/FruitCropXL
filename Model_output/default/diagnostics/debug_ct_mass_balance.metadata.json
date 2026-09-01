@@ -1,0 +1,820 @@
+{
+  "type" : "object",
+  "id" : "urn:jsonschema:CarbonTransportMassBalanceDiagnosticOutputData",
+  "properties" : {
+    "timestamp" : {
+      "type" : "string",
+      "description" : "Simulation time stamp in ISO 8601 format."
+    },
+    "step" : {
+      "type" : "integer",
+      "description" : "Simulation step represented by the diagnostic row.",
+      "name" : "step",
+      "defaultValue" : 0.0,
+      "tags" : [ "Timing" ]
+    },
+    "year" : {
+      "type" : "integer",
+      "description" : "Simulation year.",
+      "name" : "year",
+      "defaultValue" : 0.0,
+      "tags" : [ "Timing" ]
+    },
+    "dayOfYear" : {
+      "type" : "integer",
+      "description" : "Simulation day of year.",
+      "name" : "dayOfYear",
+      "defaultValue" : 0.0,
+      "tags" : [ "Timing" ]
+    },
+    "hourOfDay" : {
+      "type" : "integer",
+      "description" : "Simulation hour of day.",
+      "name" : "hourOfDay",
+      "defaultValue" : 0.0,
+      "tags" : [ "Timing" ]
+    },
+    "scenario" : {
+      "type" : "integer",
+      "description" : "Internal scenario number for the simulation.",
+      "name" : "scenario",
+      "defaultValue" : 0.0,
+      "tags" : [ "Identifiers" ]
+    },
+    "simuuid" : {
+      "type" : "string",
+      "description" : "Unique simulation UUID assigned to the run."
+    },
+    "plantNumber" : {
+      "type" : "integer",
+      "description" : "Plant identifier associated with the diagnostic row.",
+      "name" : "plantNumber",
+      "defaultValue" : 0.0,
+      "tags" : [ "Identifiers" ]
+    },
+    "fieldInstanceId" : {
+      "type" : "integer",
+      "description" : "Field-instance identifier associated with the diagnostic row.",
+      "name" : "fieldInstanceId",
+      "defaultValue" : 0.0,
+      "tags" : [ "Identifiers" ]
+    },
+    "day" : {
+      "type" : "integer",
+      "description" : "Legacy simulation day value retained from the carbon-transport diagnostic.",
+      "name" : "day",
+      "defaultValue" : 0.0,
+      "tags" : [ "Timing" ]
+    },
+    "hour" : {
+      "type" : "integer",
+      "description" : "Legacy simulation hour value retained from the carbon-transport diagnostic.",
+      "name" : "hour",
+      "defaultValue" : 0.0,
+      "tags" : [ "Timing" ]
+    },
+    "useCPStyleCTResponse" : {
+      "type" : "boolean",
+      "description" : "Whether the carbon-potential response formulation was used."
+    },
+    "iterationCount" : {
+      "type" : "integer",
+      "description" : "Number of iterations completed by the carbon-transport solve.",
+      "name" : "iterationCount",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "convergenceError" : {
+      "type" : "number",
+      "description" : "Final summed absolute carbon-flux convergence error.",
+      "name" : "convergenceError",
+      "unit" : "g C/h",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "totalLoading" : {
+      "type" : "number",
+      "description" : "Absolute sum of solved source-loading fluxes for the plant.",
+      "name" : "totalLoading",
+      "unit" : "g C/h",
+      "defaultValue" : 0.0,
+      "tags" : [ "Carbon" ]
+    },
+    "totalUnloading" : {
+      "type" : "number",
+      "description" : "Sum of solved sink-unloading fluxes for the plant.",
+      "name" : "totalUnloading",
+      "unit" : "g C/h",
+      "defaultValue" : 0.0,
+      "tags" : [ "Carbon" ]
+    },
+    "netFluxResidual" : {
+      "type" : "number",
+      "description" : "Total loading minus total unloading for the solved plant.",
+      "name" : "netFluxResidual",
+      "unit" : "g C/h",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "relativeFluxResidual" : {
+      "type" : "number",
+      "description" : "Absolute net-flux residual relative to the larger loading or unloading magnitude.",
+      "name" : "relativeFluxResidual",
+      "unit" : "-",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "minCp" : {
+      "type" : "number",
+      "description" : "Minimum organ carbon potential in the solved plant.",
+      "name" : "minCp",
+      "unit" : "(g C/cm3)^2",
+      "defaultValue" : 0.0,
+      "tags" : [ "Carbon" ]
+    },
+    "maxCp" : {
+      "type" : "number",
+      "description" : "Maximum organ carbon potential in the solved plant.",
+      "name" : "maxCp",
+      "unit" : "(g C/cm3)^2",
+      "defaultValue" : 0.0,
+      "tags" : [ "Carbon" ]
+    },
+    "meanCp" : {
+      "type" : "number",
+      "description" : "Mean organ carbon potential in the solved plant.",
+      "name" : "meanCp",
+      "unit" : "(g C/cm3)^2",
+      "defaultValue" : 0.0,
+      "tags" : [ "Carbon" ]
+    },
+    "minSugar" : {
+      "type" : "number",
+      "description" : "Sugar concentration transformed from the minimum organ carbon potential.",
+      "name" : "minSugar",
+      "unit" : "g sugar/cm3",
+      "defaultValue" : 0.0,
+      "tags" : [ "Carbon" ]
+    },
+    "maxSugar" : {
+      "type" : "number",
+      "description" : "Sugar concentration transformed from the maximum organ carbon potential.",
+      "name" : "maxSugar",
+      "unit" : "g sugar/cm3",
+      "defaultValue" : 0.0,
+      "tags" : [ "Carbon" ]
+    },
+    "meanSugar" : {
+      "type" : "number",
+      "description" : "Sugar concentration transformed from the mean organ carbon potential.",
+      "name" : "meanSugar",
+      "unit" : "g sugar/cm3",
+      "defaultValue" : 0.0,
+      "tags" : [ "Carbon" ]
+    },
+    "ctPlantBaseFallbackUsed" : {
+      "type" : "integer",
+      "description" : "Whether the current PlantBase boundary retained a previous potential or used the numerical floor.",
+      "name" : "ctPlantBaseFallbackUsed",
+      "unit" : "-",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "ctPlantBaseFallbackReason" : {
+      "type" : "integer",
+      "description" : "PlantBase boundary outcome code: 0 accepted root; 1 non-finite coefficient; 2 zero or near-zero denominator; 3 invalid candidate; 4 invalid transformed sugar.",
+      "name" : "ctPlantBaseFallbackReason",
+      "unit" : "-",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "ctPlantBaseFallbackCount" : {
+      "type" : "integer",
+      "description" : "Cumulative number of guarded PlantBase boundary fallbacks for the plant.",
+      "name" : "ctPlantBaseFallbackCount",
+      "unit" : "-",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "ctPlantBaseResidual" : {
+      "type" : "number",
+      "description" : "Folded boundary residual A + B Phi at the accepted or retained PlantBase potential.",
+      "name" : "ctPlantBaseResidual",
+      "unit" : "g C/h",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "ctPlantBaseDenominator" : {
+      "type" : "number",
+      "description" : "Folded PlantBase B coefficient used to assess and solve the zero-net-flow boundary.",
+      "name" : "ctPlantBaseDenominator",
+      "unit" : "g C/h/((g C/cm3)^2)",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "absoluteFluxError" : {
+      "type" : "number",
+      "description" : "Final sum of absolute organ-flux changes used by the mixed convergence test.",
+      "name" : "absoluteFluxError",
+      "unit" : "g C/h",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "relativeFluxConvergenceError" : {
+      "type" : "number",
+      "description" : "Absolute flux-change error divided by the larger old or new total absolute flux.",
+      "name" : "relativeFluxConvergenceError",
+      "unit" : "-",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "ctPlantBaseAbsoluteResidual" : {
+      "type" : "number",
+      "description" : "Absolute folded PlantBase boundary residual after under-relaxation.",
+      "name" : "ctPlantBaseAbsoluteResidual",
+      "unit" : "g C/h",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "ctPlantBaseRelativeResidual" : {
+      "type" : "number",
+      "description" : "Absolute PlantBase residual relative to the local folded-boundary flux scale.",
+      "name" : "ctPlantBaseRelativeResidual",
+      "unit" : "-",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "ctDampingFactor" : {
+      "type" : "number",
+      "description" : "Under-relaxation factor used for the final accepted PlantBase potential.",
+      "name" : "ctDampingFactor",
+      "unit" : "-",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "ctRawPlantBasePhi" : {
+      "type" : "number",
+      "description" : "Guarded raw PlantBase potential candidate before under-relaxation.",
+      "name" : "ctRawPlantBasePhi",
+      "unit" : "(g C/cm3)^2",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "ctAcceptedPlantBasePhi" : {
+      "type" : "number",
+      "description" : "PlantBase potential installed after under-relaxation.",
+      "name" : "ctAcceptedPlantBasePhi",
+      "unit" : "(g C/cm3)^2",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "ctConverged" : {
+      "type" : "boolean",
+      "description" : "Whether the existing mixed flux-change and PlantBase boundary criteria passed without invalid simple-root topology or traversal."
+    },
+    "ctMaxIterationReached" : {
+      "type" : "boolean",
+      "description" : "Whether the solve stopped at the configured iteration limit without convergence."
+    },
+    "ctNonlinearMerit" : {
+      "type" : "number",
+      "description" : "Maximum normalized mixed-tolerance error across flux change and the PlantBase boundary.",
+      "name" : "ctNonlinearMerit",
+      "unit" : "-",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "ctRetryUsed" : {
+      "type" : "boolean",
+      "description" : "Whether the normal 30-iteration solve failed and the single retry was used."
+    },
+    "ctRetryConverged" : {
+      "type" : "boolean",
+      "description" : "Whether the single retry converged and its state was accepted."
+    },
+    "ctSolverFallbackUsed" : {
+      "type" : "boolean",
+      "description" : "Whether both attempts failed and the accepted pre-hour transport state was restored."
+    },
+    "ctInvalidUnfoldTrialCount" : {
+      "type" : "integer",
+      "description" : "Total invalid raw or accepted organ Phi trials across the normal solve and retry.",
+      "name" : "ctInvalidUnfoldTrialCount",
+      "unit" : "count",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "ctFinalIterationLimit" : {
+      "type" : "integer",
+      "description" : "Iteration limit of the final solver attempt (30 normal or 60 retry).",
+      "name" : "ctFinalIterationLimit",
+      "unit" : "iterations",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "ctBootstrapFallbackUsed" : {
+      "type" : "boolean",
+      "description" : "Whether initialization was restored provisionally because no converged hourly CT state existed."
+    },
+    "ctHasAcceptedHourlyState" : {
+      "type" : "boolean",
+      "description" : "Whether at least one genuinely converged hourly CT solution has been committed."
+    },
+    "ctStoredPlantBaseSugar" : {
+      "type" : "number",
+      "description" : "PlantBase phloem sugar stored after convergence or rollback.",
+      "name" : "ctStoredPlantBaseSugar",
+      "unit" : "g sugar/cm3",
+      "defaultValue" : 0.0,
+      "tags" : [ "Carbon" ]
+    },
+    "ctPlantBaseSugarFromPhi" : {
+      "type" : "number",
+      "description" : "PlantBase phloem sugar transformed directly from the post-solve or restored cpt potential.",
+      "name" : "ctPlantBaseSugarFromPhi",
+      "unit" : "g sugar/cm3",
+      "defaultValue" : 0.0,
+      "tags" : [ "Carbon" ]
+    },
+    "ctAcceptedHourlyPlantBaseSugar" : {
+      "type" : "number",
+      "description" : "PlantBase sugar of the committed/restored converged hourly state; zero when no such state exists.",
+      "name" : "ctAcceptedHourlyPlantBaseSugar",
+      "unit" : "g sugar/cm3",
+      "defaultValue" : 0.0,
+      "tags" : [ "Carbon" ]
+    },
+    "ctFailedTrialPlantBasePhi" : {
+      "type" : "number",
+      "description" : "PlantBase potential of the final complete finite nonlinear trial before rollback.",
+      "name" : "ctFailedTrialPlantBasePhi",
+      "unit" : "(g C/cm3)^2",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "ctFailedTrialPlantBaseSugar" : {
+      "type" : "number",
+      "description" : "PlantBase sugar transformed from the final complete finite nonlinear trial before rollback.",
+      "name" : "ctFailedTrialPlantBaseSugar",
+      "unit" : "g sugar/cm3",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "ctFailedTrialMinSugar" : {
+      "type" : "number",
+      "description" : "Minimum organ sugar in the final complete finite nonlinear trial before rollback.",
+      "name" : "ctFailedTrialMinSugar",
+      "unit" : "g sugar/cm3",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "ctFailedTrialMaxSugar" : {
+      "type" : "number",
+      "description" : "Maximum organ sugar in the final complete finite nonlinear trial before rollback.",
+      "name" : "ctFailedTrialMaxSugar",
+      "unit" : "g sugar/cm3",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "ctFailedTrialMeanSugar" : {
+      "type" : "number",
+      "description" : "Mean organ sugar in the final complete finite nonlinear trial before rollback.",
+      "name" : "ctFailedTrialMeanSugar",
+      "unit" : "g sugar/cm3",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "ctFailedTrialMerit" : {
+      "type" : "number",
+      "description" : "Mixed nonlinear merit of the final complete finite nonlinear trial before rollback.",
+      "name" : "ctFailedTrialMerit",
+      "unit" : "-",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "sumLocalJ" : {
+      "type" : "number",
+      "description" : "Signed sum of all solved local GrowingOrgan carbon currents.",
+      "name" : "sumLocalJ",
+      "unit" : "g C/h",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "pbFoldedJ" : {
+      "type" : "number",
+      "description" : "Folded PlantBase current A plus B Phi for the final nonlinear pass.",
+      "name" : "pbFoldedJ",
+      "unit" : "g C/h",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "closureResidual" : {
+      "type" : "number",
+      "description" : "Signed graph-closure residual sumLocalJ minus pbFoldedJ.",
+      "name" : "closureResidual",
+      "unit" : "g C/h",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "closureScale" : {
+      "type" : "number",
+      "description" : "Graph-closure scale: maximum of total absolute local current, absolute PlantBase current, and numerical epsilon.",
+      "name" : "closureScale",
+      "unit" : "g C/h",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "relativeClosureResidual" : {
+      "type" : "number",
+      "description" : "Absolute graph-closure residual divided by closureScale.",
+      "name" : "relativeClosureResidual",
+      "unit" : "-",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "closureNormalizedError" : {
+      "type" : "number",
+      "description" : "Graph-closure error normalized by the active mixed CT tolerances.",
+      "name" : "closureNormalizedError",
+      "unit" : "-",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "netFluxIdentityResidual" : {
+      "type" : "number",
+      "description" : "Numerical check netFluxResidual plus sumLocalJ; zero confirms loading/unloading sign categorization.",
+      "name" : "netFluxIdentityResidual",
+      "unit" : "g C/h",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "totalGrowingOrganCount" : {
+      "type" : "integer",
+      "description" : "Number of transport-participating GrowingOrgan objects in the plant scope.",
+      "name" : "totalGrowingOrganCount",
+      "unit" : "count",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "foldedGrowingOrganCount" : {
+      "type" : "integer",
+      "description" : "Number of GrowingOrgan objects contributing to exactly one fold owner in the final pass.",
+      "name" : "foldedGrowingOrganCount",
+      "unit" : "count",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "unfoldedGrowingOrganCount" : {
+      "type" : "integer",
+      "description" : "Number of GrowingOrgan objects receiving Phi from exactly one unfold owner in the final pass.",
+      "name" : "unfoldedGrowingOrganCount",
+      "unit" : "count",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "foldCoverageComplete" : {
+      "type" : "boolean",
+      "description" : "Whether every scoped GrowingOrgan contributed through exactly one fold owner."
+    },
+    "unfoldCoverageComplete" : {
+      "type" : "boolean",
+      "description" : "Whether every scoped GrowingOrgan received Phi from exactly one unfold owner."
+    },
+    "sumLeafJ" : {
+      "type" : "number",
+      "description" : "Signed sum of stored final Leaf currents.",
+      "name" : "sumLeafJ",
+      "unit" : "g C/h",
+      "defaultValue" : 0.0,
+      "tags" : [ "Carbon" ]
+    },
+    "sumLeafTaylorJ" : {
+      "type" : "number",
+      "description" : "Signed sum of Leaf local Taylor values A plus B Phi.",
+      "name" : "sumLeafTaylorJ",
+      "unit" : "g C/h",
+      "defaultValue" : 0.0,
+      "tags" : [ "Carbon" ]
+    },
+    "sumPetioleJ" : {
+      "type" : "number",
+      "description" : "Signed sum of stored final Petiole currents.",
+      "name" : "sumPetioleJ",
+      "unit" : "g C/h",
+      "defaultValue" : 0.0,
+      "tags" : [ "Carbon" ]
+    },
+    "sumPetioleTaylorJ" : {
+      "type" : "number",
+      "description" : "Signed sum of Petiole local Taylor values A plus B Phi.",
+      "name" : "sumPetioleTaylorJ",
+      "unit" : "g C/h",
+      "defaultValue" : 0.0,
+      "tags" : [ "Carbon" ]
+    },
+    "sumShootJ" : {
+      "type" : "number",
+      "description" : "Signed sum of stored final Internode, Cordon, and Trunk currents.",
+      "name" : "sumShootJ",
+      "unit" : "g C/h",
+      "defaultValue" : 0.0,
+      "tags" : [ "Carbon" ]
+    },
+    "sumShootTaylorJ" : {
+      "type" : "number",
+      "description" : "Signed sum of shoot-axis local Taylor values A plus B Phi.",
+      "name" : "sumShootTaylorJ",
+      "unit" : "g C/h",
+      "defaultValue" : 0.0,
+      "tags" : [ "Carbon" ]
+    },
+    "sumFruitJ" : {
+      "type" : "number",
+      "description" : "Signed sum of stored final FruitService currents.",
+      "name" : "sumFruitJ",
+      "unit" : "g C/h",
+      "defaultValue" : 0.0,
+      "tags" : [ "Carbon" ]
+    },
+    "sumFruitTaylorJ" : {
+      "type" : "number",
+      "description" : "Signed sum of fruit local Taylor values A plus B Phi.",
+      "name" : "sumFruitTaylorJ",
+      "unit" : "g C/h",
+      "defaultValue" : 0.0,
+      "tags" : [ "Carbon" ]
+    },
+    "sumFlowerJ" : {
+      "type" : "number",
+      "description" : "Signed sum of stored final Flower currents.",
+      "name" : "sumFlowerJ",
+      "unit" : "g C/h",
+      "defaultValue" : 0.0,
+      "tags" : [ "Carbon" ]
+    },
+    "sumFlowerTaylorJ" : {
+      "type" : "number",
+      "description" : "Signed sum of Flower local Taylor values A plus B Phi.",
+      "name" : "sumFlowerTaylorJ",
+      "unit" : "g C/h",
+      "defaultValue" : 0.0,
+      "tags" : [ "Carbon" ]
+    },
+    "sumFineRootJ" : {
+      "type" : "number",
+      "description" : "Signed sum of stored final FineRoot currents.",
+      "name" : "sumFineRootJ",
+      "unit" : "g C/h",
+      "defaultValue" : 0.0,
+      "tags" : [ "Carbon" ]
+    },
+    "sumFineRootTaylorJ" : {
+      "type" : "number",
+      "description" : "Signed sum of FineRoot local Taylor values A plus B Phi.",
+      "name" : "sumFineRootTaylorJ",
+      "unit" : "g C/h",
+      "defaultValue" : 0.0,
+      "tags" : [ "Carbon" ]
+    },
+    "sumStructuralRootJ" : {
+      "type" : "number",
+      "description" : "Signed sum of stored final StructuralRoot currents.",
+      "name" : "sumStructuralRootJ",
+      "unit" : "g C/h",
+      "defaultValue" : 0.0,
+      "tags" : [ "Carbon" ]
+    },
+    "sumStructuralRootTaylorJ" : {
+      "type" : "number",
+      "description" : "Signed sum of StructuralRoot local Taylor values A plus B Phi.",
+      "name" : "sumStructuralRootTaylorJ",
+      "unit" : "g C/h",
+      "defaultValue" : 0.0,
+      "tags" : [ "Carbon" ]
+    },
+    "sumFruitExactUnloading" : {
+      "type" : "number",
+      "description" : "Signed sum of non-mutating exact fruit active unloading plus direct mass flow at final local Phi.",
+      "name" : "sumFruitExactUnloading",
+      "unit" : "g C/h",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "sumFruitExactActive" : {
+      "type" : "number",
+      "description" : "Signed sum of non-mutating exact active fruit unloading at final local Phi.",
+      "name" : "sumFruitExactActive",
+      "unit" : "g C/h",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "sumFruitExactMassFlow" : {
+      "type" : "number",
+      "description" : "Signed sum of non-mutating exact direct fruit mass flow at final local Phi.",
+      "name" : "sumFruitExactMassFlow",
+      "unit" : "g C/h",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "sumFruitStoredUnloading" : {
+      "type" : "number",
+      "description" : "Signed sum of fruit unloading bookkeeping values observed in the final nonlinear pass before accepted carbon-status commit.",
+      "name" : "sumFruitStoredUnloading",
+      "unit" : "g C/h",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "fruitLinearizationResidual" : {
+      "type" : "number",
+      "description" : "Signed residual sumFruitJ minus sumFruitExactUnloading.",
+      "name" : "fruitLinearizationResidual",
+      "unit" : "g C/h",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "fruitLinearizationRelativeResidual" : {
+      "type" : "number",
+      "description" : "Absolute aggregate fruit linearization residual relative to solved or exact fruit import magnitude.",
+      "name" : "fruitLinearizationRelativeResidual",
+      "unit" : "-",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "maxFruitLinearizationResidual" : {
+      "type" : "number",
+      "description" : "Largest absolute per-fruit solved-current versus exact-unloading residual.",
+      "name" : "maxFruitLinearizationResidual",
+      "unit" : "g C/h",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "maxFruitLinearizationRelativeResidual" : {
+      "type" : "number",
+      "description" : "Largest relative per-fruit solved-current versus exact-unloading residual.",
+      "name" : "maxFruitLinearizationRelativeResidual",
+      "unit" : "-",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "maxFruitResidualOrganID" : {
+      "type" : "integer",
+      "description" : "Graph node identifier of the fruit with the largest absolute local consistency residual.",
+      "name" : "maxFruitResidualOrganID",
+      "unit" : "-",
+      "defaultValue" : 0.0,
+      "tags" : [ "Identifiers" ]
+    },
+    "fruitStoredVsExactResidual" : {
+      "type" : "number",
+      "description" : "Signed residual sumFruitStoredUnloading minus sumFruitExactUnloading.",
+      "name" : "fruitStoredVsExactResidual",
+      "unit" : "g C/h",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "maxFruitTaylorPointResidual" : {
+      "type" : "number",
+      "description" : "Largest absolute pure Taylor reconstruction residual when re-expanded at final fruit Phi.",
+      "name" : "maxFruitTaylorPointResidual",
+      "unit" : "g C/h",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "maxFruitTaylorPointRelativeResidual" : {
+      "type" : "number",
+      "description" : "Largest relative pure Taylor reconstruction residual when re-expanded at final fruit Phi.",
+      "name" : "maxFruitTaylorPointRelativeResidual",
+      "unit" : "-",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "simpleRootActive" : {
+      "type" : "boolean",
+      "description" : "Whether this solve used the deterministic simple layered root CT route."
+    },
+    "simpleRootTopologyValid" : {
+      "type" : "boolean",
+      "description" : "Whether simple roots and fine roots form one complete linked layer chain for the plant."
+    },
+    "simpleRootFoldValid" : {
+      "type" : "boolean",
+      "description" : "Whether every simple-root layer folded once with complete structural-root and fine-root coverage."
+    },
+    "simpleRootUnfoldValid" : {
+      "type" : "boolean",
+      "description" : "Whether every simple-root layer and fine root received potential exactly once."
+    },
+    "simpleRootDoubleFoldCount" : {
+      "type" : "integer",
+      "description" : "Number of attempted second StructuralRoot resistance transforms in the same simple-root fold pass.",
+      "name" : "simpleRootDoubleFoldCount",
+      "unit" : "count",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "simpleRootMinLayer" : {
+      "type" : "integer",
+      "description" : "Minimum soil-layer index in the simple-root chain.",
+      "name" : "simpleRootMinLayer",
+      "unit" : "layer index",
+      "defaultValue" : 0.0,
+      "tags" : [ "Identifiers" ]
+    },
+    "simpleRootMaxLayer" : {
+      "type" : "integer",
+      "description" : "Maximum soil-layer index in the simple-root chain.",
+      "name" : "simpleRootMaxLayer",
+      "unit" : "layer index",
+      "defaultValue" : 0.0,
+      "tags" : [ "Identifiers" ]
+    },
+    "simpleRootLayerCount" : {
+      "type" : "integer",
+      "description" : "Number of contiguous layers expected in the simple-root chain.",
+      "name" : "simpleRootLayerCount",
+      "unit" : "count",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "simpleStructuralRootExpected" : {
+      "type" : "integer",
+      "description" : "Number of StructuralRoot objects expected in the simple-root fold and unfold.",
+      "name" : "simpleStructuralRootExpected",
+      "unit" : "count",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "simpleStructuralRootFolded" : {
+      "type" : "integer",
+      "description" : "Number of simple StructuralRoot objects transformed exactly once in the final fold pass.",
+      "name" : "simpleStructuralRootFolded",
+      "unit" : "count",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "simpleStructuralRootUnfolded" : {
+      "type" : "integer",
+      "description" : "Number of simple StructuralRoot objects unfolded exactly once in the final pass.",
+      "name" : "simpleStructuralRootUnfolded",
+      "unit" : "count",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "simpleFineRootExpected" : {
+      "type" : "integer",
+      "description" : "Number of FineRoot objects expected to contribute to the simple-root fold and unfold.",
+      "name" : "simpleFineRootExpected",
+      "unit" : "count",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "simpleFineRootFolded" : {
+      "type" : "integer",
+      "description" : "Number of same-layer FineRoot objects actually included once in the final simple-root fold pass.",
+      "name" : "simpleFineRootFolded",
+      "unit" : "count",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "simpleFineRootUnfolded" : {
+      "type" : "integer",
+      "description" : "Number of same-layer FineRoot objects unfolded exactly once in the final pass.",
+      "name" : "simpleFineRootUnfolded",
+      "unit" : "count",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "simpleRootLocalJ" : {
+      "type" : "number",
+      "description" : "Signed sum of local StructuralRoot and FineRoot currents in the simple-root subsystem.",
+      "name" : "simpleRootLocalJ",
+      "unit" : "g C/h",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "simpleRootFoldedJ" : {
+      "type" : "number",
+      "description" : "Current entering the simple-root subsystem through folded layer zero at PlantBase potential.",
+      "name" : "simpleRootFoldedJ",
+      "unit" : "g C/h",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "simpleRootClosureResidual" : {
+      "type" : "number",
+      "description" : "Signed simple-root closure residual: local root current minus folded root-entry current.",
+      "name" : "simpleRootClosureResidual",
+      "unit" : "g C/h",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    },
+    "simpleRootRelativeClosureResidual" : {
+      "type" : "number",
+      "description" : "Absolute simple-root closure residual relative to the larger local or folded root current magnitude.",
+      "name" : "simpleRootRelativeClosureResidual",
+      "unit" : "-",
+      "defaultValue" : 0.0,
+      "tags" : [ "Solver diagnostics" ]
+    }
+  }
+}

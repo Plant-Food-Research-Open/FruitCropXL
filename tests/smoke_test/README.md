@@ -9,6 +9,7 @@ Run from the repository root:
 ```bash
 bash tests/smoke_test/unitTest.sh
 bash tests/smoke_test/unitTest.sh Xrun default 2 model.options.default.json
+bash tests/smoke_test/unitTest.sh Xrun default 192 model.options.DAI.2012.12L.storm.default.json
 ARCHIVE_TEST=1 bash tests/smoke_test/unitTest.sh Xrun default 2 model.options.default.json
 ```
 

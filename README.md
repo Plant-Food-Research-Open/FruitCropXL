@@ -291,6 +291,22 @@ Apptainer is a Linux container runtime. On Windows, run it inside a Linux enviro
 
 For headless commands and scenario options, see the [execution guide](Model_documents/config-execution/execution.md).
 
+## Verifying a release candidate
+
+A release candidate contains the packaged GroIMP project (`Scripts.gsz`),
+`release-metadata.json`, and `SHA256SUMS`. Verify the distributed files from
+inside the candidate directory with:
+
+```bash
+sha256sum -c SHA256SUMS
+```
+
+`release-metadata.json` records the source commit, the packaged-project
+checksum, and the exact GroIMP SIF checksum used to build the candidate. When
+the registry supplies it, the metadata also records the OCI digest; a tag such
+as `latest` is descriptive and mutable, not an immutable identifier. The SIF
+is not included by default because it is large and separately obtainable.
+
 #### Docker on Windows
 
 Docker Desktop cannot run an Apptainer `.sif` file directly. To use Docker Desktop on Windows, an equivalent Linux OCI/Docker image must be built from a maintained container recipe and then run with Docker Desktop's WSL2 or Hyper-V Linux-container backend. Repackaging a SIF filesystem as a Docker image may be technically possible, but it does not reliably preserve the image metadata, entry point, mounts, or runtime behaviour and is not a supported FruitCropXL workflow at present. Using the supplied Apptainer image in WSL2 is therefore the recommended Windows route.

@@ -1,0 +1,85 @@
+name: Build FruitCropXL Release Candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_version:
+        description: Release version for the candidate artifact (for example vX.Y.Z)
+        required: true
+        type: string
+      include_sif:
+        description: Include the large GroIMP SIF in the artifact
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  build-release-candidate:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    env:
+      CONTAINER_SOURCE: oras://ghcr.io/junqi108/groimp
+      CONTAINER_TAG: latest
+      CONTAINER_OCI_DIGEST: ${{ vars.GROIMP_OCI_DIGEST }}
+      GROIMP_REGISTRY_USERNAME: ${{ vars.GROIMP_REGISTRY_USERNAME }}
+      GROIMP_REGISTRY_TOKEN: ${{ secrets.GROIMP_REGISTRY_TOKEN }}
+    steps:
+      - name: Check out the requested commit
+        uses: actions/checkout@v4
+
+      - name: Configure Apptainer
+        uses: eWaterCycle/setup-apptainer@v2
+        with:
+          apptainer-version: 1.1.6
+
+      - name: Pull the GroIMP container
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${GROIMP_REGISTRY_TOKEN}" ]]; then
+            [[ -n "${GROIMP_REGISTRY_USERNAME}" ]] || {
+              echo "GROIMP_REGISTRY_USERNAME is required when GROIMP_REGISTRY_TOKEN is set" >&2
+              exit 1
+            }
+            printf '%s' "${GROIMP_REGISTRY_TOKEN}" | \
+              apptainer remote login -u "${GROIMP_REGISTRY_USERNAME}" --password-stdin oras://ghcr.io
+          fi
+          if [[ -n "${CONTAINER_OCI_DIGEST}" ]]; then
+            GROIMP_OCI_DIGEST="${CONTAINER_OCI_DIGEST}" \
+              bash bash_scripts/apptainer_pull.sh --release
+          else
+            bash bash_scripts/apptainer_pull.sh
+          fi
+
+      - name: Build and validate release candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARGS=(
+            --version "${{ inputs.release_version }}"
+            --output-dir build/release
+            --container images/groimp.sif
+            --container-source "${CONTAINER_SOURCE}"
+            --container-tag "${CONTAINER_TAG}"
+          )
+          if [[ -n "${CONTAINER_OCI_DIGEST}" ]]; then
+            ARGS+=(--container-oci-digest "${CONTAINER_OCI_DIGEST}")
+          fi
+          if [[ "${{ inputs.include_sif }}" == "true" ]]; then
+            ARGS+=(--include-sif)
+          fi
+          bash bash_scripts/build_release_package.sh "${ARGS[@]}"
+          PACKAGE_DIR="build/release/FruitCropXL-${{ inputs.release_version }}"
+          (cd "${PACKAGE_DIR}" && sha256sum -c SHA256SUMS)
+          bash tests/gsz_test/validate_gsz_structure.sh "${PACKAGE_DIR}/Scripts.gsz"
+
+      - name: Upload release candidate artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FruitCropXL-${{ inputs.release_version }}
+          path: build/release/FruitCropXL-${{ inputs.release_version }}
+          if-no-files-found: error
+          retention-days: 30
