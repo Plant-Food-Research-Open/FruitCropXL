@@ -219,7 +219,7 @@ Generate the documentation locally from the repository root with:
 bash Model_documents/FruitCropXL_doc_bash/module_replace.sh
 ```
 
-The generated entry point is `Model_documents/FruitCropXL_doc/index.html`. In the public repository, the manually triggered `Build FruitCropXL Documentation` GitHub Actions workflow builds the same sources and deploys them to the `gh-pages` branch for later GitHub Pages publication.
+The generated entry point is `Model_documents/FruitCropXL_doc/index.html`. In the public repository, the `Build FruitCropXL Documentation` workflow builds the same sources and deploys them with GitHub Pages when the source or documentation generator changes on `main`; it can also be run manually.
 
 ## Licence, copyright, and citation
 

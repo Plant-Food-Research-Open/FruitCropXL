@@ -1,17 +1,23 @@
-name: Public Model Smoke Test
+name: Public Model Tests
 
 on:
   pull_request:
   push:
+    branches:
+      - main
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
-  default-scenario:
+  basic-unit-tests:
+    name: Basic unit tests
     runs-on: ubuntu-22.04
     timeout-minutes: 25
     steps:
       - name: Check out repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v7
 
       - name: Install Apptainer
         uses: eWaterCycle/setup-apptainer@v2
@@ -25,3 +31,46 @@ jobs:
         run: >-
           bash tests/validation/run_groimp_tests.sh
           XrunTests default "" model.options.default.json
+
+  validation-scenarios:
+    name: Validate ${{ matrix.scenario }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        scenario:
+          - default
+          - antony-2010
+          - dai-2012-12L
+          - dai-2012-3L
+          - FOPS-satDryTest
+          - stormTest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install Apptainer
+        uses: eWaterCycle/setup-apptainer@v2
+        with:
+          apptainer-version: 1.1.6
+
+      - name: Pull GroIMP image
+        run: bash bash_scripts/apptainer_pull.sh
+
+      - name: Validate scenario
+        run: bash tests/validation/run_like_github_actions.sh "${{ matrix.scenario }}"
+
+      - name: Upload validation logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: validation-${{ matrix.scenario }}
+          path: |
+            tests/validation/${{ matrix.scenario }}.log
+            Model_output/logs/groimp_${{ matrix.scenario }}.log
+            Model_output/validation_test.xml
+          if-no-files-found: warn
+          retention-days: 14

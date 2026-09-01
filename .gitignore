@@ -40,6 +40,7 @@ Model_documents/softdoc/groimp-javadoc/
 
 # Local AI/developer workspace
 .workspace/
+.agent/
 .agents/
 .codex/
 
