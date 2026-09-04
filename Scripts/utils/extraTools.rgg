@@ -2198,8 +2198,47 @@ static void writeLeafExpansionDiagnostic(Leaf lf) {
     row.carbon_nonStructure = lf.carbon_nonStructure;
     row.fNSC = lf.fNSC;
     row.loading = lf.loading;
-    row.carbonAssimilation = lf.carbonAssimilation;
-    row.maintenanceDM = lf.maintenanceDM;
+	row.carbonAssimilation = lf.carbonAssimilation;
+	row.maintenanceDM = lf.maintenanceDM;
+	row.leafSolubleCarbonMgC = lf.solubleCarbon;
+	row.leafStarchCarbonMgC = lf.starchCarbon;
+	row.leafTotalNSCMgC = lf.solubleCarbon + lf.starchCarbon;
+	row.leafSolubleCToStructuralC = (lf.carbon_structure > 0.0)
+		? lf.solubleCarbon / lf.carbon_structure : 0.0;
+	row.leafStarchCToStructuralC = (lf.carbon_structure > 0.0)
+		? lf.starchCarbon / lf.carbon_structure : 0.0;
+	row.leafBaselineStarchSynthesisMgC = lf.leafBaselineStarchSynthesisMgC;
+	row.leafOverflowStarchSynthesisMgC = lf.leafOverflowStarchSynthesisMgC;
+	row.leafStarchDegradationMgC = lf.leafStarchDegradationMgC;
+	row.leafPotentialStarchDegradationMgC = lf.leafPotentialStarchDegradationMgC;
+	row.leafPotentialLoadingMgC = lf.leafPotentialLoadingMgC;
+	row.leafActualLoadingMgC = lf.leafActualLoadingMgC;
+	row.leafSourceLoadingFactor = lf.leafSourceLoadingFactor;
+	row.leafLocalSolubleDemandMgC = lf.leafLocalSolubleDemandMgC;
+	row.leafCarbonMobilizationCostMgC = lf.carbonMobilizationCost;
+	row.leafCarbonClosureResidualMgC = lf.leafCarbonClosureResidualMgC;
+	row.leafStarchFeedbackTarget = lf.leafStarchFeedbackTarget;
+	row.leafStarchFeedbackState = lf.starchFeedbackState;
+	row.imposedPhloemSugar = lf.imposedPhloemSugar;
+	row.leafCarbonCommitCount = lf.leafCarbonCommitCount;
+	row.leafCarbonCapacityOverflowMgC = lf.leafCarbonCapacityOverflowMgC;
+	row.leafSolubleCarbonMgCPerGDM = (lf.biomass > 0.0)
+		? 1000.0 * lf.solubleCarbon / lf.biomass : 0.0;
+	row.leafStarchCarbonMgCPerGDM = (lf.biomass > 0.0)
+		? 1000.0 * lf.starchCarbon / lf.biomass : 0.0;
+	row.leafMaintenanceDemandMgC = lf.leafMaintenanceDemandMgC;
+	row.leafMaintenanceFromSolubleMgC = lf.leafMaintenanceFromSolubleMgC;
+	row.leafMaintenanceFromStarchMgC = lf.leafMaintenanceFromStarchMgC;
+	row.leafMaintenanceFromPhloemMgC = lf.leafMaintenanceFromPhloemMgC;
+	row.isPhotoperiodLight = lf.leafIsPhotoperiodLight;
+	row.hoursUntilExpectedDawn = lf.leafHoursUntilExpectedDawn;
+	row.leafRawPotentialLoadingMgC = lf.leafRawPotentialLoadingMgC;
+	row.leafMaximumLoadingCapacityMgC = lf.leafMaximumLoadingCapacityMgC;
+	row.leafLoadingCapacityLimited = lf.leafLoadingCapacityLimited;
+	row.leafPotentialLoadingPerStructuralCPerHour =
+		lf.leafPotentialLoadingPerStructuralCPerHour;
+	row.leafCarbonPreparationCount = lf.leafCarbonPreparationCount;
+	row.globalRadiation = globalRadiation;
 
-    DiagnosticTableCoordinator.writeLeafExpansion(row);
+	DiagnosticTableCoordinator.writeLeafExpansion(row);
 }

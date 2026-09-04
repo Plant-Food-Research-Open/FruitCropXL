@@ -180,6 +180,10 @@ public class UpdatesGrapevine extends UpdatesService {
 				{
 					pb.updateCarbonAssimilation();
 				}
+            lprep:Leaf ::>
+				{
+					lprep.prepareLeafCarbonStep();
+				}
 
 				]
 				}
@@ -206,7 +210,12 @@ public class UpdatesGrapevine extends UpdatesService {
             pb:PlantBase ::> 
             {
                 pb.updateCarbonAssimilation();
-                if(useCTRAM == true) {
+				if ("singleLeaf".equals(special_scenario) && singleLeafCarbonTest
+						&& imposePhloemSugar) {
+					carbonAllocation.applyImposedPhloemSugarBoundary(
+						pb, carbonAllocation.currentImposedPhloemSugarMassFraction());
+				}
+				else if(useCTRAM == true) {
                     pb.updateCarbonTransport();
                     
                 } else {

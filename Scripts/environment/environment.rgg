@@ -137,6 +137,29 @@ static boolean calcDaytime(int hourOfDay, int sunriseTime, int sunsetTime) { //c
 	  return(hourOfDay > sunriseTime && hourOfDay < sunsetTime);
 }
 
+/**
+ * Biological photoperiod state used by diel carbon metabolism. This is
+ * intentionally independent of measured radiation intensity: outdoor runs
+ * use the solar sunrise/sunset state and indoor runs use inputDayLength.
+ */
+public static boolean isPhotoperiodLight() {
+	return daytime;
+}
+
+/**
+ * Time from the current hourly interval to the first expected daylight
+ * interval (h). Returns zero during the photoperiod.
+ */
+public static double hoursUntilExpectedDawn() {
+	if (daytime) return 0.0;
+	double firstLightHour = sunriseTime + 1.0;
+	while (firstLightHour >= 24.0) firstLightHour -= 24.0;
+	double remaining = firstLightHour - hourOfDay;
+	while (remaining <= 0.0) remaining += 24.0;
+	if (Double.isNaN(remaining) || Double.isInfinite(remaining)) return 1.0;
+	return Math.max(DT * 24.0, remaining);
+}
+
 static float calcTemperature(float Tmax, float Tmin) {
      int hour_i = (hourOfDay - 6 < 1 ? hourOfDay-6 + 24 : hourOfDay-6);
 	 return 0.5*((Tmax+Tmin)+(Tmax-Tmin)*Math.cos(Math.PI*(hour_i - 8)/12));
@@ -930,7 +953,6 @@ static void updateEnvironment()
 	}
 	 */
 }
-
 
 
 

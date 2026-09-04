@@ -945,6 +945,18 @@ class CarbonTransportStateSnapshot {
     plantBase.sugarConcentration_phloem = sugar;
     plantBase.sugarConcentration_phloem_pre = previousSugar;
   }
+
+  /** Remove prior-hour leaf fluxes that cannot be accepted after fallback. */
+  void resetMatureLeafAllocationAfterFallback() {
+    for (Object storedState : organStates) {
+      CarbonTransportOrganState organState =
+          (CarbonTransportOrganState) storedState;
+      if (organState != null && organState.organ instanceof Leaf) {
+        ((Leaf) organState.organ)
+            .resetMatureTwoPoolAllocationAfterTransportFallback();
+      }
+    }
+  }
 }
 
 // CT response is evaluated in sugar concentration domain and linearised d/dPhi.
@@ -3940,6 +3952,9 @@ static boolean finalizeCarbonTransportState(PlantBase pb,
     ctx.carbonStatusUpdateCount++;
     // Initialization is usable provisionally, but it is not a converged hour.
     setAcceptedHourlyCarbonTransportState(pb, false);
+  } else {
+    /* Restored allocation fields belong to the preceding accepted hour. */
+    snapshot.resetMatureLeafAllocationAfterFallback();
   }
   return false;
 }

@@ -19,6 +19,7 @@ import static structuralRoot.*;
 import static fieldBase.*;
 import static tasks.*;
 import static carbonTransport.*;
+import static carbonAllocation.*;
 import interfaces.*;
 import io.github.fruitcropxl.config.params.groups.*;
 import io.github.fruitcropxl.config.params.structures.*;
@@ -279,6 +280,60 @@ public module Leaf extends PhotosynthateOrgan
 	public int carbonDeficitRemovalCandidate = 0;
 	/** Diagnostic flag set immediately before carbon-deficit structural removal. */
 	public int carbonDeficitRemoved = 0;
+
+	/* Optional mature-leaf soluble-carbon / transitory-starch state (mg C leaf-1). */
+	public double solubleCarbon = 0.0;
+	public double starchCarbon = 0.0;
+	public boolean twoPoolCarbonInitialized = false;
+	public int leafCarbonPreparedStep = -1;
+	public int leafCarbonPreparationCount = 0;
+	public int leafCarbonLastCommittedStep = -1;
+	public int leafCarbonCommitCount = 0;
+
+	/* Two-pool parameters. Rates are h-1; fractions are relative to structural C. */
+	public double initialStarchFractionOfLeafNSC = 0.0;
+	public String matureLeafTwoPoolInitialization = "fixedFraction";
+	public double baselineAssimilationToStarchFraction = 0.0;
+	public double solubleCarbonFloorFractionStructural = 0.02;
+	public double solubleCarbonTargetFractionStructural = 0.08;
+	public double starchCarbonFloorFractionStructural = 0.0;
+	public double maximumStarchMobilizationRatePerHour = 0.10;
+	public double overflowStarchSynthesisRatePerHour = 0.10;
+	public double solubleCarbonExportRatePerHour = 1.0;
+	/** Optional maximum potential loading per structural C (h-1); <=0 disables. */
+	public double maximumSolubleCarbonLoadingRatePerStructuralC = 0.0;
+
+	/* Accepted-step diagnostics; carbon amounts are mg C leaf-1 step-1. */
+	public double leafBaselineStarchSynthesisMgC = 0.0;
+	public double leafOverflowStarchSynthesisMgC = 0.0;
+	public double leafStarchDegradationMgC = 0.0;
+	public double leafPotentialStarchDegradationMgC = 0.0;
+	public double leafRawPotentialLoadingMgC = 0.0;
+	public double leafMaximumLoadingCapacityMgC = 0.0;
+	public double leafPotentialLoadingMgC = 0.0;
+	public double leafActualLoadingMgC = 0.0;
+	public boolean leafLoadingCapacityLimited = false;
+	/** Raw potential loading per structural C and hour (h-1). */
+	public double leafPotentialLoadingPerStructuralCPerHour = 0.0;
+	public double leafSourceLoadingFactor = 0.0;
+	public double leafLocalSolubleDemandMgC = 0.0;
+	public double leafCarbonClosureResidualMgC = 0.0;
+	public double leafCarbonCapacityOverflowMgC = 0.0;
+	/** Total mature-leaf maintenance demand (mg C leaf-1 step-1). */
+	public double leafMaintenanceDemandMgC = 0.0;
+	/** Maintenance supplied from accepted soluble carbon (mg C leaf-1 step-1). */
+	public double leafMaintenanceFromSolubleMgC = 0.0;
+	/** Maintenance supplied by nocturnal starch mobilisation (mg C leaf-1 step-1). */
+	public double leafMaintenanceFromStarchMgC = 0.0;
+	/** Unmet local maintenance supplied from phloem (mg C leaf-1 step-1). */
+	public double leafMaintenanceFromPhloemMgC = 0.0;
+	/** Biological photoperiod state used for the accepted carbon step. */
+	public boolean leafIsPhotoperiodLight = false;
+	/** Hours remaining to expected dawn during darkness; zero in light (h). */
+	public double leafHoursUntilExpectedDawn = 0.0;
+	public double leafStarchFeedbackTarget = 0.0;
+	public double starchFeedbackState = 0.0;
+	public double imposedPhloemSugar = 0.0;
 	
 	
 	/**
@@ -320,6 +375,35 @@ public module Leaf extends PhotosynthateOrgan
 			DocumentCategoryNameGroup.class)).getCategoryStore();			
 		config_Init.setCategoryContext("leaf");
 		fNSC                   = config_Init.getDouble("fNSC", 0.1);
+		try {
+			initialStarchFractionOfLeafNSC = config_Init.getDouble(
+				"initialStarchFractionOfLeafNSC", -1.0);
+		} catch (RuntimeException e) {
+			// Compatibility fallback: aggregateNSC never reads the split parameter.
+			initialStarchFractionOfLeafNSC = -1.0;
+		}
+		try {
+			matureLeafTwoPoolInitialization = config_Init.getString(
+				"matureLeafTwoPoolInitialization", "fixedFraction");
+		} catch (RuntimeException e) {
+			// Compatibility fallback: preserve the current solubleStarch split.
+			matureLeafTwoPoolInitialization = "fixedFraction";
+		}
+		if ("solubleStarch".equals(leafCarbonModel)
+				&& !"fixedFraction".equals(matureLeafTwoPoolInitialization)
+				&& !"solubleTarget".equals(matureLeafTwoPoolInitialization)) {
+			throw new IllegalArgumentException(
+				"leaf.matureLeafTwoPoolInitialization must be fixedFraction or solubleTarget");
+		}
+		if ("solubleStarch".equals(leafCarbonModel)
+				&& "fixedFraction".equals(matureLeafTwoPoolInitialization)
+				&& (Double.isNaN(initialStarchFractionOfLeafNSC)
+					|| Double.isInfinite(initialStarchFractionOfLeafNSC)
+					|| initialStarchFractionOfLeafNSC < 0.0
+					|| initialStarchFractionOfLeafNSC > 1.0)) {
+			throw new IllegalArgumentException(
+				"leaf.initialStarchFractionOfLeafNSC must be explicitly set in [0,1] for matureLeafTwoPoolInitialization=fixedFraction");
+		}
 		structure_C            = 1- fNSC; 
 		//SLA                    = config_Init.getDouble("SLA");
 		
@@ -347,6 +431,64 @@ public module Leaf extends PhotosynthateOrgan
 		HYDROLYSIS_LEAF_DAY	   = config.getDouble("HYDROLYSIS_LEAF_DAY", 0.8);
 		//night rate is not calculated
 		//HYDROLYSIS_LEAF_NIGHT  = config.getDouble("HYDROLYSIS_LEAF_NIGHT", 0.05);
+		try {
+			baselineAssimilationToStarchFraction = config.getDouble(
+				"baselineAssimilationToStarchFraction", -1.0);
+		} catch (RuntimeException e) {
+			// Compatibility fallback: aggregateNSC never reads this partition.
+			baselineAssimilationToStarchFraction = -1.0;
+		}
+		if ("solubleStarch".equals(leafCarbonModel)
+				&& (Double.isNaN(baselineAssimilationToStarchFraction)
+					|| Double.isInfinite(baselineAssimilationToStarchFraction)
+					|| baselineAssimilationToStarchFraction < 0.0
+					|| baselineAssimilationToStarchFraction > 1.0)) {
+			throw new IllegalArgumentException(
+				"leaf-carbon.baselineAssimilationToStarchFraction must be explicitly set in [0,1] for leafCarbonModel=solubleStarch");
+		}
+		try {
+			solubleCarbonFloorFractionStructural = config.getDouble(
+				"solubleCarbonFloorFractionStructural", 0.02);
+		} catch (RuntimeException e) {
+			solubleCarbonFloorFractionStructural = 0.02;
+		}
+		try {
+			solubleCarbonTargetFractionStructural = config.getDouble(
+				"solubleCarbonTargetFractionStructural", 0.08);
+		} catch (RuntimeException e) {
+			solubleCarbonTargetFractionStructural = 0.08;
+		}
+		try {
+			starchCarbonFloorFractionStructural = config.getDouble(
+				"starchCarbonFloorFractionStructural", 0.0);
+		} catch (RuntimeException e) {
+			starchCarbonFloorFractionStructural = 0.0;
+		}
+		try {
+			maximumStarchMobilizationRatePerHour = config.getDouble(
+				"maximumStarchMobilizationRatePerHour", 0.10);
+		} catch (RuntimeException e) {
+			maximumStarchMobilizationRatePerHour = 0.10;
+		}
+		try {
+			overflowStarchSynthesisRatePerHour = config.getDouble(
+				"overflowStarchSynthesisRatePerHour", 0.10);
+		} catch (RuntimeException e) {
+			overflowStarchSynthesisRatePerHour = 0.10;
+		}
+		try {
+			solubleCarbonExportRatePerHour = config.getDouble(
+				"solubleCarbonExportRatePerHour", 1.0);
+		} catch (RuntimeException e) {
+			solubleCarbonExportRatePerHour = 1.0;
+		}
+		try {
+			maximumSolubleCarbonLoadingRatePerStructuralC = config.getDouble(
+				"maximumSolubleCarbonLoadingRatePerStructuralC", 0.0);
+		} catch (RuntimeException e) {
+			// Compatibility fallback: a non-positive value preserves uncapped loading.
+			maximumSolubleCarbonLoadingRatePerStructuralC = 0.0;
+		}
 		
 		tm	 = config.getDouble("tm", 4.5);
 		te	 = config.getDouble("te", 7.5);
@@ -972,6 +1114,387 @@ public module Leaf extends PhotosynthateOrgan
 		this.r = 0; 
 		this.xp = 0;
 	}	
+
+	public boolean usesMatureTwoPoolCarbon() {
+		return "solubleStarch".equals(leafCarbonModel) && this.age >= this.te;
+	}
+
+	private double leafCarbonDtHours() {
+		double dtHours = DT * 24.0;
+		if (Double.isNaN(dtHours) || Double.isInfinite(dtHours) || dtHours <= 0.0) {
+			dtHours = 1.0;
+		}
+		return dtHours;
+	}
+
+	private double boundedFraction(double value, double fallback) {
+		double bounded = value;
+		if (Double.isNaN(bounded) || Double.isInfinite(bounded)) bounded = fallback;
+		return Math.max(0.0, Math.min(1.0, bounded));
+	}
+
+	private double leafReserveCapacityMgC() {
+		if (this.carbon_structure <= 0.0 || this.maxRes <= 0.0 || this.maxRes >= 1.0) {
+			return 0.0;
+		}
+		return this.carbon_structure * this.maxRes / (1.0 - this.maxRes);
+	}
+
+	private double solubleFloorMgC() {
+		double fraction = Math.max(0.0, solubleCarbonFloorFractionStructural);
+		return Math.min(leafReserveCapacityMgC(), fraction * Math.max(0.0, carbon_structure));
+	}
+
+	private double solubleTargetMgC() {
+		double target = Math.max(solubleFloorMgC(),
+			Math.max(0.0, solubleCarbonTargetFractionStructural)
+				* Math.max(0.0, carbon_structure));
+		return Math.min(leafReserveCapacityMgC(), target);
+	}
+
+	private double starchFloorMgC() {
+		double fraction = Math.max(0.0, starchCarbonFloorFractionStructural);
+		return Math.min(leafReserveCapacityMgC(), fraction * Math.max(0.0, carbon_structure));
+	}
+
+	private double currentSolubleForTwoPoolEvaluation() {
+		if (twoPoolCarbonInitialized) return Math.max(0.0, solubleCarbon);
+		if ("solubleTarget".equals(matureLeafTwoPoolInitialization)) {
+			double total = Math.max(0.0, carbon_nonStructure);
+			double provisionalSoluble = Math.min(total, solubleTargetMgC());
+			double provisionalStarch = total - provisionalSoluble;
+			if (provisionalStarch > leafReserveCapacityMgC()) {
+				provisionalSoluble = total - leafReserveCapacityMgC();
+			}
+			return Math.max(0.0, provisionalSoluble);
+		}
+		double fraction = boundedFraction(initialStarchFractionOfLeafNSC, 0.0);
+		return Math.max(0.0, carbon_nonStructure) * (1.0 - fraction);
+	}
+
+	private double currentStarchForTwoPoolEvaluation() {
+		if (twoPoolCarbonInitialized) return Math.max(0.0, starchCarbon);
+		if ("solubleTarget".equals(matureLeafTwoPoolInitialization)) {
+			double total = Math.max(0.0, carbon_nonStructure);
+			double provisionalSoluble = Math.min(total, solubleTargetMgC());
+			return Math.min(leafReserveCapacityMgC(),
+				Math.max(0.0, total - provisionalSoluble));
+		}
+		double fraction = boundedFraction(initialStarchFractionOfLeafNSC, 0.0);
+		return Math.max(0.0, carbon_nonStructure) * fraction;
+	}
+
+	private void initializeMatureTwoPoolCarbon() {
+		if (twoPoolCarbonInitialized || !usesMatureTwoPoolCarbon()) return;
+		double total = Math.max(0.0, carbon_nonStructure);
+		if ("solubleTarget".equals(matureLeafTwoPoolInitialization)) {
+			solubleCarbon = Math.min(total, solubleTargetMgC());
+			starchCarbon = total - solubleCarbon;
+			double starchCapacity = leafReserveCapacityMgC();
+			if (starchCarbon > starchCapacity) {
+				starchCarbon = starchCapacity;
+				solubleCarbon = total - starchCarbon;
+			}
+		} else {
+			double fraction = boundedFraction(initialStarchFractionOfLeafNSC, 0.0);
+			starchCarbon = total * fraction;
+			solubleCarbon = total - starchCarbon;
+		}
+		twoPoolCarbonInitialized = true;
+		syncTwoPoolCarbonState();
+	}
+
+	/**
+	 * Prepare the accepted start-of-hour state before common-pool or CTRAM
+	 * evaluation. No solver callback calls this method.
+	 */
+	public void prepareLeafCarbonStep() {
+		if (!usesMatureTwoPoolCarbon()) return;
+		if (leafCarbonPreparedStep == step) return;
+		initializeMatureTwoPoolCarbon();
+		leafCarbonPreparedStep = step;
+		leafCarbonPreparationCount++;
+		leafBaselineStarchSynthesisMgC = 0.0;
+		leafOverflowStarchSynthesisMgC = 0.0;
+		leafStarchDegradationMgC = 0.0;
+		leafPotentialStarchDegradationMgC = 0.0;
+		leafRawPotentialLoadingMgC = 0.0;
+		leafMaximumLoadingCapacityMgC = 0.0;
+		leafPotentialLoadingMgC = 0.0;
+		leafActualLoadingMgC = 0.0;
+		leafLoadingCapacityLimited = false;
+		leafPotentialLoadingPerStructuralCPerHour = 0.0;
+		leafSourceLoadingFactor = 0.0;
+		leafLocalSolubleDemandMgC = 0.0;
+		leafCarbonClosureResidualMgC = 0.0;
+		leafCarbonCapacityOverflowMgC = 0.0;
+		leafMaintenanceDemandMgC = 0.0;
+		leafMaintenanceFromSolubleMgC = 0.0;
+		leafMaintenanceFromStarchMgC = 0.0;
+		leafMaintenanceFromPhloemMgC = 0.0;
+		leafIsPhotoperiodLight = isPhotoperiodLight();
+		leafHoursUntilExpectedDawn = hoursUntilExpectedDawn();
+		imposedPhloemSugar = ("singleLeaf".equals(special_scenario)
+			&& singleLeafCarbonTest && imposePhloemSugar)
+				? currentImposedPhloemSugarMassFraction() : 0.0;
+	}
+
+	/**
+	 * Clear transient mature-leaf allocation after a failed carbon-transport hour.
+	 *
+	 * <p>The transport fallback restores the previous accepted graph state. Its
+	 * loading and phloem-supported maintenance fields belong to the previous
+	 * hour and must not be committed again against this hour's prepared pools.
+	 * Potential loading remains diagnostic; no failed-solve transport flux is
+	 * accepted.</p>
+	 */
+	public void resetMatureTwoPoolAllocationAfterTransportFallback() {
+		if (!usesMatureTwoPoolCarbon()) return;
+		leafPotentialLoadingMgC = calculateTwoPoolPotentialLoadingMgC();
+		loading_PT = leafPotentialLoadingMgC;
+		loading = 0.0f;
+		leafActualLoadingMgC = 0.0;
+		leafMaintenanceFromPhloemMgC = 0.0;
+		maintenanceDM = 0.0;
+		carbonMobilizationCost = 0.0;
+		unloading = Math.max(0.0, structureDM);
+	}
+
+	private double positiveAssimilationMgC() {
+		double assimilation = carbonAssimilation;
+		if (Double.isNaN(assimilation) || Double.isInfinite(assimilation)) return 0.0;
+		return Math.max(0.0, assimilation);
+	}
+
+	private double baselineStarchSynthesisPotentialMgC() {
+		if (!isPhotoperiodLight()) return 0.0;
+		double requested = boundedFraction(
+			baselineAssimilationToStarchFraction, 0.0)
+			* positiveAssimilationMgC();
+		double starchCapacity = Math.max(0.0,
+			leafReserveCapacityMgC() - currentStarchForTwoPoolEvaluation());
+		return Math.min(requested, starchCapacity);
+	}
+
+	private double potentialStarchDegradationMgC() {
+		if (isPhotoperiodLight()) return 0.0;
+		double availableStarch = Math.max(0.0,
+			currentStarchForTwoPoolEvaluation() - starchFloorMgC());
+		double hoursToDawn = Math.max(leafCarbonDtHours(),
+			hoursUntilExpectedDawn());
+		double paceCapacity = availableStarch / hoursToDawn
+			* leafCarbonDtHours();
+		/* Optional physiological maximum; zero disables this secondary guard. */
+		double rate = Math.max(0.0, maximumStarchMobilizationRatePerHour);
+		if (rate <= 0.0) return Math.min(availableStarch, paceCapacity);
+		double fraction = 1.0 - Math.exp(-rate * leafCarbonDtHours());
+		double rateCapacity = availableStarch
+			* Math.max(0.0, Math.min(1.0, fraction));
+		return Math.min(availableStarch, Math.min(paceCapacity, rateCapacity));
+	}
+
+	/** Candidate-independent local-first partition of mature-leaf maintenance. */
+	private double calculateLocalMaintenanceMgC(double maintenanceDemand) {
+		double demand = Math.max(0.0, maintenanceDemand);
+		double solubleAvailable = Math.max(0.0,
+			currentSolubleForTwoPoolEvaluation()
+			+ positiveAssimilationMgC()
+			- baselineStarchSynthesisPotentialMgC());
+		double fromSoluble = Math.min(demand, solubleAvailable);
+		double remaining = Math.max(0.0, demand - fromSoluble);
+		double fromStarch = Math.min(remaining,
+			potentialStarchDegradationMgC());
+		leafMaintenanceDemandMgC = demand;
+		leafMaintenanceFromSolubleMgC = fromSoluble;
+		leafMaintenanceFromStarchMgC = fromStarch;
+		return fromSoluble + fromStarch;
+	}
+
+	private double calculateTwoPoolPotentialLoadingMgC() {
+		double soluble = currentSolubleForTwoPoolEvaluation();
+		double solubleAssimilation = positiveAssimilationMgC()
+			- baselineStarchSynthesisPotentialMgC();
+		double potentialDegradation = potentialStarchDegradationMgC();
+		/* Use the full demand retained separately from the phloem-only PT term. */
+		double fullMaintenanceDemand = leafMaintenanceDemandMgC;
+		if (Double.isNaN(fullMaintenanceDemand)
+				|| Double.isInfinite(fullMaintenanceDemand)
+				|| fullMaintenanceDemand < 0.0) {
+			fullMaintenanceDemand = Math.max(0.0,
+				calcMaintanceRespiration(this.fNSCtoSC));
+		}
+		double localPotentialCost = calculateLocalMaintenanceMgC(
+			fullMaintenanceDemand);
+		double available = Math.max(0.0, soluble + solubleAssimilation
+			+ potentialDegradation - solubleFloorMgC() - localPotentialCost);
+		double transportDenominator = 1.0 + Math.max(0.0, Q_TRANS);
+		double costLimited = available / transportDenominator;
+		double exportRate = Math.max(0.0, solubleCarbonExportRatePerHour);
+		double exportFraction = 1.0 - Math.exp(-exportRate * leafCarbonDtHours());
+		double kineticLimited = available
+			* Math.max(0.0, Math.min(1.0, exportFraction));
+		leafPotentialStarchDegradationMgC = potentialDegradation;
+		leafLocalSolubleDemandMgC = localPotentialCost;
+		leafRawPotentialLoadingMgC = Math.max(0.0,
+			Math.min(costLimited, kineticLimited));
+		double structuralC = Math.max(0.0, carbon_structure);
+		double dtHours = leafCarbonDtHours();
+		leafPotentialLoadingPerStructuralCPerHour = (structuralC > 0.0)
+			? leafRawPotentialLoadingMgC / (structuralC * dtHours) : 0.0;
+		double maximumRate = maximumSolubleCarbonLoadingRatePerStructuralC;
+		if (!Double.isNaN(maximumRate) && !Double.isInfinite(maximumRate)
+				&& maximumRate > 0.0 && structuralC > 0.0) {
+			leafMaximumLoadingCapacityMgC = maximumRate * structuralC * dtHours;
+			leafPotentialLoadingMgC = Math.min(leafRawPotentialLoadingMgC,
+				leafMaximumLoadingCapacityMgC);
+			leafLoadingCapacityLimited = leafRawPotentialLoadingMgC
+				> leafMaximumLoadingCapacityMgC + 1.0e-12;
+		} else {
+			leafMaximumLoadingCapacityMgC = 0.0;
+			leafPotentialLoadingMgC = leafRawPotentialLoadingMgC;
+			leafLoadingCapacityLimited = false;
+		}
+		return leafPotentialLoadingMgC;
+	}
+
+	/** Previous accepted acclimation state used by photosynthesis in this step. */
+	public float getLeafPhotosynthesisCarbonInhibition() {
+		if ("none".equals(leafPhotosynthesisCarbonFeedback)) return 0.0f;
+		if ("starchAcclimation".equals(leafPhotosynthesisCarbonFeedback)
+				|| "carbohydrateExcessAcclimation".equals(leafPhotosynthesisCarbonFeedback)) {
+			double state = starchFeedbackState;
+			if (Double.isNaN(state) || Double.isInfinite(state)) state = 0.0;
+			return (float) Math.max(0.0, Math.min(1.0, state));
+		}
+		return calcPhotosynthesisNSCInhibition((float) this.fNSC);
+	}
+
+	private void updateStarchPhotosynthesisAcclimation() {
+		if (!"starchAcclimation".equals(leafPhotosynthesisCarbonFeedback)
+				&& !"carbohydrateExcessAcclimation".equals(leafPhotosynthesisCarbonFeedback)) {
+			leafStarchFeedbackTarget = 0.0;
+			return;
+		}
+		double normalizedStarch = (carbon_structure > 0.0)
+			? starchCarbon / carbon_structure : 0.0;
+		double excess = Math.max(0.0,
+			normalizedStarch - starchFeedbackReferenceFractionStructural);
+		double exponent = (starchFeedbackHillExponent > 0.0)
+			? starchFeedbackHillExponent : 2.0;
+		double half = (starchFeedbackHalfSaturation > 0.0)
+			? starchFeedbackHalfSaturation : 0.05;
+		double excessPower = Math.pow(excess, exponent);
+		double halfPower = Math.pow(half, exponent);
+		double denominator = halfPower + excessPower;
+		double maximum = boundedFraction(starchFeedbackMaximumInhibition, 0.0);
+		double starchResponse = (denominator > 0.0)
+			? excessPower / denominator : 0.0;
+		double combinedResponse = starchResponse;
+		if ("carbohydrateExcessAcclimation".equals(leafPhotosynthesisCarbonFeedback)) {
+			double normalizedSoluble = (carbon_structure > 0.0)
+				? solubleCarbon / carbon_structure : 0.0;
+			double solubleExcess = Math.max(0.0,
+				normalizedSoluble - solubleFeedbackReferenceFractionStructural);
+			double solubleExponent = (solubleFeedbackHillExponent > 0.0)
+				? solubleFeedbackHillExponent : 2.0;
+			double solubleHalf = (solubleFeedbackHalfSaturation > 0.0)
+				? solubleFeedbackHalfSaturation : 0.05;
+			double solublePower = Math.pow(solubleExcess, solubleExponent);
+			double solubleHalfPower = Math.pow(solubleHalf, solubleExponent);
+			double solubleDenominator = solubleHalfPower + solublePower;
+			double solubleResponse = (solubleDenominator > 0.0)
+				? solublePower / solubleDenominator : 0.0;
+			double solubleWeight = boundedFraction(solubleFeedbackWeight, 0.0);
+			combinedResponse = Math.max(starchResponse,
+				solubleWeight * solubleResponse);
+		}
+		leafStarchFeedbackTarget = maximum * combinedResponse;
+		double tau = Math.max(1.0e-9, starchFeedbackTimeConstantHours);
+		double response = 1.0 - Math.exp(-leafCarbonDtHours() / tau);
+		starchFeedbackState += response
+			* (leafStarchFeedbackTarget - starchFeedbackState);
+		starchFeedbackState = Math.max(0.0, Math.min(maximum, starchFeedbackState));
+	}
+
+	private void syncTwoPoolCarbonState() {
+		solubleCarbon = Math.max(0.0, solubleCarbon);
+		starchCarbon = Math.max(0.0, starchCarbon);
+		carbon_nonStructure = solubleCarbon + starchCarbon;
+		carbon_nonStructure_max = leafReserveCapacityMgC();
+		carbon_total = carbon_structure + carbon_nonStructure;
+		biomass = (C_content > 0.0) ? carbon_total / C_content : 0.0;
+		if (shouldUpdateFreshWeightFromWaterContent() && waterContent < 1.0) {
+			freshWeight = biomass / (1.0 - waterContent);
+		}
+		fNSCtoSC = (carbon_structure > 0.0)
+			? carbon_nonStructure / carbon_structure : 0.0;
+		fNSC = (carbon_total > 0.0) ? carbon_nonStructure / carbon_total : 0.0;
+	}
+
+	/** Commit soluble/starch state exactly once after the accepted carbon solve. */
+	private void commitMatureTwoPoolCarbon() {
+		if (!usesMatureTwoPoolCarbon() || leafCarbonLastCommittedStep == step) return;
+		initializeMatureTwoPoolCarbon();
+
+		double solubleStart = solubleCarbon;
+		double starchStart = starchCarbon;
+		double assimilation = positiveAssimilationMgC();
+		double baselineSynthesis = baselineStarchSynthesisPotentialMgC();
+		double solubleAssimilation = assimilation - baselineSynthesis;
+		double actualLoading = Math.max(0.0, loading);
+		double transportCost = Math.max(0.0, carbonMobilizationCost);
+		double localDemand = calculateLocalMaintenanceMgC(
+			Math.max(0.0, leafMaintenanceDemandMgC));
+		double degradationCapacity = potentialStarchDegradationMgC();
+		double degradationRequired = 0.0;
+		if (!isPhotoperiodLight()) {
+			degradationRequired = Math.max(0.0, solubleFloorMgC()
+				+ actualLoading + localDemand + transportCost
+				- (solubleStart + solubleAssimilation));
+		}
+		double degradation = Math.min(degradationCapacity, degradationRequired);
+		double provisionalSoluble = solubleStart + solubleAssimilation
+			+ degradation - actualLoading - localDemand - transportCost;
+		double overflowSynthesis = 0.0;
+		if (isPhotoperiodLight() && provisionalSoluble > solubleTargetMgC()) {
+			double overflowExcess = provisionalSoluble - solubleTargetMgC();
+			double overflowRate = Math.max(0.0, overflowStarchSynthesisRatePerHour);
+			double overflowFraction = 1.0
+				- Math.exp(-overflowRate * leafCarbonDtHours());
+			double starchCapacity = Math.max(0.0, leafReserveCapacityMgC()
+				- (starchStart + baselineSynthesis - degradation));
+			overflowSynthesis = Math.min(starchCapacity,
+				overflowExcess * Math.max(0.0, Math.min(1.0, overflowFraction)));
+		}
+
+		double nextSoluble = provisionalSoluble - overflowSynthesis;
+		double nextStarch = starchStart + baselineSynthesis
+			+ overflowSynthesis - degradation;
+		nextSoluble = Math.max(0.0, nextSoluble);
+		nextStarch = Math.max(0.0, nextStarch);
+
+		/* The nominal total-reserve capacity is a diagnostic target, not a sink. */
+		double capacityOverflow = Math.max(0.0,
+			nextSoluble + nextStarch - leafReserveCapacityMgC());
+
+		solubleCarbon = nextSoluble;
+		starchCarbon = nextStarch;
+		leafBaselineStarchSynthesisMgC = baselineSynthesis;
+		leafOverflowStarchSynthesisMgC = overflowSynthesis;
+		leafStarchDegradationMgC = degradation;
+		leafPotentialStarchDegradationMgC = degradationCapacity;
+		leafActualLoadingMgC = actualLoading;
+		leafLocalSolubleDemandMgC = localDemand;
+		leafCarbonCapacityOverflowMgC = capacityOverflow;
+		double expectedTotal = solubleStart + starchStart + assimilation
+			- actualLoading - localDemand - transportCost;
+		leafCarbonClosureResidualMgC = (solubleCarbon + starchCarbon)
+			- expectedTotal;
+		syncTwoPoolCarbonState();
+		updateStarchPhotosynthesisAcclimation();
+		leafCarbonLastCommittedStep = step;
+		leafCarbonCommitCount++;
+	}
 	
 	
 	@Override
@@ -1052,9 +1575,26 @@ public module Leaf extends PhotosynthateOrgan
 		// Ensure maintenance respiration does not produce NaN
 		maintenanceDM_PT = calcMaintanceRespiration(this.fNSCtoSC);
 		
-		reserveDM_PT = reserveSynthesis();
-	
-		loading_PT = reserveHydrolysis();
+		if (usesMatureTwoPoolCarbon()) {
+			reserveDM_PT = 0.0;
+			leafMaintenanceDemandMgC = Math.max(0.0, maintenanceDM_PT);
+			/*
+			 * Loading is evaluated against the full local maintenance demand.
+			 * Afterwards CTRAM sees only the genuinely unmet phloem demand;
+			 * this keeps the solver candidate pure and prevents double funding.
+			 */
+			loading_PT = calculateTwoPoolPotentialLoadingMgC();
+			double localMaintenance = calculateLocalMaintenanceMgC(
+				leafMaintenanceDemandMgC);
+			double unmetMaintenance = Math.max(0.0,
+				leafMaintenanceDemandMgC - localMaintenance);
+			boolean controlledBoundary = "singleLeaf".equals(special_scenario)
+				&& singleLeafCarbonTest && imposePhloemSugar;
+			maintenanceDM_PT = controlledBoundary ? 0.0 : unmetMaintenance;
+		} else {
+			reserveDM_PT = reserveSynthesis();
+			loading_PT = reserveHydrolysis();
+		}
 	}
 
 	/**
@@ -1163,13 +1703,34 @@ public module Leaf extends PhotosynthateOrgan
 			structureDM = 0;
 		}
 	
-		maintenanceDM = calcMaintanceRespiration(this.fNSCtoSC) * 
-						sinkUnloading(sugarConcentration_phloem, KM_MTNCE);
+		double maintenanceDemand = calcMaintanceRespiration(this.fNSCtoSC);
+		if (usesMatureTwoPoolCarbon()) {
+			leafMaintenanceDemandMgC = Math.max(0.0, maintenanceDemand);
+			double localMaintenance = calculateLocalMaintenanceMgC(
+				leafMaintenanceDemandMgC);
+			double unmetMaintenance = Math.max(0.0,
+				leafMaintenanceDemandMgC - localMaintenance);
+			boolean controlledBoundary = "singleLeaf".equals(special_scenario)
+				&& singleLeafCarbonTest && imposePhloemSugar;
+			maintenanceDM = controlledBoundary ? 0.0 : unmetMaintenance
+				* sinkUnloading(sugarConcentration_phloem, KM_MTNCE);
+			/* Keep PT phloem-only for CTRAM linearisation after this callback. */
+			maintenanceDM_PT = controlledBoundary ? 0.0 : unmetMaintenance;
+			leafMaintenanceFromPhloemMgC = maintenanceDM;
+		} else {
+			maintenanceDM = maintenanceDemand
+				* sinkUnloading(sugarConcentration_phloem, KM_MTNCE);
+		}
 		
 		//println("maintenanceDM: " + maintenanceDM + " Rd: " + Rd);
 		
-		reserveDM = reserveSynthesis()* 
-					sinkUnloading(sugarConcentration_phloem, km_res);	
+		if (usesMatureTwoPoolCarbon()) {
+			// Two-pool reserve storage is an internal S-to-T transfer at commit.
+			reserveDM = 0.0;
+		} else {
+			reserveDM = reserveSynthesis()
+				* sinkUnloading(sugarConcentration_phloem, km_res);
+		}
 	
 		unloading = structureDM + maintenanceDM + reserveDM;
 		
@@ -1182,7 +1743,20 @@ public module Leaf extends PhotosynthateOrgan
 	@Override
 	void calcLoading(double sugarConcentration_phloem)
 	{
-		if (fNSC > MINIMUM_NSC) {
+		if (usesMatureTwoPoolCarbon()) {
+			leafPotentialLoadingMgC = calculateTwoPoolPotentialLoadingMgC();
+			leafSourceLoadingFactor = sourceLoading(sugarConcentration_phloem,
+				sourceLoading_b, sourceLoading_cp);
+			loading = leafPotentialLoadingMgC * leafSourceLoadingFactor;
+			leafActualLoadingMgC = loading;
+			if ("singleLeaf".equals(special_scenario) && singleLeafCarbonTest
+					&& imposePhloemSugar) {
+				imposedPhloemSugar = sugarConcentration_phloem;
+			} else {
+				imposedPhloemSugar = 0.0;
+			}
+		}
+		else if (fNSC > MINIMUM_NSC) {
 			double potentialLoading = reserveHydrolysis() * 
 									  sourceLoading(sugarConcentration_phloem, sourceLoading_b, sourceLoading_cp);
 	
@@ -1214,6 +1788,19 @@ public module Leaf extends PhotosynthateOrgan
 	{ 
 		//Rd is umol CO2 m-2 s-1
 		float deltaT;
+		if (usesMatureTwoPoolCarbon()) {
+			/* carbonAssimilation is accepted net exchange (Rd already included).
+			 * During the photoperiod, charge a negative net exchange exactly once;
+			 * positive net gain carries no additional generic maintenance debit.
+			 */
+			if (isPhotoperiodLight()) {
+				maintenanceDM = (carbonAssimilation < 0.0)
+					? Math.abs(carbonAssimilation) : 0.0;
+				return maintenanceDM;
+			}
+			maintenanceDM = super.calcMaintanceRespiration(this.fNSCtoSC);
+			return maintenanceDM;
+		}
 		if (globalRadiation > LIGHT_THRESHOLD ) {
 			deltaT = timeInterval; 
 			if(this.carbonAssimilation < 0) {
@@ -1386,9 +1973,14 @@ public module Leaf extends PhotosynthateOrgan
 			
 		} else {
 			delta_str = structureDM - growthCost; //maintenanceDM + reserveDM
-			delta_NSC = carbonAssimilation + maintenanceDM + reserveDM 
-							- loading - carbonMobilizationCost - maintenanceDM_PT;
-			updateCarbonStatus(delta_str, delta_NSC);
+			if (usesMatureTwoPoolCarbon()) {
+				carbon_structure += delta_str;
+				commitMatureTwoPoolCarbon();
+			} else {
+				delta_NSC = carbonAssimilation + maintenanceDM + reserveDM
+								- loading - carbonMobilizationCost - maintenanceDM_PT;
+				updateCarbonStatus(delta_str, delta_NSC);
+			}
 			
 			//setting the fNSC for photosynthesis test
 			if("photosynthesisTest".equals(special_scenario)) {

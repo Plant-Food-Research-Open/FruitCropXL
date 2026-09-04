@@ -337,10 +337,212 @@ public class LeafExpansionDiagnosticOutputData implements Serializable {
 	public double carbonAssimilation;
 
 	@JsonProperty(value = "maintenanceDM", index = 59)
-	@JsonPropertyDescription("Realized leaf maintenance-respiration carbon cost.")
+	@JsonPropertyDescription("Accepted phloem unloading that supports leaf maintenance.")
 	@Unit("mg C/h")
 	@Tags("Carbon")
 	public double maintenanceDM;
+
+	@JsonProperty(value = "leafSolubleCarbonMgC", index = 60)
+	@JsonPropertyDescription("Leaf soluble/transportable carbon pool.")
+	@Unit("mg C")
+	@Tags("Carbon")
+	public double leafSolubleCarbonMgC;
+
+	@JsonProperty(value = "leafStarchCarbonMgC", index = 61)
+	@JsonPropertyDescription("Leaf transitory starch carbon pool.")
+	@Unit("mg C")
+	@Tags("Carbon")
+	public double leafStarchCarbonMgC;
+
+	@JsonProperty(value = "leafTotalNSCMgC", index = 62)
+	@JsonPropertyDescription("Sum of soluble and starch leaf carbon.")
+	@Unit("mg C")
+	@Tags("Carbon")
+	public double leafTotalNSCMgC;
+
+	@JsonProperty(value = "leafSolubleCToStructuralC", index = 63)
+	@JsonPropertyDescription("Soluble carbon divided by structural leaf carbon.")
+	@Unit("-")
+	@Tags("Carbon")
+	public double leafSolubleCToStructuralC;
+
+	@JsonProperty(value = "leafStarchCToStructuralC", index = 64)
+	@JsonPropertyDescription("Starch carbon divided by structural leaf carbon.")
+	@Unit("-")
+	@Tags("Carbon")
+	public double leafStarchCToStructuralC;
+
+	@JsonProperty(value = "leafBaselineStarchSynthesisMgC", index = 65)
+	@JsonPropertyDescription("Daytime assimilation partitioned directly to starch this step.")
+	@Unit("mg C")
+	@Tags("Carbon")
+	public double leafBaselineStarchSynthesisMgC;
+
+	@JsonProperty(value = "leafOverflowStarchSynthesisMgC", index = 66)
+	@JsonPropertyDescription("Excess soluble carbon converted internally to starch this step.")
+	@Unit("mg C")
+	@Tags("Carbon")
+	public double leafOverflowStarchSynthesisMgC;
+
+	@JsonProperty(value = "leafStarchDegradationMgC", index = 67)
+	@JsonPropertyDescription("Demand-driven starch carbon mobilised this step.")
+	@Unit("mg C")
+	@Tags("Carbon")
+	public double leafStarchDegradationMgC;
+
+	@JsonProperty(value = "leafPotentialStarchDegradationMgC", index = 68)
+	@JsonPropertyDescription("Maximum starch carbon that could be mobilised this step.")
+	@Unit("mg C")
+	@Tags("Carbon")
+	public double leafPotentialStarchDegradationMgC;
+
+	@JsonProperty(value = "leafPotentialLoadingMgC", index = 69)
+	@JsonPropertyDescription("Soluble-carbon-constrained potential phloem loading before source regulation.")
+	@Unit("mg C")
+	@Tags("Carbon")
+	public double leafPotentialLoadingMgC;
+
+	@JsonProperty(value = "leafActualLoadingMgC", index = 70)
+	@JsonPropertyDescription("Accepted phloem loading after source regulation.")
+	@Unit("mg C")
+	@Tags("Carbon")
+	public double leafActualLoadingMgC;
+
+	@JsonProperty(value = "leafSourceLoadingFactor", index = 71)
+	@JsonPropertyDescription("Existing phloem-sugar source response applied to potential loading.")
+	@Unit("-")
+	@Tags("Carbon")
+	public double leafSourceLoadingFactor;
+
+	@JsonProperty(value = "leafLocalSolubleDemandMgC", index = 72)
+	@JsonPropertyDescription("Maintenance demand not covered by accepted phloem unloading.")
+	@Unit("mg C")
+	@Tags("Carbon")
+	public double leafLocalSolubleDemandMgC;
+
+	@JsonProperty(value = "leafCarbonMobilizationCostMgC", index = 73)
+	@JsonPropertyDescription("Carbon transport cost Q_TRANS times accepted loading.")
+	@Unit("mg C")
+	@Tags("Carbon")
+	public double leafCarbonMobilizationCostMgC;
+
+	@JsonProperty(value = "leafCarbonClosureResidualMgC", index = 74)
+	@JsonPropertyDescription("Two-pool accepted-step carbon closure residual.")
+	@Unit("mg C")
+	@Tags("Solver diagnostics")
+	public double leafCarbonClosureResidualMgC;
+
+	@JsonProperty(value = "leafStarchFeedbackTarget", index = 75)
+	@JsonPropertyDescription("Instantaneous starch-acclimation inhibition target.")
+	@Unit("-")
+	@Tags("Carbon")
+	public double leafStarchFeedbackTarget;
+
+	@JsonProperty(value = "leafStarchFeedbackState", index = 76)
+	@JsonPropertyDescription("Slow accepted starch-acclimation inhibition state.")
+	@Unit("-")
+	@Tags("Carbon")
+	public double leafStarchFeedbackState;
+
+	@JsonProperty(value = "imposedPhloemSugar", index = 77)
+	@JsonPropertyDescription("Test-only imposed common-pool phloem sugar mass fraction.")
+	@Unit("g sugar/g phloem sap")
+	@Tags("Solver diagnostics")
+	public double imposedPhloemSugar;
+
+	@JsonProperty(value = "leafCarbonCommitCount", index = 78)
+	@JsonPropertyDescription("Cumulative number of accepted two-pool commits for this leaf.")
+	@Unit("-")
+	@Tags("Solver diagnostics")
+	public int leafCarbonCommitCount;
+
+	@JsonProperty(value = "leafCarbonCapacityOverflowMgC", index = 79)
+	@JsonPropertyDescription("Carbon retained above the nominal total leaf reserve target; this is not a carbon loss.")
+	@Unit("mg C")
+	@Tags("Carbon")
+	public double leafCarbonCapacityOverflowMgC;
+
+	@JsonProperty(value = "leafSolubleCarbonMgCPerGDM", index = 80)
+	@JsonPropertyDescription("Leaf soluble carbon per unit leaf dry mass.")
+	@Unit("mg C/g DM")
+	@Tags("Carbon")
+	public double leafSolubleCarbonMgCPerGDM;
+
+	@JsonProperty(value = "leafStarchCarbonMgCPerGDM", index = 81)
+	@JsonPropertyDescription("Leaf starch carbon per unit leaf dry mass; carbon mass, not starch or glucose-equivalent mass.")
+	@Unit("mg C/g DM")
+	@Tags("Carbon")
+	public double leafStarchCarbonMgCPerGDM;
+
+	@JsonProperty(value = "leafMaintenanceDemandMgC", index = 82)
+	@JsonPropertyDescription("Total mature-leaf maintenance carbon demand during the step.")
+	@Unit("mg C")
+	@Tags("Carbon")
+	public double leafMaintenanceDemandMgC;
+
+	@JsonProperty(value = "leafMaintenanceFromSolubleMgC", index = 83)
+	@JsonPropertyDescription("Maintenance carbon supplied from the local soluble pool.")
+	@Unit("mg C")
+	@Tags("Carbon")
+	public double leafMaintenanceFromSolubleMgC;
+
+	@JsonProperty(value = "leafMaintenanceFromStarchMgC", index = 84)
+	@JsonPropertyDescription("Maintenance carbon supplied through nocturnal starch mobilisation.")
+	@Unit("mg C")
+	@Tags("Carbon")
+	public double leafMaintenanceFromStarchMgC;
+
+	@JsonProperty(value = "leafMaintenanceFromPhloemMgC", index = 85)
+	@JsonPropertyDescription("Residual maintenance carbon supplied through phloem unloading.")
+	@Unit("mg C")
+	@Tags("Carbon")
+	public double leafMaintenanceFromPhloemMgC;
+
+	@JsonProperty(value = "isPhotoperiodLight", index = 86)
+	@JsonPropertyDescription("Biological photoperiod state, independent of the radiation activity threshold.")
+	@Unit("-")
+	@Tags("Carbon")
+	public boolean isPhotoperiodLight;
+
+	@JsonProperty(value = "hoursUntilExpectedDawn", index = 87)
+	@JsonPropertyDescription("Hours remaining to expected dawn in darkness; zero during photoperiod light.")
+	@Unit("h")
+	@Tags("Carbon")
+	public double hoursUntilExpectedDawn;
+
+	@JsonProperty(value = "leafRawPotentialLoadingMgC", index = 88)
+	@JsonPropertyDescription("Uncapped soluble-carbon potential loading before source regulation.")
+	@Unit("mg C")
+	@Tags("Carbon")
+	public double leafRawPotentialLoadingMgC;
+
+	@JsonProperty(value = "leafMaximumLoadingCapacityMgC", index = 89)
+	@JsonPropertyDescription("Size-scaled loading capacity for this step; zero when the optional ceiling is disabled.")
+	@Unit("mg C")
+	@Tags("Carbon")
+	public double leafMaximumLoadingCapacityMgC;
+
+	@JsonProperty(value = "leafLoadingCapacityLimited", index = 90)
+	@JsonPropertyDescription("True when the optional size-scaled ceiling reduces raw potential loading.")
+	@Unit("-")
+	@Tags("Carbon")
+	public boolean leafLoadingCapacityLimited;
+
+	@JsonProperty(value = "leafPotentialLoadingPerStructuralCPerHour", index = 91)
+	@JsonPropertyDescription("Raw potential loading divided by structural leaf carbon and step duration.")
+	@Unit("h-1")
+	@Tags("Carbon")
+	public double leafPotentialLoadingPerStructuralCPerHour;
+
+	@JsonProperty(value = "leafCarbonPreparationCount", index = 92)
+	@JsonPropertyDescription("Cumulative number of accepted start-of-step two-pool preparations.")
+	@Unit("-")
+	@Tags("Solver diagnostics")
+	public int leafCarbonPreparationCount;
+
+	@JsonProperty(value = "globalRadiation", index = 93)
+	@JsonPropertyDescription("Current incident global radiation used by the environment.")
+	@Unit("umol photons/m2/s")
+	@Tags("Environment")
+	public double globalRadiation;
 }
-
-

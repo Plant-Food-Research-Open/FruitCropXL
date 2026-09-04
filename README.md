@@ -28,6 +28,7 @@ Public technical documentation is maintained in this repository:
 
 - [Project knowledge index](Model_documents/project_knowledge/README.md) — architecture, physiology, configuration, inputs, outputs, testing, and implementation references.
 - [Execution guide](Model_documents/config-execution/execution.md) — headless GroIMP commands, scenario selection, runtime options, and archive-backed runs.
+- [Leaf soluble-carbon/transitory-starch guide](Model_documents/config-execution/leaf-soluble-starch-carbon-guide.md) — two-pool equations, configuration, outputs, validation, and calibration boundaries.
 - [Test guide](tests/README.md) — portable smoke, validation, diagnostic, and GSZ test entry points.
 
 Code-structure documentation can be generated locally or published through the repository's Doxygen workflow; see [Auto-documentation](#auto-documentation).

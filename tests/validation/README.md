@@ -60,6 +60,12 @@ Use the script that matches the runtime path you actually want to test.
 | `tests/validation/run_groimp_tests.sh` | Canonical low-level Apptainer runner | Apptainer | `Scripts/project.gs` |
 | `tests/smoke_test/unitTest.sh` | Portable direct-Java smoke test | Java directly | `Scripts/project.gs` by default |
 | `tests/diagnosis/check_output_dto_schema.py` | Static plant and hydraulic-debug DTO index/schema check | Python standard library | not applicable |
+| `tests/validation/run_single_leaf_carbon.py` | Imposed-Cp soluble/starch turnover and closure | Normal direct-Java Xrun | generated single-leaf scenarios |
+| `tests/validation/run_single_leaf_loading_capacity.py` | Cap-off equivalence and test-only cap mechanism | Normal direct-Java Xrun | generated single-leaf scenarios |
+| `tests/validation/run_single_leaf_carbon_robustness.py` | Initialization, photoperiod/cloudy accounting, reversibility, and same-step preparation diagnostics | Normal direct-Java Xrun | generated single-leaf scenarios |
+| `tests/validation/run_single_leaf_starch_feedback.py` | Starch-only versus combined carbohydrate feedback | Normal direct-Java Xrun | generated single-leaf scenarios |
+| `tests/validation/run_leaf_carbon_whole_plant_smoke.py` | Apple CTRAM and Grapevine common-pool two-pool smoke | Normal direct-Java Xrun | generated short scenarios |
+| `tests/validation/run_leaf_loading_whole_tree_diagnosis.py` | Reduced FOPS crop-load distributions with disabled and test-only capacity | Normal direct-Java Xrun | generated short scenarios |
 
 ### 1. CI-equivalent local validation
 

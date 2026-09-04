@@ -499,7 +499,7 @@ public class PlantOutputSchemaUnitTest {
 			AppleFlowerToFruitDiagnosticOutputData.class,
 			AppleLeafAxisDiagnosticOutputData.class
 		};
-		int[] expectedCounts = {60, 29, 111, 29, 23, 27, 19};
+		int[] expectedCounts = {94, 29, 111, 29, 23, 27, 19};
 		String[] commonIdentifiers = {
 			"timestamp", "step", "year", "dayOfYear", "hourOfDay",
 			"scenario", "simuuid", "plantNumber", "fieldInstanceId"

@@ -210,6 +210,10 @@ public class UpdatesApple extends UpdatesService {
             {
                 pb.updateCarbonAssimilation();
             }
+            lprep:Leaf ::>
+            {
+                lprep.prepareLeafCarbonStep();
+            }
             ]
 
             }
@@ -230,7 +234,12 @@ public class UpdatesApple extends UpdatesService {
             pb:PlantBase ::> 
             {
                 
-                if(useCTRAM == true) 
+				if ("singleLeaf".equals(special_scenario) && singleLeafCarbonTest
+						&& imposePhloemSugar) {
+					carbonAllocation.applyImposedPhloemSugarBoundary(
+						pb, carbonAllocation.currentImposedPhloemSugarMassFraction());
+				}
+				else if(useCTRAM == true)
                 {
                     pb.updateCarbonTransport();
                 }

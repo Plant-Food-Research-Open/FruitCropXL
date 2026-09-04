@@ -1,0 +1,9 @@
+*.log
+single_leaf_carbon_daily_summary.csv
+single_leaf_carbon_diagnostic.png
+single_leaf_carbon_initial_sensitivity.csv
+single_leaf_carbon_cp_switch.csv
+single_leaf_carbon_photoperiod.csv
+single_leaf_carbon_cloudy_accounting.csv
+whole_tree_loading_capacity_diagnosis.csv
+.mplconfig/

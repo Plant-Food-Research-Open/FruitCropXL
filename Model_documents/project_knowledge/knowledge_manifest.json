@@ -1,6 +1,6 @@
 {
   "knowledge_pack": "FruitCropXL project knowledge",
-  "last_updated": "2026-08-30",
+  "last_updated": "2026-09-03",
   "location": "Model_documents/project_knowledge",
   "entries": [
     {
@@ -20,7 +20,7 @@
       "description": "High-level model purpose, scales, and use cases.",
       "content_sha256": "f84866446a603888dc6ac998cfe6ceb5e0f5f5d22e9b6ca55c4c9b8b06182e20",
       "resolved_source_count": 3,
-      "source_snapshot_sha256": "756da78eb5fc1fbb5b887a41270e7f0d1ac769d237be09527d61b40dbdb73f68"
+      "source_snapshot_sha256": "05e8453c7fc0beb0aaaaa5d00bb99db8018a077a01d934c9aa5fae5510b0b6a5"
     },
     {
       "file": "01_repo_structure.md",
@@ -39,7 +39,7 @@
       "description": "Where core code, docs, scenarios, outputs, and tests live.",
       "content_sha256": "3c634da5459b65235e8b403e8ea39dc15164bbb6d305d40af478ce7aae38b7e4",
       "resolved_source_count": 4,
-      "source_snapshot_sha256": "d3c515fbe31efd9155c3b99a50f63336653823958daa7ee45fcd8e1b2c9802fa"
+      "source_snapshot_sha256": "d79423088d93d4286cda7738afd79dbb72674075e2039f72d21dd0d2bf1225c9"
     },
     {
       "file": "02_model_architecture.md",
@@ -99,7 +99,7 @@
       "description": "Condensed process-module behavior and assumptions.",
       "content_sha256": "c13c25a23c95250c656d7e0e45224d93ca80939b13ed975db7f8c14d738d9c68",
       "resolved_source_count": 5,
-      "source_snapshot_sha256": "b2a55a9134b5a98b5cb719a259645479376f36023a38c31eb188f074d5ff6fc7"
+      "source_snapshot_sha256": "b794f25c7aebda03f0740176f948d4a5dcd084ecf76469a97f11e8386bb31e54"
     },
     {
       "file": "05_species_and_modularity.md",
@@ -118,7 +118,7 @@
       "description": "Apple/grapevine routing and major module toggles.",
       "content_sha256": "fbfb3f93bec97c3389a94bb9418435fdb6f0e2ac23b70f53ff8d619956dfdd01",
       "resolved_source_count": 4,
-      "source_snapshot_sha256": "015448fa98df945b6e0c47cc0479eb108c2ebef9f7b8d1780b60872d25d0dac5"
+      "source_snapshot_sha256": "c08177d3dfa5721f0f41f35812c7827f2ae14cd2f36feca8eeb3193379c2e547"
     },
     {
       "file": "06_inputs_outputs_and_configs.md",
@@ -138,7 +138,7 @@
       "description": "Scenario conventions, key switches, outputs, and fragile settings.",
       "content_sha256": "b1c0eb217a12ddc05c62e8d9a52e3a844a1c863b02c899e1f3a7cf5b6c9691b8",
       "resolved_source_count": 5,
-      "source_snapshot_sha256": "5767269fac6968d8f0fd8190ea5e5d4c14e5aa7673d457c284e35c7d7e8dbc4e"
+      "source_snapshot_sha256": "85d2fef45faecd62ff52153719e166123d0e23e04a2912fec6b5649cd2ef36fa"
     },
     {
       "file": "07_testing_and_ci.md",
@@ -164,7 +164,7 @@
       "description": "Portable smoke tests, local acceptance, and script roles.",
       "content_sha256": "168af2dbd52ae0f3a543f262b6964829eb3775050c28715162bf46a85e75f7fd",
       "resolved_source_count": 11,
-      "source_snapshot_sha256": "ee6aef037af573c8342bb61f9fccb35e21d83c295772fa0161e0e47cb932df46"
+      "source_snapshot_sha256": "a504ea0493fc36d7ac49da4555d8f28a006aa4c5a43641413b3785d85d8f653f"
     },
     {
       "file": "08_coding_conventions.md",
@@ -182,7 +182,7 @@
       "description": "Compatibility and safety conventions for edits.",
       "content_sha256": "8f35a2fe4aaa6940366c5df92f773b512677b63aa5f377b24b785954261396b7",
       "resolved_source_count": 2,
-      "source_snapshot_sha256": "6d2d1a74801097cc32343e10fcb91640fa74d1d0f4b93c9c86c15e0246051c33"
+      "source_snapshot_sha256": "475c40691d7ad4d7608d9478de198e72c407f8968b6689bb3d5370a0540c3d07"
     },
     {
       "file": "09_recent_project_decisions.md",
@@ -202,7 +202,7 @@
       "description": "Recent stable project rules to preserve behavior and workflows.",
       "content_sha256": "4420bfa7d7229376fc123f89ad0f227fb1a6483666a461da737f794dbb0be401",
       "resolved_source_count": 4,
-      "source_snapshot_sha256": "b6f2d70e7f54dcb86ebf4ec40a0d3caf6cff47fd54c09d364968d14541dd6d9d"
+      "source_snapshot_sha256": "176d594dda9253005e2dce5877e71dda015dd6c704f999383375fd2fc9c2bc93"
     },
     {
       "file": "10_key_references.md",
@@ -219,14 +219,14 @@
       ],
       "description": "Annotated local-paper index and when to consult each reference.",
       "content_sha256": "1c6df652f68db7ab913365a6883e3e3f44c94074d2780e0654e9dffffe97338a",
-      "resolved_source_count": 60,
-      "source_snapshot_sha256": "bbc5afefeeec33696492f63a0f5cecd6e8b39680029a2ceea4fbc6e70f090c2e"
+      "resolved_source_count": 61,
+      "source_snapshot_sha256": "13f67641bf34f6f1b6051f1ddb7df6ac4560a78b31ddd2fa7ffd5d380fdc39c8"
     }
   ],
   "schema_version": 2,
   "generated_by": "bash_scripts/update_project_knowledge.sh",
   "generated_bundle": "generated_knowledge_bundle.md",
-  "source_snapshot_sha256": "09910a16bf1b5e5b75e71740cc656283d61bb33e8a61c346a06e021d4784feff",
+  "source_snapshot_sha256": "6e10527a2d5084cd07e95c90d5fae7d7ec1bf08011122044f0cd914f80007ad2",
   "agent_knowledge": {
     "skill": ".agents/skills/fruitcropxl/SKILL.md",
     "curated_lessons": ".agents/skills/fruitcropxl/references/recent-stable-lessons.md",

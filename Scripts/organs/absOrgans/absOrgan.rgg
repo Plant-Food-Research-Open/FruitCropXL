@@ -2112,6 +2112,28 @@ module PhotosynthateOrgan extends GrowingOrgan implements ILightInterceptable
 	double Ea_min = 1e-6;  
 	/** Potential water flux. */
 	double waterFluxPotential;
+
+	/** Carbon inhibition already accepted from the previous model step. */
+	float getPhotosynthesisCarbonInhibition() {
+		if (this instanceof Leaf) {
+			return ((Leaf) this).getLeafPhotosynthesisCarbonInhibition();
+		}
+		return calcPhotosynthesisNSCInhibition((float) this.fNSC);
+	}
+
+	/** Preserve legacy Jmax sensitivity outside leaf starch-acclimation mode. */
+	float getPhotosynthesisJmaxCarbonSensitivity() {
+		if (this instanceof Leaf
+				&& ("starchAcclimation".equals(leafPhotosynthesisCarbonFeedback)
+					|| "carbohydrateExcessAcclimation".equals(leafPhotosynthesisCarbonFeedback))) {
+			double sensitivity = starchFeedbackJmaxSensitivity;
+			if (Double.isNaN(sensitivity) || Double.isInfinite(sensitivity)) {
+				sensitivity = 0.30;
+			}
+			return (float) Math.max(0.0, Math.min(1.0, sensitivity));
+		}
+		return alphaJ;
+	}
 	/** Potential stomatal conductance for water (m s-1), calculated in calcAlim. */
 	@JsonPropertyDescription("Potential stomatal conductance for water before hydraulic limitation.")
 	@Unit("m/s")
@@ -2347,7 +2369,9 @@ module PhotosynthateOrgan extends GrowingOrgan implements ILightInterceptable
 			
 			 
 			if (i == 1) {
-				AlimResult = calcAlim(incPARm2, leafNcontent, Ta, rh, g0, this.fNSC, this.organType);
+				AlimResult = calcAlim(incPARm2, leafNcontent, Ta, rh, g0,
+					getPhotosynthesisCarbonInhibition(),
+					getPhotosynthesisJmaxCarbonSensitivity(), this.organType);
 				Alim = AlimResult[0];
 				GSWpm = Math.max(AlimResult[1], 1e-6);
 				Rd = AlimResult[2];
@@ -2357,7 +2381,9 @@ module PhotosynthateOrgan extends GrowingOrgan implements ILightInterceptable
 			}
 			if (i == 2) {
 				if(Double.isNaN(Tleaf)) Tleaf = Ta;
-				AlimResult = calcAlim(incPARm2, leafNcontent, Tleaf, rh, g0, this.fNSC, this.organType);
+				AlimResult = calcAlim(incPARm2, leafNcontent, Tleaf, rh, g0,
+					getPhotosynthesisCarbonInhibition(),
+					getPhotosynthesisJmaxCarbonSensitivity(), this.organType);
 				Alim = AlimResult[0];
 				GSWpm = Math.max(AlimResult[1], 1e-6);
 				Rd = AlimResult[2];
@@ -2374,7 +2400,9 @@ module PhotosynthateOrgan extends GrowingOrgan implements ILightInterceptable
      */
 	boolean shouldCalcAnet() 
 	{
-
+		if (this instanceof Leaf && ((Leaf) this).usesMatureTwoPoolCarbon()) {
+			return isPhotoperiodLight() && this.area > 1e-4;
+		}
 		if(!isLeafGasExchangeTestScenario()) {
 			return(globalRadiation > LIGHT_THRESHOLD && this.area > 1e-4);
 		} else {
@@ -2680,7 +2708,9 @@ private int index = 0;
 		Tleaf = calcTleaf(absm2,Ta,windSpeed,leafHeight_pesudo,leafWidth_pesudo,Ea); 
 		if(Double.isNaN(Tleaf)) Tleaf = Ta;
 		// new net photosynthesis rate
-		AlimResult = calcAlim(incPARm2,leafNcontent,Tleaf,rh, g0_leaf, this.fNSC, this.organType); 
+		AlimResult = calcAlim(incPARm2,leafNcontent,Tleaf,rh, g0_leaf,
+			getPhotosynthesisCarbonInhibition(),
+			getPhotosynthesisJmaxCarbonSensitivity(), this.organType);
 		
 		Alim = AlimResult[0];
 		GSWpm = Math.max(AlimResult[1], 1e-6);

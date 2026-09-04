@@ -373,6 +373,27 @@ global boolean addBuds = false;
 global boolean inputVesselConditions = false;
 /** Use detail carbon transport model or not; normally a central carbon pool is enough for symmetric canopy. */
 global boolean useCTRAM = false;
+/** Leaf reserve representation: aggregateNSC (legacy default) or solubleStarch. */
+global String leafCarbonModel = "aggregateNSC";
+/** Leaf photosynthetic carbon feedback: legacyTotalNSC, starchAcclimation,
+ * carbohydrateExcessAcclimation, or none. */
+global String leafPhotosynthesisCarbonFeedback = "legacyTotalNSC";
+/** Explicit opt-in for the deterministic single-leaf carbon validation boundary. */
+global boolean singleLeafCarbonTest = false;
+/** Use a prescribed common-pool phloem sugar mass fraction in the single-leaf test. */
+global boolean imposePhloemSugar = false;
+/** Prescribed phloem sugar boundary (g sugar g-1 phloem sap). */
+global double imposedPhloemSugarMassFraction = 0.10;
+/** Enable the reversible low-high-low boundary in the single-leaf test. */
+global boolean imposedPhloemSugarSwitchEnabled = false;
+/** High-boundary start step, inclusive (-). */
+global int imposedPhloemSugarHighStartStep = 48;
+/** Return-to-low start step, inclusive (-). */
+global int imposedPhloemSugarLowReturnStep = 120;
+/** Low prescribed boundary for the reversible test (g sugar g-1 phloem sap). */
+global double imposedPhloemSugarLowMassFraction = 0.05;
+/** High prescribed boundary for the reversible test (g sugar g-1 phloem sap). */
+global double imposedPhloemSugarHighMassFraction = 0.20;
 /** If true, trophic competition will be used to control axis organogenesis. */
 global boolean useTrophicCompetition = false;
 
@@ -676,10 +697,12 @@ public static boolean isLeafGasExchangeTestScenario() {
 
 /**
  * True only when the whole-plant hydraulic solve is intentionally bypassed.
- * singleLeaf shares the light/test leaf path but retains its existing plant hydraulics.
+ * Normal singleLeaf retains its existing hydraulics; the explicit carbon test
+ * uses the deterministic leaf-only boundary.
  */
 public static boolean isLeafHydraulicBypassTestScenario() {
-	return isLeafGasExchangeTestScenario() && "photosynthesisTest".equals(special_scenario);
+	return "photosynthesisTest".equals(special_scenario)
+		|| ("singleLeaf".equals(special_scenario) && singleLeafCarbonTest);
 }
 /**
  * Show text labels with leaves and organs indicating fraction of potential biomass.

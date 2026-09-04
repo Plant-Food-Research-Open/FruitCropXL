@@ -75,6 +75,26 @@ global float r_vcmax_to_fnsc_max = 0.80;
 global float n_vcmax_to_fnsc = 2.0;
 /** Relative sensitivity of Jmax to the Vcmax NSC inhibition (dimensionless; empirical). */
 global float alphaJ = 0.30;
+/** Starch/structural-C threshold for optional slow acclimation (dimensionless). */
+global double starchFeedbackReferenceFractionStructural = 0.05;
+/** Maximum fractional Vcmax inhibition in starch-acclimation mode. */
+global double starchFeedbackMaximumInhibition = 0.50;
+/** Hill half-saturation of excess starch/structural C (dimensionless). */
+global double starchFeedbackHalfSaturation = 0.05;
+/** Hill exponent for the starch excess signal (dimensionless). */
+global double starchFeedbackHillExponent = 2.0;
+/** Slow acclimation time constant (h). */
+global double starchFeedbackTimeConstantHours = 48.0;
+/** Relative Jmax sensitivity to the accepted starch inhibition state. */
+global double starchFeedbackJmaxSensitivity = 0.30;
+/** Soluble-C/structural-C threshold for combined excess acclimation. */
+global double solubleFeedbackReferenceFractionStructural = 0.08;
+/** Hill half-saturation of excess soluble C/structural C. */
+global double solubleFeedbackHalfSaturation = 0.05;
+/** Hill exponent for the soluble-carbon excess signal. */
+global double solubleFeedbackHillExponent = 2.0;
+/** Weight of the soluble response relative to the starch response, [0,1]. */
+global double solubleFeedbackWeight = 0.0;
 global float leafTypeEffect;
 
 
@@ -126,6 +146,66 @@ boolean shouldPrintInfo = false;
 				alphaJ = config.getDouble("alphaJ");
 			} catch (RuntimeException e) {
 				// Legacy parameter files omit the weaker Jmax NSC response; retain 0.30.
+			}
+			try {
+				starchFeedbackReferenceFractionStructural = config.getDouble(
+					"starchFeedbackReferenceFractionStructural", 0.05);
+			} catch (RuntimeException e) {
+				starchFeedbackReferenceFractionStructural = 0.05;
+			}
+			try {
+				starchFeedbackMaximumInhibition = config.getDouble(
+					"starchFeedbackMaximumInhibition", 0.50);
+			} catch (RuntimeException e) {
+				starchFeedbackMaximumInhibition = 0.50;
+			}
+			try {
+				starchFeedbackHalfSaturation = config.getDouble(
+					"starchFeedbackHalfSaturation", 0.05);
+			} catch (RuntimeException e) {
+				starchFeedbackHalfSaturation = 0.05;
+			}
+			try {
+				starchFeedbackHillExponent = config.getDouble(
+					"starchFeedbackHillExponent", 2.0);
+			} catch (RuntimeException e) {
+				starchFeedbackHillExponent = 2.0;
+			}
+			try {
+				starchFeedbackTimeConstantHours = config.getDouble(
+					"starchFeedbackTimeConstantHours", 48.0);
+			} catch (RuntimeException e) {
+				starchFeedbackTimeConstantHours = 48.0;
+			}
+			try {
+				starchFeedbackJmaxSensitivity = config.getDouble(
+					"starchFeedbackJmaxSensitivity", 0.30);
+			} catch (RuntimeException e) {
+				starchFeedbackJmaxSensitivity = 0.30;
+			}
+			try {
+				solubleFeedbackReferenceFractionStructural = config.getDouble(
+					"solubleFeedbackReferenceFractionStructural", 0.08);
+			} catch (RuntimeException e) {
+				solubleFeedbackReferenceFractionStructural = 0.08;
+			}
+			try {
+				solubleFeedbackHalfSaturation = config.getDouble(
+					"solubleFeedbackHalfSaturation", 0.05);
+			} catch (RuntimeException e) {
+				solubleFeedbackHalfSaturation = 0.05;
+			}
+			try {
+				solubleFeedbackHillExponent = config.getDouble(
+					"solubleFeedbackHillExponent", 2.0);
+			} catch (RuntimeException e) {
+				solubleFeedbackHillExponent = 2.0;
+			}
+			try {
+				solubleFeedbackWeight = config.getDouble(
+					"solubleFeedbackWeight", 0.0);
+			} catch (RuntimeException e) {
+				solubleFeedbackWeight = 0.0;
 			}
 			slope_Rd        = config.getDouble("slope_Rd", 0.23);
 			slope_kappa2LL  = config.getDouble("slope_kappa2LL", 0.072185);
@@ -270,7 +350,8 @@ boolean shouldPrintInfo = false;
 			 float temp,  // for the first iteraturation use air temperature instead, for second iteraturation use Tleaf
 			 float  RH,     // relative humidity
 			 float g0_leaf,
-			 float fNSC,
+			 float carbonInhibition,
+			 float jmaxCarbonSensitivity,
 			 String organType
 			 ) {
 	double[] calcAlimResult = new double[3];
@@ -297,9 +378,11 @@ boolean shouldPrintInfo = false;
 	
 	
 	float kappa2LL = slope_kappa2LL* leafN +intc_kappa2LL;
-	// Apply the same bounded NSC response to Jmax, with weaker empirical sensitivity.
-	float reduc = calcPhotosynthesisNSCInhibition(fNSC);
-	float Jmax25 = organTypeEffect * (1.0 - alphaJ * reduc) * slope_Jmax * (leafN - leafN_min) ;
+	// The caller supplies either legacy total-NSC inhibition or the previous
+	// accepted slow starch-acclimation state, avoiding a same-hour feedback loop.
+	float reduc = Math.max(0.0f, Math.min(1.0f, carbonInhibition));
+	float jSensitivity = Math.max(0.0f, Math.min(1.0f, jmaxCarbonSensitivity));
+	float Jmax25 = organTypeEffect * (1.0 - jSensitivity * reduc) * slope_Jmax * (leafN - leafN_min) ;
 	
 	float Jmax=(Jmax25*Math.exp((1/298.0-1/(temp+273.0))*EA_Jmax/R) * (1+Math.exp(sj/R-DEA_Jmax/298.0/R))/
 			(1+Math.exp(sj/R-1/(temp+273.0)*DEA_Jmax/R)));

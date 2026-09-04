@@ -102,6 +102,36 @@ static double evaluatePhloemSugarConcentrationResidual(PlantBase pb, double suga
 }
 
 /**
+ * Apply the deterministic single-leaf common-pool boundary once. This invokes
+ * the same organ allocation functions as the solver residual but performs no
+ * root finding. Units are g sugar g-1 phloem sap (mass fraction).
+ */
+public static void applyImposedPhloemSugarBoundary(PlantBase pb,
+		double sugarMassFraction) {
+	if (pb == null) return;
+	double imposed = sugarMassFraction;
+	if (Double.isNaN(imposed) || Double.isInfinite(imposed) || imposed < 0.0) {
+		imposed = 0.10;
+	}
+	evaluatePhloemSugarConcentrationResidual(pb, imposed);
+	pb.sugarConcentration_phloem = imposed;
+	pb.sugarConcentration_phloem_pre = imposed;
+	updateCarbonPartition(pb);
+}
+
+/** Resolve the configured deterministic single-leaf boundary for this step. */
+public static double currentImposedPhloemSugarMassFraction() {
+	if (!imposedPhloemSugarSwitchEnabled) {
+		return imposedPhloemSugarMassFraction;
+	}
+	if (step >= imposedPhloemSugarHighStartStep
+			&& step < imposedPhloemSugarLowReturnStep) {
+		return imposedPhloemSugarHighMassFraction;
+	}
+	return imposedPhloemSugarLowMassFraction;
+}
+
+/**
  * Calculate the phloem sugar concentration using a stable numerical solver.
  * <p>
  * This method:

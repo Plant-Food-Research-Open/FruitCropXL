@@ -1860,6 +1860,32 @@ private static void loadProperties(String file_name) {
 	
 	useComplexRoot = config.getBoolean("useComplexRoot", false);
 	useComplexLeaf = config.getBoolean("useComplexLeaf", false);
+	try {
+		leafCarbonModel = config.getString("leafCarbonModel", "aggregateNSC");
+	} catch (RuntimeException e) {
+		// Compatibility fallback: legacy model options omit the leaf reserve representation.
+		leafCarbonModel = "aggregateNSC";
+	}
+	if (!"aggregateNSC".equals(leafCarbonModel) && !"solubleStarch".equals(leafCarbonModel)) {
+		println("[Config] WARN: unknown leafCarbonModel='" + leafCarbonModel
+			+ "'; using aggregateNSC.");
+		leafCarbonModel = "aggregateNSC";
+	}
+	try {
+		leafPhotosynthesisCarbonFeedback = config.getString(
+			"leafPhotosynthesisCarbonFeedback", "legacyTotalNSC");
+	} catch (RuntimeException e) {
+		// Compatibility fallback: preserve the executable total-NSC Hill response.
+		leafPhotosynthesisCarbonFeedback = "legacyTotalNSC";
+	}
+	if (!"legacyTotalNSC".equals(leafPhotosynthesisCarbonFeedback)
+			&& !"starchAcclimation".equals(leafPhotosynthesisCarbonFeedback)
+			&& !"carbohydrateExcessAcclimation".equals(leafPhotosynthesisCarbonFeedback)
+			&& !"none".equals(leafPhotosynthesisCarbonFeedback)) {
+		println("[Config] WARN: unknown leafPhotosynthesisCarbonFeedback='"
+			+ leafPhotosynthesisCarbonFeedback + "'; using legacyTotalNSC.");
+		leafPhotosynthesisCarbonFeedback = "legacyTotalNSC";
+	}
 	fruitModule = resolveFruitModule(config);
 	try {
 		String rootBiomassInitModeCandidate = config.getString("rootBiomassInitMode", "__CODEX_ROOT_BIOMASS_INIT_MODE_MISSING__");
@@ -2048,6 +2074,77 @@ private static void loadProperties(String file_name) {
 		leafPhotosynthesisFallbackLAI = 1.0e-4;
 		leafPhotosynthesisFallbackFpar = 0.30;
 		continueFallbackUntilLeafLightValid = true;
+	}
+
+	try {
+		config.setCategoryContext("single_leaf_carbon_test");
+		singleLeafCarbonTest = config.getBoolean("singleLeafCarbonTest", false);
+		imposePhloemSugar = config.getBoolean("imposePhloemSugar", false);
+		imposedPhloemSugarMassFraction = config.getDouble(
+			"imposedPhloemSugarMassFraction", 0.10);
+	} catch (RuntimeException e) {
+		// Compatibility fallback: the prescribed boundary is test-only and opt-in.
+		singleLeafCarbonTest = false;
+		imposePhloemSugar = false;
+		imposedPhloemSugarMassFraction = 0.10;
+		imposedPhloemSugarSwitchEnabled = false;
+		imposedPhloemSugarHighStartStep = 48;
+		imposedPhloemSugarLowReturnStep = 120;
+		imposedPhloemSugarLowMassFraction = 0.05;
+		imposedPhloemSugarHighMassFraction = 0.20;
+	}
+	try {
+		imposedPhloemSugarSwitchEnabled = config.getBoolean(
+			"imposedPhloemSugarSwitchEnabled", false);
+	} catch (RuntimeException e) {
+		imposedPhloemSugarSwitchEnabled = false;
+	}
+	try {
+		imposedPhloemSugarHighStartStep = config.getInteger(
+			"imposedPhloemSugarHighStartStep", 48);
+	} catch (RuntimeException e) {
+		imposedPhloemSugarHighStartStep = 48;
+	}
+	try {
+		imposedPhloemSugarLowReturnStep = config.getInteger(
+			"imposedPhloemSugarLowReturnStep", 120);
+	} catch (RuntimeException e) {
+		imposedPhloemSugarLowReturnStep = 120;
+	}
+	try {
+		imposedPhloemSugarLowMassFraction = config.getDouble(
+			"imposedPhloemSugarLowMassFraction", 0.05);
+	} catch (RuntimeException e) {
+		imposedPhloemSugarLowMassFraction = 0.05;
+	}
+	try {
+		imposedPhloemSugarHighMassFraction = config.getDouble(
+			"imposedPhloemSugarHighMassFraction", 0.20);
+	} catch (RuntimeException e) {
+		imposedPhloemSugarHighMassFraction = 0.20;
+	}
+	if (!("singleLeaf".equals(special_scenario) && singleLeafCarbonTest)) {
+		imposePhloemSugar = false;
+		imposedPhloemSugarSwitchEnabled = false;
+	}
+	if (Double.isNaN(imposedPhloemSugarMassFraction)
+			|| Double.isInfinite(imposedPhloemSugarMassFraction)
+			|| imposedPhloemSugarMassFraction < 0.0) {
+		imposedPhloemSugarMassFraction = 0.10;
+	}
+	if (imposedPhloemSugarHighStartStep < 0
+			|| imposedPhloemSugarLowReturnStep <= imposedPhloemSugarHighStartStep) {
+		imposedPhloemSugarSwitchEnabled = false;
+		println("[Config] WARN: invalid imposed-phloem switch steps; switch disabled.");
+	}
+	if (Double.isNaN(imposedPhloemSugarLowMassFraction)
+			|| Double.isInfinite(imposedPhloemSugarLowMassFraction)
+			|| imposedPhloemSugarLowMassFraction < 0.0
+			|| Double.isNaN(imposedPhloemSugarHighMassFraction)
+			|| Double.isInfinite(imposedPhloemSugarHighMassFraction)
+			|| imposedPhloemSugarHighMassFraction < 0.0) {
+		imposedPhloemSugarSwitchEnabled = false;
+		println("[Config] WARN: invalid imposed-phloem switch concentrations; switch disabled.");
 	}
 	if (Double.isNaN(leafPhotosynthesisFallbackLAI) || Double.isInfinite(leafPhotosynthesisFallbackLAI) ||
 		leafPhotosynthesisFallbackLAI < 0.0) {
