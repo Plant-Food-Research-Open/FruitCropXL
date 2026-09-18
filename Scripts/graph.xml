@@ -475,10 +475,10 @@
    <data gx:name="fruitVisibility" gx:value="true"/>
    <data gx:name="demoVisualization" gx:value="false"/>
    <data gx:name="stepwiseOutput" gx:value="false"/>
-   <data gx:name="MAINPATH" gx:value="/home/jzhu/Workspace/Github/0-functional-structural-fruit-crop-model/Scripts//../"/>
-   <data gx:name="PATH_INPUT" gx:value="/home/jzhu/Workspace/Github/0-functional-structural-fruit-crop-model/Scripts//../Model_input/"/>
-   <data gx:name="PATH_SCENARIOS" gx:value="/home/jzhu/Workspace/Github/0-functional-structural-fruit-crop-model/Scripts//../Model_scenarios/"/>
-   <data gx:name="PATH_OUTPUT" gx:value="/home/jzhu/Workspace/Github/0-functional-structural-fruit-crop-model/Scripts//../Model_output/default/"/>
+   <data gx:name="MAINPATH" gx:value="/home/jzhu/Workspace/Github/FruitCropXL/0-functional-structural-fruit-crop-model/Scripts//../"/>
+   <data gx:name="PATH_INPUT" gx:value="/home/jzhu/Workspace/Github/FruitCropXL/0-functional-structural-fruit-crop-model/Scripts//../Model_input/"/>
+   <data gx:name="PATH_SCENARIOS" gx:value="/home/jzhu/Workspace/Github/FruitCropXL/0-functional-structural-fruit-crop-model/Scripts//../Model_scenarios/"/>
+   <data gx:name="PATH_OUTPUT" gx:value="/home/jzhu/Workspace/Github/FruitCropXL/0-functional-structural-fruit-crop-model/Scripts//../Model_output/default/"/>
    <data gx:name="propFile" gx:value="config.properties.txt"/>
    <serialized gx:name="readProp" gx:value="rO0ABXNyABRqYXZhLnV0aWwuUHJvcGVydGllczkS0HpwNj6YAgABTAAIZGVmYXVsdHN0ABZMamF2YS91dGlsL1Byb3BlcnRpZXM7eHIAE2phdmEudXRpbC5IYXNodGFibGUTuw8lIUrkuAMAAkYACmxvYWRGYWN0b3JJAAl0aHJlc2hvbGR4cD9AAAAAAAACdwgAAAADAAAAAHhw"/>
    <data gx:name="inputEnvironmentCondition" gx:value="true"/>
@@ -596,15 +596,15 @@
    <data gx:name="FRACTION_SORBITOL" gx:value="0.75"/>
    <data gx:name="CSV_QUOTE_CHAR" gx:value="'34'"/>
    <data gx:name="CSV_COLUMN_SEPARATOR" gx:value="'44'"/>
-   <data gx:name="plantLevelOutputFilePath" gx:value="/home/jzhu/Workspace/Github/0-functional-structural-fruit-crop-model/Scripts//../Model_output/default/plant-level-default.csv"/>
-   <data gx:name="meanFruitOutputFilePath" gx:value="/home/jzhu/Workspace/Github/0-functional-structural-fruit-crop-model/Scripts//../Model_output/default/mean-fruit-default.csv"/>
-   <data gx:name="fieldLevelOutputFilePath" gx:value="/home/jzhu/Workspace/Github/0-functional-structural-fruit-crop-model/Scripts//../Model_output/default/field-level-default.csv"/>
-   <data gx:name="waterFluxSolverDebugOutputFilePath" gx:value="/home/jzhu/Workspace/Github/0-functional-structural-fruit-crop-model/Scripts//../Model_output/default/waterFluxSolverDebug_default.csv"/>
-   <data gx:name="runProgressOutputFilePath" gx:value="/home/jzhu/Workspace/Github/0-functional-structural-fruit-crop-model/Scripts//../Model_output/default/run-progress.csv"/>
-   <data gx:name="plantLevelMetadataFilePath" gx:value="/home/jzhu/Workspace/Github/0-functional-structural-fruit-crop-model/Scripts//../Model_output/default/plant-level.metadata.json"/>
-   <data gx:name="meanFruitMetadataFilePath" gx:value="/home/jzhu/Workspace/Github/0-functional-structural-fruit-crop-model/Scripts//../Model_output/default/mean-fruit.metadata.json"/>
-   <data gx:name="fieldLevelMetadataFilePath" gx:value="/home/jzhu/Workspace/Github/0-functional-structural-fruit-crop-model/Scripts//../Model_output/default/field-level.metadata.json"/>
-   <data gx:name="waterFluxSolverDebugMetadataFilePath" gx:value="/home/jzhu/Workspace/Github/0-functional-structural-fruit-crop-model/Scripts//../Model_output/default/waterFluxSolverDebug.metadata.json"/>
+   <data gx:name="plantLevelOutputFilePath" gx:value="/home/jzhu/Workspace/Github/FruitCropXL/0-functional-structural-fruit-crop-model/Scripts//../Model_output/default/plant-level-default.csv"/>
+   <data gx:name="meanFruitOutputFilePath" gx:value="/home/jzhu/Workspace/Github/FruitCropXL/0-functional-structural-fruit-crop-model/Scripts//../Model_output/default/mean-fruit-default.csv"/>
+   <data gx:name="fieldLevelOutputFilePath" gx:value="/home/jzhu/Workspace/Github/FruitCropXL/0-functional-structural-fruit-crop-model/Scripts//../Model_output/default/field-level-default.csv"/>
+   <data gx:name="waterFluxSolverDebugOutputFilePath" gx:value="/home/jzhu/Workspace/Github/FruitCropXL/0-functional-structural-fruit-crop-model/Scripts//../Model_output/default/waterFluxSolverDebug_default.csv"/>
+   <data gx:name="runProgressOutputFilePath" gx:value="/home/jzhu/Workspace/Github/FruitCropXL/0-functional-structural-fruit-crop-model/Scripts//../Model_output/default/run-progress.csv"/>
+   <data gx:name="plantLevelMetadataFilePath" gx:value="/home/jzhu/Workspace/Github/FruitCropXL/0-functional-structural-fruit-crop-model/Scripts//../Model_output/default/plant-level.metadata.json"/>
+   <data gx:name="meanFruitMetadataFilePath" gx:value="/home/jzhu/Workspace/Github/FruitCropXL/0-functional-structural-fruit-crop-model/Scripts//../Model_output/default/mean-fruit.metadata.json"/>
+   <data gx:name="fieldLevelMetadataFilePath" gx:value="/home/jzhu/Workspace/Github/FruitCropXL/0-functional-structural-fruit-crop-model/Scripts//../Model_output/default/field-level.metadata.json"/>
+   <data gx:name="waterFluxSolverDebugMetadataFilePath" gx:value="/home/jzhu/Workspace/Github/FruitCropXL/0-functional-structural-fruit-crop-model/Scripts//../Model_output/default/waterFluxSolverDebug.metadata.json"/>
   </node>
   <node id="30633906" type="plantParameters" edges="+">
    <data gx:name="extentIndex" gx:value="7"/>
